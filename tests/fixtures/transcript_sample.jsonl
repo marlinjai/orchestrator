@@ -1,4 +1,4 @@
-{"role":"user","message":{"content":[{"type":"text","text":"do the thing"}]}}
-{"role":"assistant","message":{"content":[{"type":"text","text":"I will do it."}]}}
-{"role":"assistant","message":{"content":[{"type":"tool_use","name":"Read","input":{"file_path":"/x"}}]}}
-{"role":"assistant","message":{"content":[{"type":"text","text":"Done. Should I proceed?"}]}}
+{"type":"user","message":{"role":"user","content":[{"type":"text","text":"do the thing"}]},"uuid":"u1"}
+{"type":"assistant","message":{"role":"assistant","content":[{"type":"text","text":"I will do it."}]},"uuid":"a1"}
+{"type":"assistant","message":{"role":"assistant","content":[{"type":"tool_use","name":"Read","input":{"file_path":"/x"}}]},"uuid":"a2"}
+{"type":"assistant","message":{"role":"assistant","content":[{"type":"text","text":"Done. Should I proceed?"}]},"uuid":"a3"}

@@ -1,5 +1,4 @@
 from pathlib import Path
-import pytest
 from orchestrator.transcript import (
     AssistantTurn,
     last_assistant_text,
@@ -43,9 +42,9 @@ def test_last_n_turns_caps_at_n():
 def test_parse_transcript_skips_corrupt_lines(tmp_path: Path):
     p = tmp_path / "t.jsonl"
     p.write_text(
-        '{"role":"user","message":{"content":[{"type":"text","text":"a"}]}}\n'
+        '{"type":"user","message":{"role":"user","content":[{"type":"text","text":"a"}]}}\n'
         "not json at all\n"
-        '{"role":"assistant","message":{"content":[{"type":"text","text":"b"}]}}\n'
+        '{"type":"assistant","message":{"role":"assistant","content":[{"type":"text","text":"b"}]}}\n'
     )
     msgs = parse_transcript(p)
     assert len(msgs) == 2

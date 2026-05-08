@@ -23,14 +23,37 @@ def parse_transcript(path: Path) -> list[dict]:
     return msgs
 
 
+def _get_role(msg: dict) -> str:
+    """Return the message role, checking both top-level and nested locations.
+
+    Real Claude Code transcripts nest role inside msg["message"]["role"] and
+    also expose a top-level "type" field ("user", "assistant"). Some legacy or
+    synthetic transcripts may put "role" at the top level. Check all of them.
+    """
+    role = msg.get("role")
+    if isinstance(role, str) and role:
+        return role
+    nested = msg.get("message")
+    if isinstance(nested, dict):
+        nested_role = nested.get("role")
+        if isinstance(nested_role, str) and nested_role:
+            return nested_role
+    top_type = msg.get("type")
+    if isinstance(top_type, str) and top_type in ("user", "assistant", "system"):
+        return top_type
+    return ""
+
+
 def _assistant_text_blocks(msg: dict) -> list[str]:
     content = msg.get("message", {}).get("content", [])
-    return [b.get("text", "") for b in content if b.get("type") == "text"]
+    if not isinstance(content, list):
+        return []
+    return [b.get("text", "") for b in content if isinstance(b, dict) and b.get("type") == "text"]
 
 
 def last_assistant_text(msgs: list[dict]) -> str:
     for m in reversed(msgs):
-        if m.get("role") != "assistant":
+        if _get_role(m) != "assistant":
             continue
         blocks = _assistant_text_blocks(m)
         if blocks:
@@ -41,7 +64,7 @@ def last_assistant_text(msgs: list[dict]) -> str:
 def last_n_turns(msgs: list[dict], n: int) -> list[AssistantTurn]:
     turns: list[AssistantTurn] = []
     for m in msgs:
-        if m.get("role") != "assistant":
+        if _get_role(m) != "assistant":
             continue
         for text in _assistant_text_blocks(m):
             if text:
