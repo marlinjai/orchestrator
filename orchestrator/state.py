@@ -5,7 +5,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Literal
 
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, ValidationError
 
 
 PlanStatus = Literal["pending", "in_progress", "completed", "skipped"]
@@ -59,7 +59,7 @@ def load_state(path: Path) -> State:
         raise ValueError(f"state file corrupt: {path}: {e}") from e
     try:
         return State.model_validate(data)
-    except Exception as e:
+    except ValidationError as e:
         raise ValueError(f"state file schema mismatch: {path}: {e}") from e
 
 
