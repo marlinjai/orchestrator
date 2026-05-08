@@ -1,0 +1,89 @@
+from pathlib import Path
+from unittest.mock import patch
+
+import pytest
+
+from orchestrator.orchestrator import OrchestratorConfig, run_orchestrator
+from orchestrator.proxy import ProxyDecision
+from orchestrator.state import load_state
+
+
+@pytest.fixture
+def task_dir(tmp_path: Path) -> Path:
+    (tmp_path / "goals").mkdir()
+    (tmp_path / "personas").mkdir()
+    (tmp_path / "goals" / "g.md").write_text("test goal")
+    (tmp_path / "personas" / "p.md").write_text("test persona")
+    return tmp_path
+
+
+@pytest.fixture
+def cfg(task_dir: Path) -> OrchestratorConfig:
+    return OrchestratorConfig(
+        task_id="test-task",
+        goal_file=task_dir / "goals" / "g.md",
+        persona_file=task_dir / "personas" / "p.md",
+        project_dir=task_dir,
+        state_dir=task_dir / ".orchestrator" / "test-task",
+        max_iterations=3,
+        max_seconds=60,
+    )
+
+
+async def test_orchestrator_writes_initial_state(cfg: OrchestratorConfig):
+    with patch("orchestrator.orchestrator._run_one_turn") as mock_turn:
+        mock_turn.side_effect = [
+            (["worker said done"], ProxyDecision(action="stop", text="", reasoning="done")),
+        ]
+        await run_orchestrator(cfg)
+    state = load_state(cfg.state_dir / "state.json")
+    assert state.task_id == "test-task"
+    assert state.goal == "test goal"
+    assert state.status == "completed"
+
+
+async def test_orchestrator_iterates_until_proxy_stops(cfg: OrchestratorConfig):
+    with patch("orchestrator.orchestrator._run_one_turn") as mock_turn:
+        mock_turn.side_effect = [
+            (["t1"], ProxyDecision(action="reply", text="continue", reasoning="r")),
+            (["t2"], ProxyDecision(action="reply", text="continue", reasoning="r")),
+            (["t3"], ProxyDecision(action="stop", text="", reasoning="done")),
+        ]
+        await run_orchestrator(cfg)
+    state = load_state(cfg.state_dir / "state.json")
+    assert state.iteration == 3
+    assert state.status == "completed"
+
+
+async def test_orchestrator_halts_on_iteration_cap(cfg: OrchestratorConfig):
+    cfg.max_iterations = 2
+    with patch("orchestrator.orchestrator._run_one_turn") as mock_turn:
+        mock_turn.side_effect = [
+            (["t1"], ProxyDecision(action="reply", text="go", reasoning="r")),
+            (["t2"], ProxyDecision(action="reply", text="go", reasoning="r")),
+        ]
+        await run_orchestrator(cfg)
+    state = load_state(cfg.state_dir / "state.json")
+    assert state.status == "stopped"
+    assert "iteration" in (state.exit_reason or "").lower()
+
+
+async def test_orchestrator_halts_on_kill_switch(cfg: OrchestratorConfig):
+    cfg.state_dir.mkdir(parents=True, exist_ok=True)
+    (cfg.state_dir / "STOP").touch()
+    with patch("orchestrator.orchestrator._run_one_turn") as mock_turn:
+        await run_orchestrator(cfg)
+    state = load_state(cfg.state_dir / "state.json")
+    assert state.status == "stopped"
+    assert "kill" in (state.exit_reason or "").lower()
+    mock_turn.assert_not_called()
+
+
+async def test_orchestrator_halts_on_escalate(cfg: OrchestratorConfig):
+    with patch("orchestrator.orchestrator._run_one_turn") as mock_turn:
+        mock_turn.side_effect = [
+            (["t1"], ProxyDecision(action="escalate", text="need human", reasoning="money")),
+        ]
+        await run_orchestrator(cfg)
+    state = load_state(cfg.state_dir / "state.json")
+    assert state.status == "escalated"
