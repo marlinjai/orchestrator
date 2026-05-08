@@ -1,0 +1,45 @@
+{
+  "task_id": "sample-001",
+  "started_at": "2026-05-08T12:00:00Z",
+  "goal": "example task for fixture",
+  "plan": [
+    {
+      "id": 1,
+      "step": "explore repo",
+      "status": "completed"
+    },
+    {
+      "id": 2,
+      "step": "write code",
+      "status": "in_progress"
+    }
+  ],
+  "current_step_id": 2,
+  "decisions": [
+    {
+      "turn": 1,
+      "question": "proceed?",
+      "answer": "yes",
+      "reasoning": "clear path",
+      "decided_by": "proxy"
+    }
+  ],
+  "files_touched": [
+    "orchestrator/state.py"
+  ],
+  "commits": [
+    "efbdd5f"
+  ],
+  "open_threads": [],
+  "iteration": 2,
+  "max_iterations": 50,
+  "handovers": [
+    {
+      "at_turn": 10,
+      "reason": "context reset",
+      "doc": "handover_001.md"
+    }
+  ],
+  "status": "running",
+  "exit_reason": null
+}
