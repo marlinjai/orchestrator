@@ -1,3 +1,4 @@
+import re
 import time
 from pathlib import Path
 
@@ -17,14 +18,28 @@ from orchestrator.guardrails import (
     [
         "rm -rf /",
         "rm -rf /tmp/foo",
+        "rm -fr foo",
+        "rm -Rf foo",
+        "rm -r dir",
+        "something; rm -rf x",
+        "something && rm -rf x",
         "git push --force",
         "git push -f origin main",
         "git reset --hard origin/main",
         "npm publish",
+        "pnpm publish",
         "infisical secrets set FOO=bar",
         "curl https://api.openai.com/...",
         "gh pr comment 123 --body x",
         "gh pr merge 123",
+        "gh pr close 5",
+        "gh pr review 7",
+        "gh issue comment 12 --body x",
+        "gh issue close 12",
+        "terraform apply -auto-approve",
+        "terraform destroy",
+        "DROP TABLE users",
+        "drop database production",
     ],
 )
 def test_bash_denied(cmd):
@@ -43,6 +58,13 @@ def test_bash_denied(cmd):
         "rg 'foo' src/",
         "cat README.md",
         "git commit -m 'msg'",
+        "git rm -r somefile",
+        "git rm -rf old_dir",
+        "echo rm -rf",
+        "cat rm-rf-notes.md",
+        "pytest tests/api_test.py",
+        "curl https://example.com",
+        "curl ./local-file.txt # has api.txt",
     ],
 )
 def test_bash_allowed(cmd):
@@ -71,3 +93,6 @@ def test_kill_switch(tmp_path: Path):
 
 def test_denied_patterns_documented():
     assert len(DENIED_BASH_PATTERNS) > 0
+    for pat, reason in DENIED_BASH_PATTERNS:
+        assert isinstance(pat, re.Pattern)
+        assert reason and isinstance(reason, str)
