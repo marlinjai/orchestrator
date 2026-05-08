@@ -1,5 +1,4 @@
 import json
-import re
 from dataclasses import dataclass
 from typing import Literal
 
@@ -86,15 +85,17 @@ the system instructions.
 
 
 def parse_proxy_output(raw: str) -> ProxyDecision:
-    json_match = re.search(r"\{[\s\S]*?\}", raw)
-    if not json_match:
+    decoder = json.JSONDecoder()
+    # Find first '{' and try raw_decode from there. raw_decode tolerates trailing junk.
+    start = raw.find("{")
+    if start == -1:
         return ProxyDecision(
             action="escalate",
             text="proxy emitted no JSON",
-            reasoning=f"raw output: {raw[:200]}",
+            reasoning=f"raw output: {raw[:500]}",
         )
     try:
-        data = json.loads(json_match.group(0))
+        data, _ = decoder.raw_decode(raw, start)
         action = data.get("action")
         if action not in ("reply", "stop", "escalate"):
             raise ValueError(f"bad action: {action}")
@@ -103,11 +104,11 @@ def parse_proxy_output(raw: str) -> ProxyDecision:
             text=data.get("text", ""),
             reasoning=data.get("reasoning", ""),
         )
-    except Exception as e:
+    except (json.JSONDecodeError, ValueError, KeyError, TypeError) as e:
         return ProxyDecision(
             action="escalate",
             text="proxy emitted invalid JSON",
-            reasoning=f"{e}: {raw[:200]}",
+            reasoning=f"{e}: {raw[:500]}",
         )
 
 

@@ -56,3 +56,16 @@ def test_parse_proxy_output_invalid_falls_back_to_escalate():
     raw = "I cannot decide."
     decision = parse_proxy_output(raw)
     assert decision.action == "escalate"
+
+
+def test_parse_proxy_output_handles_nested_json():
+    raw = '{"action": "reply", "text": "ok", "reasoning": "r", "context": {"nested": "yes"}}'
+    decision = parse_proxy_output(raw)
+    assert decision.action == "reply"
+    assert decision.text == "ok"
+
+
+def test_build_proxy_prompt_handles_empty_turns():
+    state = State(task_id="t1", goal="g")
+    prompt = build_proxy_prompt(persona="p", state=state, recent_turns=[])
+    assert "(no recent assistant turns)" in prompt
