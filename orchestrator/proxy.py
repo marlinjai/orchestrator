@@ -5,7 +5,7 @@ from typing import Literal
 from claude_agent_sdk import ClaudeAgentOptions, query
 
 from orchestrator.state import State
-from orchestrator.transcript import AssistantTurn
+from orchestrator.transcript import AssistantTurn, extract_text
 
 
 ProxyAction = Literal["reply", "stop", "escalate"]
@@ -126,24 +126,7 @@ async def run_proxy_decision(
     )
     chunks: list[str] = []
     async for msg in query(prompt=prompt, options=options):
-        text = _extract_text(msg)
+        text = extract_text(msg)
         if text:
             chunks.append(text)
     return parse_proxy_output("".join(chunks))
-
-
-def _extract_text(msg) -> str:
-    """Extract text from any SDK message shape. Adapt at smoke-test time."""
-    if isinstance(msg, dict):
-        content = msg.get("message", {}).get("content")
-        if isinstance(content, list):
-            return "".join(b.get("text", "") for b in content if isinstance(b, dict) and b.get("type") == "text")
-        if isinstance(content, str):
-            return content
-    if hasattr(msg, "content"):
-        c = msg.content
-        if isinstance(c, list):
-            return "".join(getattr(b, "text", "") for b in c)
-        if isinstance(c, str):
-            return c
-    return ""

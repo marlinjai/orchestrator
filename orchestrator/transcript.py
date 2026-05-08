@@ -70,3 +70,24 @@ def last_n_turns(msgs: list[dict], n: int) -> list[AssistantTurn]:
             if text:
                 turns.append(AssistantTurn(text=text))
     return turns[-n:]
+
+
+def extract_text(msg) -> str:
+    """Extract text content from any SDK message shape (dict or object).
+
+    Handles both message dict envelopes (from ClaudeSDKClient) and message objects with .content.
+    Returns empty string when no text is present.
+    """
+    if isinstance(msg, dict):
+        content = msg.get("message", {}).get("content")
+        if isinstance(content, list):
+            return "".join(b.get("text", "") for b in content if isinstance(b, dict) and b.get("type") == "text")
+        if isinstance(content, str):
+            return content
+    if hasattr(msg, "content"):
+        c = msg.content
+        if isinstance(c, list):
+            return "".join(getattr(b, "text", "") for b in c)
+        if isinstance(c, str):
+            return c
+    return ""

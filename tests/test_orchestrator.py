@@ -87,3 +87,16 @@ async def test_orchestrator_halts_on_escalate(cfg: OrchestratorConfig):
         await run_orchestrator(cfg)
     state = load_state(cfg.state_dir / "state.json")
     assert state.status == "escalated"
+
+
+async def test_orchestrator_marks_failed_on_sdk_error(cfg: OrchestratorConfig):
+    class FakeError(RuntimeError):
+        pass
+
+    with patch("orchestrator.orchestrator.ClaudeSDKClient") as mock_client_cls:
+        mock_client_cls.return_value.__aenter__.side_effect = FakeError("auth blew up")
+        with pytest.raises(FakeError):
+            await run_orchestrator(cfg)
+    state = load_state(cfg.state_dir / "state.json")
+    assert state.status == "failed"
+    assert "auth blew up" in (state.exit_reason or "")

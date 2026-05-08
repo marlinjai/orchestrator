@@ -1,6 +1,7 @@
 from pathlib import Path
 from orchestrator.transcript import (
     AssistantTurn,
+    extract_text,
     last_assistant_text,
     last_n_turns,
     parse_transcript,
@@ -48,3 +49,28 @@ def test_parse_transcript_skips_corrupt_lines(tmp_path: Path):
     )
     msgs = parse_transcript(p)
     assert len(msgs) == 2
+
+
+def test_extract_text_from_dict_message():
+    msg = {"message": {"content": [{"type": "text", "text": "hello"}, {"type": "tool_use"}]}}
+    assert extract_text(msg) == "hello"
+
+
+def test_extract_text_from_dict_string_content():
+    msg = {"message": {"content": "raw"}}
+    assert extract_text(msg) == "raw"
+
+
+def test_extract_text_returns_empty_for_unknown_shape():
+    assert extract_text({}) == ""
+    assert extract_text(None) == ""
+
+
+class _FakeMsgWithContent:
+    def __init__(self, content):
+        self.content = content
+
+
+def test_extract_text_from_object_with_content():
+    msg = _FakeMsgWithContent([type("B", (), {"text": "world"})()])
+    assert extract_text(msg) == "world"

@@ -12,7 +12,7 @@ from orchestrator.guardrails import (
 )
 from orchestrator.proxy import ProxyDecision, run_proxy_decision
 from orchestrator.state import State, load_state, save_state
-from orchestrator.transcript import AssistantTurn
+from orchestrator.transcript import AssistantTurn, extract_text
 from orchestrator.worker import build_worker_options, run_worker_turn
 
 
@@ -52,7 +52,7 @@ async def _run_one_turn(
 ) -> tuple[list[str], ProxyDecision]:
     chunks: list[str] = []
     async for msg in run_worker_turn(client=client, user_message=user_message):
-        text = _extract_text(msg)
+        text = extract_text(msg)
         if text:
             chunks.append(text)
             console.print(f"[dim]worker:[/dim] {text}", end="")
@@ -63,18 +63,6 @@ async def _run_one_turn(
         recent_turns=recent,
     )
     return chunks, decision
-
-
-def _extract_text(msg) -> str:
-    if isinstance(msg, dict):
-        content = msg.get("message", {}).get("content")
-        if isinstance(content, list):
-            return "".join(b.get("text", "") for b in content if isinstance(b, dict) and b.get("type") == "text")
-    if hasattr(msg, "content"):
-        c = msg.content
-        if isinstance(c, list):
-            return "".join(getattr(b, "text", "") for b in c)
-    return ""
 
 
 async def run_orchestrator(cfg: OrchestratorConfig) -> None:
@@ -98,51 +86,59 @@ async def run_orchestrator(cfg: OrchestratorConfig) -> None:
         denied_bash=[],
     )
 
-    async with ClaudeSDKClient(options=options) as client:
-        next_message = initial_message
-        while True:
-            if iteration_cap_hit(iteration=state.iteration, max_iterations=cfg.max_iterations):
-                state.status = "stopped"
-                state.exit_reason = f"iteration cap reached ({cfg.max_iterations})"
-                save_state(state_path, state)
-                console.print(f"[yellow]{state.exit_reason}[/yellow]")
-                return
-            if wall_clock_cap_hit(started_at=started_at, max_seconds=cfg.max_seconds):
-                state.status = "stopped"
-                state.exit_reason = f"wall-clock cap reached ({cfg.max_seconds}s)"
-                save_state(state_path, state)
-                console.print(f"[yellow]{state.exit_reason}[/yellow]")
-                return
-            if kill_switch_active(kill_switch):
-                state.status = "stopped"
-                state.exit_reason = "kill switch activated"
-                save_state(state_path, state)
-                console.print("[red]kill switch activated. exiting.[/red]")
-                return
+    try:
+        async with ClaudeSDKClient(options=options) as client:
+            next_message = initial_message
+            while True:
+                if iteration_cap_hit(iteration=state.iteration, max_iterations=cfg.max_iterations):
+                    state.status = "stopped"
+                    state.exit_reason = f"iteration cap reached ({cfg.max_iterations})"
+                    save_state(state_path, state)
+                    console.print(f"[yellow]{state.exit_reason}[/yellow]")
+                    return
+                if wall_clock_cap_hit(started_at=started_at, max_seconds=cfg.max_seconds):
+                    state.status = "stopped"
+                    state.exit_reason = f"wall-clock cap reached ({cfg.max_seconds}s)"
+                    save_state(state_path, state)
+                    console.print(f"[yellow]{state.exit_reason}[/yellow]")
+                    return
+                if kill_switch_active(kill_switch):
+                    state.status = "stopped"
+                    state.exit_reason = "kill switch activated"
+                    save_state(state_path, state)
+                    console.print("[red]kill switch activated. exiting.[/red]")
+                    return
 
-            state.iteration += 1
-            save_state(state_path, state)
-            console.print(f"\n[bold cyan]=== iteration {state.iteration} ===[/bold cyan]")
-
-            chunks, decision = await _run_one_turn(
-                client=client,
-                user_message=next_message,
-                persona=persona,
-                state=state,
-                transcript_window=cfg.transcript_window,
-            )
-            console.print(f"\n[bold magenta]proxy:[/bold magenta] {decision.action} ({decision.reasoning})")
-
-            state = load_state(state_path)
-            if decision.action == "stop":
-                state.status = "completed"
-                state.exit_reason = decision.reasoning or "proxy stopped"
+                state.iteration += 1
                 save_state(state_path, state)
-                return
-            if decision.action == "escalate":
-                state.status = "escalated"
-                state.exit_reason = decision.text or decision.reasoning
-                save_state(state_path, state)
-                console.print(f"[bold red]ESCALATE:[/bold red] {decision.text}")
-                return
-            next_message = decision.text or "Continue."
+                console.print(f"\n[bold cyan]=== iteration {state.iteration} ===[/bold cyan]")
+
+                chunks, decision = await _run_one_turn(
+                    client=client,
+                    user_message=next_message,
+                    persona=persona,
+                    state=state,
+                    transcript_window=cfg.transcript_window,
+                )
+                console.print(f"\n[bold magenta]proxy:[/bold magenta] {decision.action} ({decision.reasoning})")
+
+                state = load_state(state_path)
+                if decision.action == "stop":
+                    state.status = "completed"
+                    state.exit_reason = decision.reasoning or "proxy stopped"
+                    save_state(state_path, state)
+                    return
+                if decision.action == "escalate":
+                    state.status = "escalated"
+                    state.exit_reason = decision.text or decision.reasoning or "escalated"
+                    save_state(state_path, state)
+                    console.print(f"[bold red]ESCALATE:[/bold red] {decision.text}")
+                    return
+                next_message = decision.text or "Continue."
+    except Exception as e:
+        state = load_state(state_path)
+        state.status = "failed"
+        state.exit_reason = f"sdk error: {type(e).__name__}: {e}"
+        save_state(state_path, state)
+        console.print(f"[bold red]SDK ERROR:[/bold red] {e}")
+        raise
