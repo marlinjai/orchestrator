@@ -1,4 +1,14 @@
-import os
+"""Worker agent options and turn loop.
+
+Hook isolation: the orchestrator must run Worker (and Proxy) agents in a clean
+context, free from the developer's personal hook configuration. Hooks are loaded
+from filesystem settings (`~/.claude/settings.json`, `.claude/settings.json`,
+`.claude/settings.local.json`), so the only reliable way to disable them from
+the SDK is `setting_sources=[]` ("SDK isolation mode"). The legacy
+`CLAUDE_DISABLE_HOOKS=1` env var is a no-op in the spawned CLI process and is
+not used here.
+"""
+
 from pathlib import Path
 from typing import AsyncIterator
 
@@ -22,12 +32,6 @@ Hard rules you must follow:
 """
 
 
-def build_worker_env() -> dict[str, str]:
-    env = os.environ.copy()
-    env["CLAUDE_DISABLE_HOOKS"] = "1"
-    return env
-
-
 def build_worker_options(
     *,
     state_path: Path,
@@ -38,6 +42,11 @@ def build_worker_options(
     return ClaudeAgentOptions(
         system_prompt=WORKER_SYSTEM_PROMPT,
         cwd=str(project_dir),
+        # Empty list = SDK isolation mode: skip user/project/local settings,
+        # which is where hooks (and other dev-machine config) live. Without
+        # this, the user's SessionStart/Stop/UserPromptSubmit hooks fire in
+        # spawned Worker processes and pollute the agent context.
+        setting_sources=[],
         mcp_servers={"orchestrator-state": state_server},
         allowed_tools=[
             "Read",

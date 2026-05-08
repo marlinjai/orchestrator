@@ -1,17 +1,17 @@
-import os
 from pathlib import Path
-import pytest
-from orchestrator.worker import build_worker_options, build_worker_env
+
+from orchestrator.worker import build_worker_options
 
 
-def test_worker_env_disables_hooks():
-    env = build_worker_env()
-    assert env.get("CLAUDE_DISABLE_HOOKS") == "1"
-
-
-def test_worker_env_inherits_path():
-    env = build_worker_env()
-    assert "PATH" in env
+def test_worker_options_drops_user_settings(tmp_path: Path):
+    """setting_sources=[] is the SDK isolation switch that prevents user/project
+    settings (and therefore hooks) from being loaded into Worker spawns."""
+    options = build_worker_options(
+        state_path=tmp_path / "s.json",
+        project_dir=tmp_path,
+        denied_bash=[],
+    )
+    assert options.setting_sources == []
 
 
 def test_worker_options_has_state_mcp(tmp_path: Path):
@@ -33,3 +33,12 @@ def test_worker_options_includes_default_tools(tmp_path: Path):
     )
     for needed in ["Read", "Edit", "Write", "Bash", "Grep"]:
         assert needed in options.allowed_tools
+
+
+def test_worker_options_sets_cwd(tmp_path: Path):
+    options = build_worker_options(
+        state_path=tmp_path / "s.json",
+        project_dir=tmp_path,
+        denied_bash=[],
+    )
+    assert options.cwd == str(tmp_path)
