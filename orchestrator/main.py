@@ -38,14 +38,16 @@ def start(
 ):
     """Start a new autonomous task."""
     tid = task_id or uuid.uuid4().hex[:8]
+    state_dir = _task_dir(tid)
     cfg = OrchestratorConfig(
         task_id=tid,
         goal_file=goal,
         persona_file=persona,
         project_dir=project,
-        state_dir=_task_dir(tid),
+        state_dir=state_dir,
         max_iterations=max_iterations,
         max_seconds=max_hours * 3600,
+        log_path=state_dir / "run.log",
     )
     console.print(f"[bold green]starting task {tid}[/bold green]")
     console.print(f"  goal: {goal}")

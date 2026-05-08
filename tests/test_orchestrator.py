@@ -89,6 +89,30 @@ async def test_orchestrator_halts_on_escalate(cfg: OrchestratorConfig):
     assert state.status == "escalated"
 
 
+async def test_orchestrator_writes_to_log_file(task_dir: Path):
+    """When log_path is set, orchestrator output is captured to that file."""
+    log_path = task_dir / "run.log"
+    cfg = OrchestratorConfig(
+        task_id="log-test",
+        goal_file=task_dir / "goals" / "g.md",
+        persona_file=task_dir / "personas" / "p.md",
+        project_dir=task_dir,
+        state_dir=task_dir / ".orchestrator" / "log-test",
+        max_iterations=2,
+        max_seconds=60,
+        log_path=log_path,
+    )
+    with patch("orchestrator.orchestrator._run_one_turn") as mock_turn:
+        mock_turn.side_effect = [
+            (["worker output"], ProxyDecision(action="stop", text="", reasoning="done")),
+        ]
+        await run_orchestrator(cfg)
+    assert log_path.exists()
+    contents = log_path.read_text()
+    assert contents.strip(), "expected log file to contain orchestrator output"
+    assert "iteration 1" in contents.lower()
+
+
 async def test_orchestrator_marks_failed_on_sdk_error(cfg: OrchestratorConfig):
     class FakeError(RuntimeError):
         pass
