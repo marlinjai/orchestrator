@@ -2,7 +2,7 @@ from pathlib import Path
 
 import pytest
 
-from orchestrator.state import State, load_state, save_state
+from orchestrator.state import PlanStep, State, load_state, save_state
 from orchestrator.tools import build_update_state_handler
 
 
@@ -48,8 +48,8 @@ async def test_update_state_appends_commit(state_path: Path):
 async def test_update_state_advances_step(state_path: Path):
     state = load_state(state_path)
     state.plan = [
-        {"id": 1, "step": "a", "status": "pending"},
-        {"id": 2, "step": "b", "status": "pending"},
+        PlanStep(id=1, step="a", status="pending"),
+        PlanStep(id=2, step="b", status="pending"),
     ]
     save_state(state_path, state)
 
@@ -63,3 +63,15 @@ async def test_update_state_unknown_kind_returns_error(state_path: Path):
     handler = build_update_state_handler(state_path)
     result = await handler({"kind": "nonsense"})
     assert "error" in result["content"][0]["text"].lower()
+
+
+async def test_update_state_decision_missing_field_returns_error(state_path: Path):
+    handler = build_update_state_handler(state_path)
+    result = await handler({"kind": "decision", "turn": 1})
+    assert "error" in result["content"][0]["text"].lower()
+
+
+async def test_update_state_step_completed_unknown_id_warns(state_path: Path):
+    handler = build_update_state_handler(state_path)
+    result = await handler({"kind": "step_completed", "step_id": 99})
+    assert "warning" in result["content"][0]["text"].lower()

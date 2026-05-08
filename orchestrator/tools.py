@@ -2,6 +2,7 @@ from pathlib import Path
 from typing import Any, Awaitable, Callable
 
 from claude_agent_sdk import create_sdk_mcp_server, tool
+from pydantic import ValidationError
 
 from orchestrator.state import Decision, load_state, save_state
 
@@ -9,6 +10,8 @@ from orchestrator.state import Decision, load_state, save_state
 def build_update_state_handler(
     state_path: Path,
 ) -> Callable[[dict[str, Any]], Awaitable[dict[str, Any]]]:
+    """Build an async handler that mutates state.json. Not concurrency-safe; assumes sequential calls."""
+
     async def handler(args: dict[str, Any]) -> dict[str, Any]:
         kind = args.get("kind")
         try:
@@ -33,6 +36,15 @@ def build_update_state_handler(
                     if s.id == step_id:
                         s.status = "completed"
                         break
+                else:
+                    return {
+                        "content": [
+                            {
+                                "type": "text",
+                                "text": f"warning: no step with id={step_id}",
+                            }
+                        ]
+                    }
             elif kind == "open_thread":
                 state.open_threads.append(args["thread"])
             else:
@@ -43,7 +55,7 @@ def build_update_state_handler(
                 }
             save_state(state_path, state)
             return {"content": [{"type": "text", "text": f"ok: applied {kind}"}]}
-        except Exception as e:
+        except (KeyError, ValueError, ValidationError, OSError) as e:
             return {"content": [{"type": "text", "text": f"error: {e}"}]}
 
     return handler
@@ -54,18 +66,31 @@ def build_state_mcp_server(state_path: Path):
 
     @tool(
         "update_state",
-        "Update the orchestrator's state.json. Use after each meaningful step.",
+        "Update the orchestrator's state.json. Use after each meaningful step. Pass `kind` plus only the fields relevant to that kind.",
         {
-            "kind": str,
-            "turn": int,
-            "question": str,
-            "answer": str,
-            "reasoning": str,
-            "decided_by": str,
-            "path": str,
-            "sha": str,
-            "step_id": int,
-            "thread": str,
+            "type": "object",
+            "properties": {
+                "kind": {
+                    "type": "string",
+                    "enum": [
+                        "decision",
+                        "file_touched",
+                        "commit",
+                        "step_completed",
+                        "open_thread",
+                    ],
+                },
+                "turn": {"type": "integer"},
+                "question": {"type": "string"},
+                "answer": {"type": "string"},
+                "reasoning": {"type": "string"},
+                "decided_by": {"type": "string"},
+                "path": {"type": "string"},
+                "sha": {"type": "string"},
+                "step_id": {"type": "integer"},
+                "thread": {"type": "string"},
+            },
+            "required": ["kind"],
         },
     )
     async def update_state_tool(args: dict[str, Any]) -> dict[str, Any]:
