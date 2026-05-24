@@ -100,7 +100,7 @@ nohup orchestrator start \
 - Loop detection is still untested in the wild (all completions have been single-iteration).
 - Context handover is still untested (no run has approached context budget).
 - Token-usage tracking still missing.
-- No tool for "did the Worker actually call update_state(decision) often enough to feed the Proxy good context?" — feedback loop is one-sided.
+- No tool for "did the Worker actually call update_state(decision) often enough to feed the Proxy good context?" The feedback loop is one-sided.
 
 ## Repo layout
 
