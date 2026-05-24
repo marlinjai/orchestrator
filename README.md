@@ -125,7 +125,13 @@ Prompt caching isn't hitting. Either the system prompt is changing between turns
 
 ## For Claude Code sessions
 
-There's a documentation skill at `~/.claude/skills/orchestrator-dispatch/SKILL.md` that auto-loads when a Claude Code session needs to dispatch a Worker. It covers the parallel-batch pattern, monitoring, the secrets-and-auth caveat, and state.json fields. Open this README for the operator's view; let the skill brief Claude on the dispatch view.
+The `autonomous-orchestration` skill at `~/.claude/skills/autonomous-orchestration/SKILL.md` auto-triggers when you ask Claude Code to "run autonomously", "dispatch", "kick off in the background", "launch a batch", or anything goal-file-driven. The skill body covers the parallel-batch pattern, monitoring, the secrets-and-auth caveat, and state.json fields. Source-of-truth lives in `~/software-dev/dotfiles/claude/skills/autonomous-orchestration/SKILL.md`; the install.sh symlinks it on every machine.
+
+Open this README for the operator's view; let the skill brief Claude on the dispatch view.
+
+## Find the open work
+
+[ROADMAP.md](ROADMAP.md) tracks shipped versions, queued v2 themes (env-mode contract, stagnation-streak loop detection, Proxy feedback, handover scaffold, batch subcommand), open follow-ups, and known unknowns.
 
 ## v0.1.0 dogfood field report (2026-05-09)
 
