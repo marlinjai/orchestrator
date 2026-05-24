@@ -1,8 +1,21 @@
 [project]
-name = "orchestrator"
-version = "0.1.0"
-description = "Autonomous Claude Code orchestrator"
+name = "claude-code-orchestrator"
+version = "0.2.0"
+description = "Autonomous Claude Code orchestrator: Worker + Decision Proxy loop driven by a goal file"
+readme = "README.md"
 requires-python = ">=3.11"
+license = { text = "MIT" }
+authors = [{ name = "Marlin Pohl" }]
+keywords = ["claude", "claude-code", "agent", "orchestrator", "autonomous", "ai"]
+classifiers = [
+    "Development Status :: 3 - Alpha",
+    "Intended Audience :: Developers",
+    "License :: OSI Approved :: MIT License",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+    "Programming Language :: Python :: 3.13",
+    "Topic :: Software Development",
+]
 dependencies = [
     "claude-agent-sdk>=0.1.0",
     "pydantic>=2.6",
@@ -20,9 +33,16 @@ dev = [
 [project.scripts]
 orchestrator = "orchestrator.main:app"
 
+[project.urls]
+Repository = "https://github.com/marlinjai/orchestrator"
+Issues = "https://github.com/marlinjai/orchestrator/issues"
+
 [build-system]
 requires = ["hatchling"]
 build-backend = "hatchling.build"
+
+[tool.hatch.build.targets.wheel]
+packages = ["orchestrator"]
 
 [tool.pytest.ini_options]
 asyncio_mode = "auto"
