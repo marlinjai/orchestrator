@@ -9,12 +9,16 @@ the SDK is `setting_sources=[]` ("SDK isolation mode"). The legacy
 not used here.
 """
 
+import logging
+import os
 from pathlib import Path
 from typing import AsyncIterator
 
 from claude_agent_sdk import ClaudeAgentOptions, ClaudeSDKClient
 
 from orchestrator.tools import build_state_mcp_server
+
+logger = logging.getLogger(__name__)
 
 
 WORKER_SYSTEM_PROMPT = """\
@@ -51,12 +55,27 @@ doing the integration. Stay in your lane.
 """
 
 
+def _scrub_anthropic_api_key() -> None:
+    """Ensure the Claude Agent SDK subprocess uses subscription auth, not API billing.
+
+    The CLI's auth precedence puts ANTHROPIC_API_KEY ahead of the ~/.config/claude
+    login credentials. If the orchestrator is launched under `infisical run` (or any
+    other wrapper that injects the key for downstream tools), the SDK silently
+    switches to pay-per-token API billing on that key. The Worker doesn't need the
+    key to author code that references it at runtime, so we drop it at the
+    SDK-spawn boundary.
+    """
+    if os.environ.pop("ANTHROPIC_API_KEY", None) is not None:
+        logger.info("scrubbed ANTHROPIC_API_KEY from env so SDK uses subscription auth")
+
+
 def build_worker_options(
     *,
     state_path: Path,
     project_dir: Path,
     denied_bash: list[str],
 ) -> ClaudeAgentOptions:
+    _scrub_anthropic_api_key()
     state_server = build_state_mcp_server(state_path)
     return ClaudeAgentOptions(
         system_prompt=WORKER_SYSTEM_PROMPT,
