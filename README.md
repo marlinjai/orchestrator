@@ -54,6 +54,54 @@ First end-to-end run: the orchestrator wrote its own v2 plan as a dogfood task. 
 - Handover is genuinely deferred until we see a context-exhausting task in the wild.
 - Loop detection is a safety net we have not yet tripped, but the iteration cap caught nothing because the Worker self-completed.
 
+## v0.1.x parallel-batch field notes (2026-05-10)
+
+Four wave-1 specs landed in the framer-clone repo across two sessions:
+
+1. Single sequential run on a worktree: `static-html-data-component-id-fix`, 1 iteration, ~4 min.
+2. Parallel triple in three worktrees: `data-bindings-binding-shape`, `multiplayer-yjs-doc-shape`, `data-bindings-data-source-provider`. Each completed in 1 iteration, ~5 min, dispatched concurrently.
+
+All four runs: zero escalations, zero retries, zero failed iterations.
+
+**What the parallel pattern proved:**
+- Worktree isolation works. Each Worker had its own checkout, its own branch, its own state directory. Cherry-picking the resulting branches back to main was clean.
+- Pro subscription handled three concurrent Worker sessions plus three concurrent Proxy decisions without rate-limit warnings (one-iteration tasks, low token volume).
+- The orchestrator binary handled the `nohup ... &` detach pattern cleanly. Each task survived past its launcher's shell.
+
+**What broke (and got fixed):**
+- **Shared-index file conflict.** Three parallel Workers each invented a different STATUS.md format when editing it concurrently (annotation suffix, emoji suffix, Status column at end, Status column mid-table). Forced manual merge cleanup. Fix: added "Edit discipline for shared index/status files" to WORKER_SYSTEM_PROMPT in `worker.py`. New rule: touch only your row, preserve format exactly, never add columns or reformat tables, spec frontmatter is canonical, mirror neighbor rows.
+
+**Operational recipe (validated):**
+
+```bash
+# 1. Set up a worktree per spec
+cd <project-repo>
+git worktree add ../<repo>-orch-<spec-slug> orchestrator/<spec-slug>
+
+# 2. Write per-task goal file at goals/<task-id>.md
+
+# 3. Launch detached (repeat per task in parallel)
+cd ~/software-dev/orchestrator
+source .venv/bin/activate
+nohup orchestrator start \
+  --goal goals/<task-id>.md \
+  --project <worktree-path> \
+  --task-id <task-id> \
+  --max-iterations 30 \
+  --max-hours 1.0 \
+  > /tmp/orch-<task-id>.log 2>&1 &
+
+# 4. Monitor via state.json polling until terminal status
+# 5. Cherry-pick each branch onto main, run gates, push
+# 6. git worktree remove each path
+```
+
+**Open issues for v2:**
+- Loop detection is still untested in the wild (all completions have been single-iteration).
+- Context handover is still untested (no run has approached context budget).
+- Token-usage tracking still missing.
+- No tool for "did the Worker actually call update_state(decision) often enough to feed the Proxy good context?" — feedback loop is one-sided.
+
 ## Repo layout
 
     orchestrator/
