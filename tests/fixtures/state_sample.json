@@ -25,11 +25,33 @@
     }
   ],
   "files_touched": [
-    "orchestrator/state.py"
+    {
+      "path": "orchestrator/state.py",
+      "decided_by": "proxy",
+      "recorded_at": "2026-05-08T12:01:00Z"
+    }
   ],
   "commits": [
-    "efbdd5f"
+    {
+      "sha": "efbdd5f",
+      "message": "feat: example",
+      "decided_by": "proxy",
+      "recorded_at": "2026-05-08T12:02:00Z"
+    }
   ],
+  "usage": [
+    {
+      "iteration": 1,
+      "input_tokens": 1000,
+      "output_tokens": 200,
+      "cache_read_tokens": 0,
+      "cache_creation_tokens": 0,
+      "model": "claude-sonnet-4-6",
+      "worker_ms": 5000,
+      "proxy_ms": 800
+    }
+  ],
+  "baseline_ref": "abc1234567890",
   "open_threads": [],
   "iteration": 2,
   "max_iterations": 50,

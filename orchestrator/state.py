@@ -33,6 +33,30 @@ class Handover(BaseModel):
     doc: str
 
 
+class CommitEntry(BaseModel):
+    sha: str
+    message: str = ""
+    decided_by: DecidedBy = "proxy"
+    recorded_at: datetime = Field(default_factory=lambda: datetime.now(timezone.utc))
+
+
+class FileTouched(BaseModel):
+    path: str
+    decided_by: DecidedBy = "proxy"
+    recorded_at: datetime = Field(default_factory=lambda: datetime.now(timezone.utc))
+
+
+class IterationUsage(BaseModel):
+    iteration: int
+    input_tokens: int = 0
+    output_tokens: int = 0
+    cache_read_tokens: int = 0
+    cache_creation_tokens: int = 0
+    model: str = ""
+    worker_ms: int = 0
+    proxy_ms: int = 0
+
+
 class State(BaseModel):
     task_id: str
     started_at: datetime = Field(default_factory=lambda: datetime.now(timezone.utc))
@@ -40,12 +64,14 @@ class State(BaseModel):
     plan: list[PlanStep] = []
     current_step_id: int | None = None
     decisions: list[Decision] = []
-    files_touched: list[str] = []
-    commits: list[str] = []
+    files_touched: list[FileTouched] = []
+    commits: list[CommitEntry] = []
     open_threads: list[str] = []
     iteration: int = 0
     max_iterations: int = 50
     handovers: list[Handover] = []
+    usage: list[IterationUsage] = []
+    baseline_ref: str | None = None
     status: TaskStatus = "running"
     exit_reason: str | None = None
 

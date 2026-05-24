@@ -5,7 +5,16 @@ import pytest
 
 from orchestrator.orchestrator import OrchestratorConfig, run_orchestrator
 from orchestrator.proxy import ProxyDecision
-from orchestrator.state import load_state
+from orchestrator.state import IterationUsage, load_state
+
+
+def _turn(text: str, action: str, iteration: int = 1, reasoning: str = "r", text_out: str = "go"):
+    """Build the (chunks, decision, usage) 3-tuple _run_one_turn now returns."""
+    return (
+        [text],
+        ProxyDecision(action=action, text=text_out, reasoning=reasoning),
+        IterationUsage(iteration=iteration),
+    )
 
 
 @pytest.fixture
@@ -32,9 +41,7 @@ def cfg(task_dir: Path) -> OrchestratorConfig:
 
 async def test_orchestrator_writes_initial_state(cfg: OrchestratorConfig):
     with patch("orchestrator.orchestrator._run_one_turn") as mock_turn:
-        mock_turn.side_effect = [
-            (["worker said done"], ProxyDecision(action="stop", text="", reasoning="done")),
-        ]
+        mock_turn.side_effect = [_turn("worker said done", "stop", text_out="", reasoning="done")]
         await run_orchestrator(cfg)
     state = load_state(cfg.state_dir / "state.json")
     assert state.task_id == "test-task"
@@ -45,22 +52,23 @@ async def test_orchestrator_writes_initial_state(cfg: OrchestratorConfig):
 async def test_orchestrator_iterates_until_proxy_stops(cfg: OrchestratorConfig):
     with patch("orchestrator.orchestrator._run_one_turn") as mock_turn:
         mock_turn.side_effect = [
-            (["t1"], ProxyDecision(action="reply", text="continue", reasoning="r")),
-            (["t2"], ProxyDecision(action="reply", text="continue", reasoning="r")),
-            (["t3"], ProxyDecision(action="stop", text="", reasoning="done")),
+            _turn("t1", "reply", iteration=1, text_out="continue"),
+            _turn("t2", "reply", iteration=2, text_out="continue"),
+            _turn("t3", "stop", iteration=3, text_out="", reasoning="done"),
         ]
         await run_orchestrator(cfg)
     state = load_state(cfg.state_dir / "state.json")
     assert state.iteration == 3
     assert state.status == "completed"
+    assert len(state.usage) == 3
 
 
 async def test_orchestrator_halts_on_iteration_cap(cfg: OrchestratorConfig):
     cfg.max_iterations = 2
     with patch("orchestrator.orchestrator._run_one_turn") as mock_turn:
         mock_turn.side_effect = [
-            (["t1"], ProxyDecision(action="reply", text="go", reasoning="r")),
-            (["t2"], ProxyDecision(action="reply", text="go", reasoning="r")),
+            _turn("t1", "reply", iteration=1),
+            _turn("t2", "reply", iteration=2),
         ]
         await run_orchestrator(cfg)
     state = load_state(cfg.state_dir / "state.json")
@@ -81,9 +89,7 @@ async def test_orchestrator_halts_on_kill_switch(cfg: OrchestratorConfig):
 
 async def test_orchestrator_halts_on_escalate(cfg: OrchestratorConfig):
     with patch("orchestrator.orchestrator._run_one_turn") as mock_turn:
-        mock_turn.side_effect = [
-            (["t1"], ProxyDecision(action="escalate", text="need human", reasoning="money")),
-        ]
+        mock_turn.side_effect = [_turn("t1", "escalate", text_out="need human", reasoning="money")]
         await run_orchestrator(cfg)
     state = load_state(cfg.state_dir / "state.json")
     assert state.status == "escalated"
@@ -103,9 +109,7 @@ async def test_orchestrator_writes_to_log_file(task_dir: Path):
         log_path=log_path,
     )
     with patch("orchestrator.orchestrator._run_one_turn") as mock_turn:
-        mock_turn.side_effect = [
-            (["worker output"], ProxyDecision(action="stop", text="", reasoning="done")),
-        ]
+        mock_turn.side_effect = [_turn("worker output", "stop", text_out="", reasoning="done")]
         await run_orchestrator(cfg)
     assert log_path.exists()
     contents = log_path.read_text()

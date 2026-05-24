@@ -1,7 +1,11 @@
 from pathlib import Path
+from types import SimpleNamespace
+
 from orchestrator.transcript import (
     AssistantTurn,
+    extract_model,
     extract_text,
+    extract_usage,
     last_assistant_text,
     last_n_turns,
     parse_transcript,
@@ -74,3 +78,46 @@ class _FakeMsgWithContent:
 def test_extract_text_from_object_with_content():
     msg = _FakeMsgWithContent([type("B", (), {"text": "world"})()])
     assert extract_text(msg) == "world"
+
+
+def test_extract_usage_from_assistant_message_object():
+    """Real shape: claude-agent-sdk AssistantMessage.usage is an attribute
+    holding the Anthropic API usage dict."""
+    msg = SimpleNamespace(
+        usage={
+            "input_tokens": 1500,
+            "output_tokens": 320,
+            "cache_read_input_tokens": 800,
+            "cache_creation_input_tokens": 100,
+        },
+        model="claude-sonnet-4-6",
+    )
+    u = extract_usage(msg)
+    assert u is not None
+    assert u["input_tokens"] == 1500
+    assert extract_model(msg) == "claude-sonnet-4-6"
+
+
+def test_extract_usage_from_nested_dict_envelope():
+    msg = {
+        "type": "assistant",
+        "message": {
+            "role": "assistant",
+            "usage": {"input_tokens": 10, "output_tokens": 5},
+            "model": "claude-haiku-4-5",
+        },
+    }
+    u = extract_usage(msg)
+    assert u == {"input_tokens": 10, "output_tokens": 5}
+    assert extract_model(msg) == "claude-haiku-4-5"
+
+
+def test_extract_usage_missing():
+    assert extract_usage({}) is None
+    assert extract_usage(SimpleNamespace()) is None
+    assert extract_usage(None) is None
+
+
+def test_extract_model_missing():
+    assert extract_model({}) == ""
+    assert extract_model(SimpleNamespace()) == ""

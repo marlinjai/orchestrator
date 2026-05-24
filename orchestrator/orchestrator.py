@@ -13,8 +13,9 @@ from orchestrator.guardrails import (
     wall_clock_cap_hit,
 )
 from orchestrator.proxy import ProxyDecision, run_proxy_decision
-from orchestrator.state import State, load_state, save_state
-from orchestrator.transcript import AssistantTurn, extract_text
+from orchestrator.reconcile import git_head, reconcile
+from orchestrator.state import IterationUsage, State, load_state, save_state
+from orchestrator.transcript import AssistantTurn, extract_model, extract_text, extract_usage
 from orchestrator.worker import build_worker_options, run_worker_turn
 
 
@@ -87,21 +88,36 @@ async def _run_one_turn(
     state: State,
     transcript_window: int,
     out_console: Console | None = None,
-) -> tuple[list[str], ProxyDecision]:
+) -> tuple[list[str], ProxyDecision, IterationUsage]:
     out = out_console or console
     chunks: list[str] = []
+    usage = IterationUsage(iteration=state.iteration)
+    worker_start = time.monotonic()
     async for msg in run_worker_turn(client=client, user_message=user_message):
         text = extract_text(msg)
         if text:
             chunks.append(text)
             out.print(f"[dim]worker:[/dim] {text}", end="")
+        u = extract_usage(msg)
+        if u:
+            usage.input_tokens += int(u.get("input_tokens", 0) or 0)
+            usage.output_tokens += int(u.get("output_tokens", 0) or 0)
+            usage.cache_read_tokens += int(u.get("cache_read_input_tokens", 0) or 0)
+            usage.cache_creation_tokens += int(u.get("cache_creation_input_tokens", 0) or 0)
+        if not usage.model:
+            m = extract_model(msg)
+            if m:
+                usage.model = m
+    usage.worker_ms = int((time.monotonic() - worker_start) * 1000)
     recent = [AssistantTurn(text=t) for t in chunks if t.strip()][-transcript_window:]
+    proxy_start = time.monotonic()
     decision = await run_proxy_decision(
         persona=persona,
         state=state,
         recent_turns=recent,
     )
-    return chunks, decision
+    usage.proxy_ms = int((time.monotonic() - proxy_start) * 1000)
+    return chunks, decision, usage
 
 
 async def run_orchestrator(cfg: OrchestratorConfig) -> None:
@@ -110,6 +126,13 @@ async def run_orchestrator(cfg: OrchestratorConfig) -> None:
     persona = cfg.persona_file.read_text().strip()
     started_at = time.time()
     kill_switch = cfg.state_dir / "STOP"
+
+    # Snapshot project HEAD before the Worker runs so reconciliation can detect
+    # any commits the Worker makes but doesn't self-report. None if the project
+    # isn't a git repo (reconciliation becomes a no-op).
+    if state.baseline_ref is None:
+        state.baseline_ref = git_head(cfg.project_dir)
+        save_state(state_path, state)
 
     log_file = None
     if cfg.log_path is not None:
@@ -162,7 +185,7 @@ async def run_orchestrator(cfg: OrchestratorConfig) -> None:
                     save_state(state_path, state)
                     local_console.print(f"\n[bold cyan]=== iteration {state.iteration} ===[/bold cyan]")
 
-                    chunks, decision = await _run_one_turn(
+                    chunks, decision, usage = await _run_one_turn(
                         client=client,
                         user_message=next_message,
                         persona=persona,
@@ -172,7 +195,16 @@ async def run_orchestrator(cfg: OrchestratorConfig) -> None:
                     )
                     local_console.print(f"\n[bold magenta]proxy:[/bold magenta] {decision.action} ({decision.reasoning})")
 
+                    # Reload state (Worker may have appended via update_state),
+                    # then reconcile against git and append usage. Persist once.
                     state = load_state(state_path)
+                    state.usage.append(usage)
+                    commits_added, files_added = reconcile(state, cfg.project_dir)
+                    if commits_added or files_added:
+                        local_console.print(
+                            f"[dim]reconciled: +{commits_added} commits, +{files_added} files[/dim]"
+                        )
+                    save_state(state_path, state)
                     if decision.action == "stop":
                         state.status = "completed"
                         state.exit_reason = decision.reasoning or "proxy stopped"

@@ -35,14 +35,19 @@ async def test_update_state_appends_files_touched(state_path: Path):
     handler = build_update_state_handler(state_path)
     await handler({"kind": "file_touched", "path": "src/foo.py"})
     state = load_state(state_path)
-    assert state.files_touched == ["src/foo.py"]
+    assert len(state.files_touched) == 1
+    assert state.files_touched[0].path == "src/foo.py"
+    assert state.files_touched[0].decided_by == "proxy"
 
 
 async def test_update_state_appends_commit(state_path: Path):
     handler = build_update_state_handler(state_path)
-    await handler({"kind": "commit", "sha": "deadbee"})
+    await handler({"kind": "commit", "sha": "deadbee", "message": "feat: x"})
     state = load_state(state_path)
-    assert state.commits == ["deadbee"]
+    assert len(state.commits) == 1
+    assert state.commits[0].sha == "deadbee"
+    assert state.commits[0].message == "feat: x"
+    assert state.commits[0].decided_by == "proxy"
 
 
 async def test_update_state_advances_step(state_path: Path):

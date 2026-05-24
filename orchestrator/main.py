@@ -81,9 +81,32 @@ def status(task_id: str = typer.Option(..., "--task-id")):
     table.add_row("status", state.status)
     table.add_row("iteration", f"{state.iteration} / {state.max_iterations}")
     table.add_row("goal", state.goal)
-    table.add_row("files_touched", str(len(state.files_touched)))
-    table.add_row("commits", str(len(state.commits)))
+    proxy_files = sum(1 for f in state.files_touched if f.decided_by == "proxy")
+    system_files = sum(1 for f in state.files_touched if f.decided_by == "system")
+    proxy_commits = sum(1 for c in state.commits if c.decided_by == "proxy")
+    system_commits = sum(1 for c in state.commits if c.decided_by == "system")
+    table.add_row(
+        "files_touched",
+        f"{len(state.files_touched)} (proxy={proxy_files}, system={system_files})",
+    )
+    table.add_row(
+        "commits",
+        f"{len(state.commits)} (proxy={proxy_commits}, system={system_commits})",
+    )
     table.add_row("decisions", str(len(state.decisions)))
+    table.add_row("baseline_ref", (state.baseline_ref or "")[:12])
+    if state.usage:
+        in_tok = sum(u.input_tokens for u in state.usage)
+        out_tok = sum(u.output_tokens for u in state.usage)
+        cache_r = sum(u.cache_read_tokens for u in state.usage)
+        cache_c = sum(u.cache_creation_tokens for u in state.usage)
+        worker_ms = sum(u.worker_ms for u in state.usage)
+        proxy_ms = sum(u.proxy_ms for u in state.usage)
+        table.add_row(
+            "tokens",
+            f"in={in_tok} out={out_tok} cache_r={cache_r} cache_c={cache_c}",
+        )
+        table.add_row("wall_ms", f"worker={worker_ms} proxy={proxy_ms}")
     table.add_row("exit_reason", state.exit_reason or "")
     console.print(table)
 

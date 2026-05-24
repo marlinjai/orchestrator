@@ -4,7 +4,7 @@ from typing import Any, Awaitable, Callable
 from claude_agent_sdk import create_sdk_mcp_server, tool
 from pydantic import ValidationError
 
-from orchestrator.state import Decision, load_state, save_state
+from orchestrator.state import CommitEntry, Decision, FileTouched, load_state, save_state
 
 
 def build_update_state_handler(
@@ -27,9 +27,15 @@ def build_update_state_handler(
                     )
                 )
             elif kind == "file_touched":
-                state.files_touched.append(args["path"])
+                state.files_touched.append(FileTouched(path=args["path"], decided_by="proxy"))
             elif kind == "commit":
-                state.commits.append(args["sha"])
+                state.commits.append(
+                    CommitEntry(
+                        sha=args["sha"],
+                        message=args.get("message", ""),
+                        decided_by="proxy",
+                    )
+                )
             elif kind == "step_completed":
                 step_id = args["step_id"]
                 for s in state.plan:
@@ -87,6 +93,7 @@ def build_state_mcp_server(state_path: Path):
                 "decided_by": {"type": "string"},
                 "path": {"type": "string"},
                 "sha": {"type": "string"},
+                "message": {"type": "string"},
                 "step_id": {"type": "integer"},
                 "thread": {"type": "string"},
             },

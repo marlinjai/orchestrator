@@ -72,6 +72,48 @@ def last_n_turns(msgs: list[dict], n: int) -> list[AssistantTurn]:
     return turns[-n:]
 
 
+def extract_usage(msg) -> dict | None:
+    """Pull the usage dict off an SDK message, handling both shapes.
+
+    The SDK exposes per-turn usage on `AssistantMessage.usage` (attribute) and
+    legacy / synthetic transcripts may nest it under `message.usage`. Returns
+    the dict if present (Anthropic API shape: input_tokens, output_tokens,
+    cache_read_input_tokens, cache_creation_input_tokens) or None.
+    """
+    if hasattr(msg, "usage"):
+        u = msg.usage
+        if isinstance(u, dict):
+            return u
+    if isinstance(msg, dict):
+        nested = msg.get("message")
+        if isinstance(nested, dict):
+            u = nested.get("usage")
+            if isinstance(u, dict):
+                return u
+        u = msg.get("usage")
+        if isinstance(u, dict):
+            return u
+    return None
+
+
+def extract_model(msg) -> str:
+    """Pull the model name off an SDK message. Empty string if absent."""
+    if hasattr(msg, "model"):
+        m = msg.model
+        if isinstance(m, str) and m:
+            return m
+    if isinstance(msg, dict):
+        nested = msg.get("message")
+        if isinstance(nested, dict):
+            m = nested.get("model")
+            if isinstance(m, str) and m:
+                return m
+        m = msg.get("model")
+        if isinstance(m, str) and m:
+            return m
+    return ""
+
+
 def extract_text(msg) -> str:
     """Extract text content from any SDK message shape (dict or object).
 

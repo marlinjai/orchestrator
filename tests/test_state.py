@@ -1,7 +1,16 @@
 import json
 from pathlib import Path
 import pytest
-from orchestrator.state import State, PlanStep, Decision, load_state, save_state
+from orchestrator.state import (
+    CommitEntry,
+    Decision,
+    FileTouched,
+    IterationUsage,
+    PlanStep,
+    State,
+    load_state,
+    save_state,
+)
 
 
 FIXTURE_PATH = Path(__file__).parent / "fixtures" / "state_sample.json"
@@ -78,6 +87,11 @@ def test_load_state_from_fixture(tmp_path: Path):
     assert len(loaded.plan) == 2
     assert loaded.plan[0].status == "completed"
     assert loaded.handovers[0].doc == "handover_001.md"
+    assert loaded.commits[0].sha == "efbdd5f"
+    assert loaded.commits[0].decided_by == "proxy"
+    assert loaded.files_touched[0].path == "orchestrator/state.py"
+    assert loaded.usage[0].input_tokens == 1000
+    assert loaded.baseline_ref == "abc1234567890"
 
     # Round-trip the started_at field through save + load to validate
     # pydantic's ISO 8601 "Z" suffix parsing.
@@ -86,3 +100,31 @@ def test_load_state_from_fixture(tmp_path: Path):
     save_state(roundtrip_path, loaded)
     reloaded = load_state(roundtrip_path)
     assert reloaded.started_at == original_started_at
+
+
+def test_state_legacy_string_commits_rejected(tmp_path: Path):
+    """The v0.1 schema had commits as list[str]. v0.2 requires CommitEntry
+    objects. Old state.json files should fail validation rather than silently
+    losing data. Per the dev-phase no-backcompat rule documented in CLAUDE.md."""
+    path = tmp_path / "state.json"
+    path.write_text(
+        json.dumps({"task_id": "x", "goal": "g", "commits": ["abc123"]})
+    )
+    with pytest.raises(ValueError):
+        load_state(path)
+
+
+def test_iteration_usage_defaults():
+    u = IterationUsage(iteration=3)
+    assert u.iteration == 3
+    assert u.input_tokens == 0
+    assert u.worker_ms == 0
+    assert u.model == ""
+
+
+def test_commit_entry_and_file_touched_defaults():
+    c = CommitEntry(sha="deadbeef")
+    assert c.decided_by == "proxy"
+    assert c.message == ""
+    f = FileTouched(path="a/b.py")
+    assert f.decided_by == "proxy"

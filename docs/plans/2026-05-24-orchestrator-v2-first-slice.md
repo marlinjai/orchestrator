@@ -1,6 +1,6 @@
 ---
 type: plan
-status: decided
+status: completed
 date: 2026-05-24
 title: Orchestrator v2 first slice, state reconciliation + token telemetry
 tags: [orchestrator, v2, state, telemetry]
@@ -118,3 +118,14 @@ Add `extract_usage(msg) -> dict | None` helper that mirrors `extract_text`. Retu
 ## Estimated effort
 
 One focused evening session (~2 hours implementation, 1 hour test + dogfood verification).
+
+## Outcome (2026-05-24)
+
+Landed. 106/106 tests pass (was 91 + 15 new across state schema, reconcile, transcript usage). Real dogfood verified end-to-end on a scratch git repo:
+- `baseline_ref` captured at orchestrator start
+- `usage[]` populated with real per-iteration numbers (input/output/cache_read/cache_create tokens, model, worker_ms, proxy_ms). The Pro subscription run hit 391K cache_read tokens, confirming prompt caching is active and observable.
+- `commits[*].decided_by` and `files_touched[*].decided_by` provenance recorded.
+- Reconciliation caught a Worker-unreported commit on the first dogfood run.
+- **Bug found and fixed during dogfood:** initial implementation double-counted commits because Worker self-reports short shas (7 chars) while `git log` returns full 40-char shas. Fixed with prefix-match dedup (`_sha_already_known`) plus a regression test.
+
+Open question from the plan (exact AssistantMessage.usage key names) resolved empirically: `input_tokens`, `output_tokens`, `cache_read_input_tokens`, `cache_creation_input_tokens`. Implementation matches.
