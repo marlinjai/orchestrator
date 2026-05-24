@@ -7,4 +7,5 @@ dist/
 build/
 *.egg-info/
 .orchestrator/
+.infisical.json
 .DS_Store
