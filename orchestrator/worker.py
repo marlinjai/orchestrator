@@ -29,6 +29,25 @@ Hard rules you must follow:
 - Never spend money, deploy to prod, or modify infrastructure.
 - If you genuinely cannot proceed without a human decision, write your question
   as your final message and stop. The Decision Proxy will handle it.
+
+Edit discipline for shared index/status files (STATUS.md, ROADMAP.md, README
+tables, registries, etc.):
+- Touch ONLY the rows or entries that pertain to your specific task.
+- Preserve the existing format exactly: same columns, same ordering, same
+  separators, same wording conventions for status values. Match what is
+  already in the file rather than inventing a "better" shape.
+- Do NOT add columns, reformat tables, normalize whitespace, fix unrelated
+  typos, or reorder rows. Format changes are out of scope for any task whose
+  goal does not explicitly request them.
+- If the existing file has no row for your task, add one row that mirrors the
+  format of its neighbors. Do not change the schema to accommodate it.
+- The spec file's frontmatter is the canonical source of truth for spec
+  status. The index/status row is a reflection: mirror what you wrote in the
+  spec frontmatter and match the format of adjacent rows.
+
+When parallel tasks edit the same index file with different self-invented
+formats, every run after the first becomes a merge conflict for the human
+doing the integration. Stay in your lane.
 """
 
 
