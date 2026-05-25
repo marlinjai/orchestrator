@@ -120,14 +120,16 @@ The `claude-skills-marlin` module covers the contributor subset (`release`, `fro
   ```
 - Update `Lola-Stories/bootstrap/README.md` to point at the unified repo for module details
 
-### Phase 3: port marlin-dev profile
+### Phase 3: port marlin-dev profile and absorb dotfiles
 
+- Audit pass first: classify every file in `~/software-dev/dotfiles/` as `personal-literal` (never propagate; e.g. Marlin's `gitconfig`), `personal-templated` (template + prompt; e.g. anywhere `$HOME/software-dev/*` is hardcoded that other users would not have), or `universal` (carries over as-is; e.g. `tmux.conf`, the contributor skill subset)
 - Migrate `~/software-dev/dotfiles/install.sh` content into modules
-- Special care: the dotfiles `claude/skills` symlink loop becomes the `claude-skills-marlin` module
+- Move static content into the modules that install it: `modules/claude-skills/skills/*`, `modules/zsh-baseline/zshrc`, `modules/tmux-tpm/tmux.conf`, `modules/iterm2-keybindings/custom-keys.json`, `modules/mcp-servers/user-mcp.json`, `modules/claude-code-install/settings.json` template, `modules/gitconfig-template/gitconfig.template`. Marlin's literal `gitconfig` is intentionally not migrated.
 - The MCP registration becomes `mcp-servers` module with Infisical secret resolution
 - The orchestrator install becomes `orchestrator-cli` module
 - Verify against Marlin's existing laptop: run `./bootstrap --profile marlin-dev --reconcile` (a mode that lists what would change without changing it) and confirm no drift from the current state
-- Once verified, dotfiles/install.sh becomes a 3-line wrapper that calls the bootstrap with marlin-dev profile; dotfiles repo keeps its content directories (`claude/`, `iterm2/`, `tmux.conf`, `gitconfig`, `zshrc`) but the install script logic migrates upstream
+- Freeze direct edits to `~/software-dev/dotfiles` for the duration of this phase (announce in dotfiles README + this plan)
+- Once reconciliation is clean: archive the `~/software-dev/dotfiles` GitHub repo. Local checkout can stay for git history; new edits go to `marlinjai/bootstrap`. The archive is reversible if a regression surfaces.
 
 ### Phase 4: custom-mode multi-select
 
@@ -154,7 +156,8 @@ No edits to Lola-Stories/bootstrap or dotfiles/install.sh in this session. Both 
 
 1. Should `claude-skills-contributor` (the lean subset) be opt-in or default-on for the `lola-contributor` profile? Default-on would mean every Lola contributor gets `release` + `frontend-design` + `find-skills` without choosing. Lean is good but only the ones we are confident are universally helpful belong in default-on.
 2. Resolved 2026-05-25: never symlink Marlin's literal `gitconfig`, even under `marlin-dev`. A non-Marlin user picking `marlin-dev` (or assembling a similar set via `custom`) must not end up committing as Marlin. All profiles route through `gitconfig-template` + `identity-prompts`. Marlin's identity is cached in `~/.bootstrap-identity.local` after the first prompt so re-runs do not re-ask. Same rule applies to any other dotfiles content with hardcoded personal data (audit during Phase 3: zshrc paths, ssh config, gpg config if present, any `claude/settings.local.json` overrides).
-3. Should `lola-monorepo` and `trello-pp-cli` modules be available in the `custom` profile for non-Lola contributors? They reference Lola-private repos; non-Lola users without org access would get a clone failure. Probably gate them on `GH_USER` membership check.
+3. Resolved 2026-05-25: `lola-monorepo` and `trello-pp-cli` modules are NOT available in `custom` mode for non-Lola users. The registry tags both modules `org_gated: Lola-Stories`. The custom-mode picker calls `gh api orgs/Lola-Stories/members/$GH_USER` (silent 404 = non-member); org-gated modules are hidden from non-members entirely. On the `lola-contributor` profile the same check happens up-front; non-members get a clear error explaining they need an invite before the bootstrap proceeds.
+4. Resolved 2026-05-25: the canonical source for all dotfiles content (skills, zshrc, tmux.conf, gitconfig template, claude/settings, iterm2 keys, MCP user-mcp.json) moves into `marlinjai/bootstrap` as module-local files. Each module holds the files it installs (`modules/claude-skills/skills/*`, `modules/zsh-baseline/zshrc`, etc.). The `~/software-dev/dotfiles` repo is archived (not deleted; git history stays viewable) as the final step of Phase 3 once `--profile marlin-dev --reconcile` confirms zero drift against Marlin's current laptop state. Marlin retains a personal `~/.bootstrap-overrides.local` (gitignored, per-machine) for genuinely laptop-specific overrides like iTerm2 plist deltas or `claude/settings.local.json` rules.
 
 ## Risks
 
@@ -162,7 +165,7 @@ No edits to Lola-Stories/bootstrap or dotfiles/install.sh in this session. Both 
 - **Validating marlin-dev against Marlin's actual laptop.** Marlin's current state is the integral of many ad-hoc decisions over months. A clean-room run might surface gaps. Mitigation: the `--reconcile` mode in Phase 3 lists deltas without applying them; we treat the first run as a diff session, not a replacement.
 - **Infisical login is interactive.** Browser auth breaks the "unattended 25-min" promise. Mitigation: prompt for login at the start, alongside identity prompts, so all interactive bits happen in the first 60 seconds.
 - **Personal-data leakage from dotfiles into non-Marlin profiles.** Marlin's current dotfiles include hardcoded personal data (`gitconfig` with literal name/email, possibly hardcoded `$HOME/software-dev/*` paths in `zshrc`, MCP server env vars with personal API key names). Any dotfiles content reused by a non-Marlin user must be templated or scrubbed first. Mitigation: Phase 3 starts with an audit pass that classifies every file in dotfiles as `personal-literal` (never propagate), `personal-templated` (template + prompt), or `universal` (symlink as-is). The `marlin-dev` profile is allowed to symlink universal files only; everything personal goes through the template path. Even a "Marlin sets up his own mac-mini" run does not regress this rule, because identity is cached in `~/.bootstrap-identity.local` and templating re-renders deterministically.
-- **Skills source-of-truth still ambiguous.** The plan has `modules/claude-skills-source/` hold the canonical skill files, but they currently live in `~/software-dev/dotfiles/claude/skills/`. Moving them to the bootstrap repo means dotfiles loses its skills directory; the dotfiles-symlinks module would then symlink them back from the bootstrap repo. Confirm this with Marlin in Phase 3 planning.
+- **Dotfiles archive cutover.** Resolved 2026-05-25 (see Open question 4): dotfiles is absorbed into bootstrap and archived at the end of Phase 3. The risk during migration is that Marlin pushes a fix to dotfiles after Phase 2 lands and before Phase 3 archives it, creating divergence. Mitigation: freeze dotfiles direct edits at the start of Phase 3 (announce in repo README + ROADMAP); the freeze stays for the few days needed to land the migration. Marlin's `~/.bootstrap-overrides.local` covers any urgent per-machine fix during the freeze without unfreezing the repo.
 
 ## Cross-references
 
