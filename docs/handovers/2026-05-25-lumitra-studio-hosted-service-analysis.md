@@ -2,181 +2,270 @@
 type: handover
 status: draft
 date: 2026-05-25
-title: Analyze dependencies for Lumitra Studio as a hosted service, then write the implementation handover
-summary: A meta-handover. The receiving session analyzes what "Lumitra Studio as a hosted service" requires against the current framer-clone wave-1 status (8/18 done, some specs blocked on CMS runtime + multiplayer infra), maps spec gaps, then produces a SECOND handover prompt that a fresh implementation session can pick up to write specs and dispatch Workers via the orchestrator.
+title: Full analysis of Lumitra Studio + framer-clone integration to inform the hosted-service design
+summary: A meta-handover. The receiving session must first ground itself in three distinct codebases (Lumitra Studio CLI, the lumitra-studio track inside framer-clone, and analytics.lumitra.co the existing analytics product), then map their actual relationships, only then analyze what "Lumitra Studio as a hosted service" requires. Final deliverable is a SECOND handover prompt that a fresh implementation session can pick up to write specs and dispatch Workers via the orchestrator.
 ---
 
-# Handover: Lumitra Studio hosted-service dependency analysis
+# Handover: Lumitra Studio + framer-clone integration analysis
 
-Paste the section between the fenced lines below into the LolaStories Claude Code session that has been brainstorming Lumitra Studio as a hosted service. The prompt is self-contained (it lists the framer-clone + orchestrator context it might not have) and ends with a clear deliverable: ANOTHER handover prompt suitable for a fresh implementation session.
+The prior version of this handover assumed framer-clone and Lumitra Studio were the same thing. They are not. Lumitra Studio is a separate localhost-only CLI tool. framer-clone is a visual editor codebase that has a `lumitra-studio` track in its Wave 1 spec backlog, but those specs are about INTEGRATING framer-clone with Lumitra Studio, not about hosting Lumitra Studio itself.
+
+The receiving session must read the actual code in all three places before drawing conclusions.
+
+Paste the section between the fenced lines below into the LolaStories Claude Code session that has been brainstorming Lumitra Studio as a hosted service.
 
 ---
 
 ```
 # Goal
 
-You've been thinking about turning Lumitra Studio into a hosted service.
-Now do a dependency analysis against the current state of the
-framer-clone codebase (where Lumitra Studio lives as an editor) and the
-existing wave-1 spec backlog. Output a written handover prompt that a
-fresh Claude Code session can use to write any missing specs and
-dispatch their implementation via the orchestrator.
+You've been brainstorming Lumitra Studio as a hosted service. Before
+producing an implementation plan, you need a grounded analysis of three
+distinct codebases and how they relate. Then produce a written handover
+prompt that a fresh Claude Code session can use to write any missing
+specs and dispatch their implementation via the orchestrator.
 
-You are NOT implementing in this session. You are analyzing and
-producing the next prompt.
+You are NOT implementing in this session. You are reading, mapping,
+deciding, and writing the next prompt.
 
-# Context: what already exists
+# The three things you need to distinguish
 
-- **framer-clone** at `~/software-dev/ERP-suite/projects/framer-clone`.
-  Main branch is at commit `00956c5`, 4 commits ahead of origin
-  (`da96f2a`), NOT yet pushed. The recent commits landed Wave 1 specs.
-  - 137/137 tests pass at HEAD
-  - `pnpm build` green
-  - Read `docs/specs/STATUS.md` for the wave delivery ledger and
-    `docs/specs/wave-1/*.md` for spec contents
-- **Wave 1 status (8 of 18 done):**
-  - Done: binding-shape, data-source-provider, component-registry-
-    bindable-slots (data-bindings track complete); yjs-doc-shape;
-    static-html-data-component-id-fix; lumitra-studio-project-binding
-    (the small reserved-fields block on ProjectModel); mst-snapshot-
-    serializer; anthropic-sdk-bootstrap
-  - Newly unblocked, dispatchable: ai-pattern-a-tool-schema-registry,
-    ai-pattern-a-read-tools-and-context, static-html-spike
-  - Needs human review before dispatch:
-    lumitra-studio-component-id-attribution (overlaps with already-
-    landed data-component-id fix at 90672dd)
-  - Blocked on the CMS runtime decision (Node vs Workers, Marlin's
-    call): cms-service-scaffold, cms-tenant-schema-bootstrap,
-    cms-auth-middleware-dual-principal
-  - Blocked on hocuspocus infra (human-in-loop): multiplayer-
-    hocuspocus-server-scaffold, multiplayer-yjs-mst-binding-slice,
-    multiplayer-auth-brain-seam
-- **Wave 2 / Wave 3 specs exist** in `docs/specs/wave-2/` and `wave-3/`
-  but were not touched in 2026-05 batches. Lumitra-Studio Wave 2
-  candidates mentioned in spec frontmatter: snippet-injection,
-  settings-panel (these become dispatchable now that project-binding
-  landed).
-- **Lumitra Analytics** is the existing product at analytics.lumitra.co.
-  Lumitra Studio in framer-clone today is the EDITOR side; the
-  project-binding spec just reserved fields (`lumitra: { projectId,
-  ingestionEndpoint, apiKeyRef, enabled }`) on `ProjectModel` to wire
-  studio output to the analytics product later.
-- **The orchestrator** at `~/software-dev/orchestrator` (v0.2.0) is the
-  autonomous-Worker dispatch tool. The implementation session should
-  use it to land the specs you identify. The `autonomous-orchestration`
-  Claude Code skill is the operator's playbook. State, telemetry,
-  reconciliation all work.
+The prior session conflated these. Don't repeat that mistake.
 
-# What "hosted service" probably means (verify your own understanding)
+1. **Lumitra Studio** (the CLI tool) — currently localhost-only. Lives
+   somewhere in Marlin's filesystem; the prior session did not locate
+   it. Your first job is to find it. Likely candidates: `~/software-dev/`
+   (look for any `lumitra-studio`, `lumitra-cli`, `studio` directory),
+   `~/Code/`, `~/dev/`, or as a published package the `lumitra` skill at
+   `~/.claude/skills/lumitra/` knows about. The skill description says
+   it lets you "create and manage A/B tests, feature flags, and
+   experiments via the Lumitra Analytics platform (analytics.lumitra.co)"
+   so the CLI talks to that backend. If you can't find it, ask Marlin
+   where the source lives.
 
-Your prior thinking in this LolaStories session has a concept of what
-hosting Lumitra Studio means. Before analyzing, write down in 2-3
-sentences:
-- Who is the user / tenant?
-- What do they get? (an editor URL, an API key, a CMS, a publish
-  endpoint, a domain, analytics dashboard wired in?)
-- What's NOT in scope? (e.g. multi-region, white-label, on-prem)
+2. **The `lumitra-studio` track inside framer-clone**
+   (`~/software-dev/ERP-suite/projects/framer-clone`). Wave 1 has TWO
+   specs in this track: `lumitra-studio-project-binding` (done in 2026-
+   05-24 batch, commit `bde156a` on main) and
+   `lumitra-studio-component-id-attribution` (still draft, has overlap
+   with the already-landed `static-html-data-component-id-fix`).
+   Wave 2 has at least two more in the same track per spec-frontmatter
+   forward references: `snippet-injection` and `settings-panel`.
+   These specs are about WIRING a framer-clone-published site to talk
+   to Lumitra Studio. They are NOT about hosting Lumitra Studio. Read
+   each spec end to end in `docs/specs/wave-1/lumitra-studio-*.md` and
+   `docs/specs/wave-2/lumitra-studio-*.md`.
 
-This shapes the dependency tree.
+3. **Lumitra Analytics** (`analytics.lumitra.co`). The production
+   SaaS product that already exists. Lumitra Studio (the CLI) talks
+   to it. framer-clone-published sites will eventually emit events to
+   it. You don't have its source in this filesystem; treat it as a
+   black box defined by its public API and the `lumitra` skill.
 
-# Analysis to perform
+# Analysis to perform, in order
 
-1. **Map the hosted-service surface to the current framer-clone
-   architecture.** Which existing primitives already exist? Which are
-   missing? Be concrete: name files / models / routes.
+Skipping or short-circuiting any of these steps produces a wrong
+handover. Take the time.
 
-2. **Walk the dependency tree against wave-1 status.**
-   - Does the hosted service need the CMS track to be unblocked?
-     (Likely yes for per-tenant content; this is the runtime-decision
-     Marlin owes.)
-   - Does it need multiplayer / hocuspocus? (Maybe no for v1 if single-
-     editor-per-tenant is acceptable; if "co-op contributors editing
-     together" is the intended UX, yes.)
-   - Does it need ai-pattern-a? (Probably not for the hosting itself,
-     but it shapes Studio's value prop.)
-   - What lumitra-studio Wave 2 specs are now ready (project-binding
-     landed → snippet-injection + settings-panel unblock)? Read them
-     in `docs/specs/wave-2/` and assess.
+## Step 1: Locate and read Lumitra Studio (the CLI)
 
-3. **Identify spec gaps.** What specs would need to be WRITTEN, not just
-   dispatched? Candidates likely include:
-   - Tenant onboarding / signup flow
-   - Per-tenant subdomain or path-based routing
-   - Billing surface (if not deferred)
-   - Publish pipeline (Studio → static hosting → custom domain)
-   - Analytics injection on publish (uses the project-binding fields)
-   - Editor session auth (different from app-runtime auth)
-   For each gap, give it a slug, a 2-paragraph problem statement, and
-   note its dependencies on existing wave-1/2/3 specs.
+Find the source. Read its README, its entry point, its config
+file format, how it authenticates to analytics.lumitra.co, and
+specifically:
 
-4. **Sequence the work.** What's the minimal slice to hosted-service
-   v0.1? What MUST come before each piece? Order by:
-   - Architectural prerequisites (CMS runtime decision, hocuspocus
-     decision)
-   - Spec writing (the ones you identified in step 3)
-   - Implementation dispatch (which existing + new specs land in what
-     wave)
+- What does the CLI actually do? (event ingestion? experiment config?
+  flag management? something else?)
+- Is "localhost-only" a deployment fact (it runs on the user's machine
+  and that's the architecture) or a limitation (it COULD be hosted but
+  isn't yet)?
+- Where does it store state? A local file? A remote DB it already
+  talks to?
+- What's its install surface today? (binary download, `uv tool install`,
+  `npm install -g`, a script?)
+- Does it have a programmatic API or only a CLI surface?
 
-5. **Flag the architectural decisions Marlin owes** before any of this
-   can dispatch. CMS runtime, multiplayer scope, custom-domain
-   strategy, billing scope. Each gets one line.
+Record findings as a "Lumitra Studio: what it actually is" section.
+
+## Step 2: Read the framer-clone integration surface
+
+For each lumitra-studio spec (Wave 1 + Wave 2) in framer-clone, list:
+
+- What problem the spec solves on the framer-clone side
+- What it assumes Lumitra Studio provides (API endpoint? SDK? config
+  file shape?)
+- Where the spec is in its lifecycle (draft / done; if done, the
+  commit sha)
+
+Also read the project-binding spec carefully because it landed:
+`~/software-dev/ERP-suite/projects/framer-clone/docs/specs/wave-1/lumitra-studio-project-binding.md`
+and verify your understanding against the committed code at
+`bde156a`.
+
+## Step 3: Map the integration architecture as it exists today
+
+Draw it out (in markdown ASCII or just a labeled list):
+
+- Where does a framer-clone-published site send events?
+- Does the snippet it emits hit Lumitra Studio directly, or
+  analytics.lumitra.co directly?
+- Where does Lumitra Studio sit in the request path?
+- What's currently localhost-bound and what's not?
+
+This is the load-bearing diagram for the hosted-service analysis. If
+you can't draw it, you don't understand it yet; read more code first.
+
+## Step 4: Define "Lumitra Studio as a hosted service" concretely
+
+The prior LolaStories session that brainstormed this has its own
+intent. Write it down in 3-5 sentences:
+
+- Who is the tenant of the hosted service? (Lola Stories? Framer-clone
+  end users? Anyone with an API key?)
+- What does the tenant get from hosting that they don't get from
+  localhost-only? (a stable endpoint? multi-tenancy? team access?
+  durability? something framer-clone needs?)
+- What stays localhost-only after this change, if anything? (CLI for
+  local dev? An "offline" mode?)
+- What's NOT in scope? (multi-region, white-label, on-prem)
+
+## Step 5: Dependency tree against current state
+
+Now that you have the architecture grounded, walk the tree:
+
+- Does hosted Lumitra Studio depend on framer-clone changes? Which
+  specs?
+- Does it depend on the framer-clone CMS track (currently blocked on
+  Marlin's runtime decision)?
+- Does it depend on framer-clone multiplayer (currently blocked on
+  hocuspocus)?
+- Does it depend on changes inside Lumitra Studio itself (extract
+  the request-handling code from CLI mode into a hostable HTTP server)?
+- Does it touch analytics.lumitra.co? (e.g. new endpoints on the
+  analytics product to receive multi-tenant studio events)
+
+For each dependency, note:
+- Whether the spec exists (and where)
+- Whether the spec needs to be WRITTEN (slug + 2-paragraph problem
+  statement)
+- Whether it's blocked on an architectural decision Marlin owes
+
+## Step 6: Sequence the minimal slice
+
+What's the smallest set of changes that gets you a working hosted
+Lumitra Studio v0.1? Order:
+
+1. Architectural decisions Marlin owes (one line each, no more)
+2. Specs to write (new ones, with slugs)
+3. Specs to dispatch via orchestrator (existing + new)
+4. Out of scope for v0.1 but on the road
+
+# Current framer-clone wave status (so you don't need to re-derive)
+
+- Main at commit `00956c5`, 4 commits ahead of origin (`da96f2a`), not
+  pushed. 137 tests pass at HEAD.
+- Wave 1 done (8 of 18): binding-shape, data-source-provider,
+  component-registry-bindable-slots, yjs-doc-shape, static-html-
+  data-component-id-fix, lumitra-studio-project-binding, mst-snapshot-
+  serializer, anthropic-sdk-bootstrap
+- Newly unblocked, ready to dispatch:
+  ai-pattern-a-tool-schema-registry, ai-pattern-a-read-tools-and-
+  context (after tool-schema-registry), static-html-spike
+- Needs human review before dispatch: lumitra-studio-component-id-
+  attribution (overlap with static-html-data-component-id-fix at
+  `90672dd`)
+- Blocked on CMS runtime decision: cms-service-scaffold + 2 dependents
+- Blocked on hocuspocus infra: hocuspocus-server-scaffold + 2 dependents
+
+# Tools available to the implementation session you'll hand off to
+
+- **orchestrator** at `~/software-dev/orchestrator` (v0.2.0, pushed to
+  `github.com/marlinjai/orchestrator`). Autonomous Worker + Decision
+  Proxy loop. Used to dispatch implementation of specs.
+- **autonomous-orchestration** Claude Code skill (auto-triggers on
+  "autonomous", "dispatch a worker", "launch a batch", etc.). Operator
+  playbook for the orchestrator.
+- **goals/_template.md** in the orchestrator repo for the goal-file
+  starting shape.
+- **The handover convention** at `~/software-dev/orchestrator/docs/handovers/`.
+  Save the implementation prompt there with frontmatter
+  (`type: handover`, `status: draft`, etc.).
 
 # Deliverable: the implementation-session handover prompt
 
 Write a self-contained prompt the fresh session will paste. It should:
-- State the goal of the implementation session in one paragraph
-- List specs to WRITE (with slugs, summaries, dependencies) and specs
-  to DISPATCH (with their goal-file template starting points)
-- Reference the orchestrator + autonomous-orchestration skill so the
-  fresh session knows to use them
-- Surface the architectural decisions Marlin must answer before
-  dispatch (so the fresh session knows when to stop and ask)
-- Include Marlin's constraints: typography (no em-dashes / en-dashes),
-  Infisical for secrets, no push without confirmation, single conventional
-  commit per spec
+
+1. State the goal of the implementation session in one paragraph
+2. Include the "Lumitra Studio: what it actually is" section you wrote
+   in Step 1 (the fresh session has zero context; this section gives
+   it grounding without re-reading source)
+3. Include the integration-architecture diagram from Step 3
+4. List specs to WRITE: slugs, 2-paragraph problem statements,
+   dependencies on existing specs
+5. List specs to DISPATCH (existing draft specs that hosted-service
+   needs): slugs and the orchestrator goal-file template path
+6. Surface the architectural decisions Marlin must answer BEFORE
+   dispatch (so the fresh session knows when to stop and ask)
+7. Include Marlin's constraints: typography (no em-dashes / en-dashes
+   anywhere, including commits), Infisical for secrets, no push without
+   confirmation, single conventional commit per spec
 
 Save the implementation prompt to:
-`~/software-dev/orchestrator/docs/handovers/<DATE>-lumitra-studio-hosted-service-implementation.md`
+`~/software-dev/orchestrator/docs/handovers/<TODAY>-lumitra-studio-hosted-service-implementation.md`
 
 with proper frontmatter (`type: handover`, `status: draft`, `date`,
 `title`, `summary`).
 
 # Constraints for this analysis session
 
-- Do not write code or edit specs in this session. Analysis only.
+- Do not write code or edit specs.
 - Do not push to remote.
 - Marlin's typography: no em-dashes (`—`) or en-dashes (`–`) anywhere,
   use colons / parentheses / periods instead.
-- Read the actual files before drawing conclusions; don't speculate
-  from the spec name alone.
-- If you need information you can't find (e.g. how the existing
-  Lumitra Analytics product authenticates tenants), record it as an
-  "open question for Marlin" rather than guessing.
+- Read the actual files in all three codebases before drawing
+  conclusions. Speculation from filenames or skill descriptions alone
+  produced the prior wrong handover.
+- If you cannot locate Lumitra Studio (the CLI), STOP and ask Marlin
+  for the path before continuing. Don't substitute "analytics.lumitra.co"
+  for it; they are different things.
+- If your analysis surfaces something architecturally surprising,
+  STOP and tell Marlin before writing the implementation handover. A
+  wrong handover wastes a fresh session and burns Marlin's time more
+  than it saves it.
 
 # Report at the end
 
 When done, output:
 1. Path to the implementation handover file you wrote
-2. The list of specs to write (slugs + 1-line summaries)
-3. The list of architectural decisions Marlin owes
-4. Estimated total slices to reach hosted-service v0.1
+2. The "Lumitra Studio: what it actually is" summary in 3-5 sentences
+   (so Marlin can sanity-check your grounding before he reads the rest)
+3. The list of specs to write (slugs + 1-line summaries each)
+4. The list of architectural decisions Marlin owes
+5. Estimated total slices to reach hosted-service v0.1
+6. Anything you got stuck on or had to defer
 ```
 
 ---
 
-## Notes for the analyzing session
+## Notes for the analyzing session (out-of-band, not part of the paste-in)
 
-- This is a thinking session, not a building session. Resist the urge
-  to dispatch a Worker before specs exist.
+- This is a thinking session, not a building one. The trap with
+  "autonomous" dispatch tools nearby is to start dispatching before
+  the specs exist. Resist.
 - Marlin's pace: he prefers one bundled PR over many small ones when
   the scope is a refactor; for fresh feature waves he prefers
-  one-spec-per-PR (which is what the orchestrator enforces). The
-  hosted-service work is feature-wave, so default to per-spec.
+  one-spec-per-PR (which is what the orchestrator enforces). Hosted-
+  service work is feature-wave, so default to per-spec.
 - The framer-clone STATUS.md and wave-1 specs are the source of truth
-  for current state. The README field reports in the orchestrator repo
-  are historical color, useful for "how did past batches feel" but not
-  for "what's the current architectural state."
-- If your analysis surfaces something architecturally surprising (e.g.
-  "this needs a complete redesign of ProjectModel"), stop and tell
-  Marlin BEFORE writing the implementation handover. A wrong handover
-  wastes a fresh session.
+  for the integration side. The README field reports in the orchestrator
+  repo are historical color, useful for "how did past batches feel" but
+  not for "what's the current architectural state."
+- The Lumitra MCP server registered on this machine (per the skill
+  list) talks to analytics.lumitra.co. If the CLI source is hard to
+  find, the MCP config in `~/.claude.json` or
+  `~/software-dev/dotfiles/claude/user-mcp.json` may have a pointer
+  to where it lives.
+- A previous handover at `2026-05-25-tooling-baseline-bootstrap.md`
+  (now status: completed) discovered that `printing-press` is upstream
+  at `mvanhorn/cli-printing-press` and `trello` ships via
+  `Lola-Stories/trello-pp-cli`. Lumitra Studio may have a similar
+  arrangement worth checking before assuming it's a Marlin-only repo.
