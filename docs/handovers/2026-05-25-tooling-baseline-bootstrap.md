@@ -1,9 +1,10 @@
 ---
 type: handover
-status: draft
+status: completed
 date: 2026-05-25
 title: Tooling baseline bootstrap for new machines and co-op contributors
 summary: Push orchestrator + sibling tooling repos to git, decide their hosting structure, and author a Lola Stories contributor-onboarding script that installs the full Marlin tooling baseline on a fresh machine.
+resolution: Discovery surfaced that the handover's premise was partly stale. printing-press is upstream at mvanhorn/cli-printing-press and the trello binary already ships via Lola-Stories/trello-pp-cli. Lola-Stories/bootstrap was already in production. The real missing pieces were the orchestrator GitHub push and a unifying design that prevents drift between Lola/bootstrap and dotfiles/install.sh. Orchestrator pushed to github.com/marlinjai/orchestrator (public). Follow-up plan: docs/plans/2026-05-25-unified-marlinjai-bootstrap.md (status draft) for the unified profile-driven bootstrap.
 ---
 
 # Handover prompt: tooling baseline bootstrap
