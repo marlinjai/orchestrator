@@ -9,9 +9,16 @@ projects: [orchestrator, dotfiles, lola-stories]
 phase_status:
   phase_1_scaffold: completed (2026-05-25, merged at marlinjai/bootstrap@c3c6249)
   phase_2_lola_contributor: completed (2026-05-25, merged to Lola-Stories/bootstrap via PR #3)
-  phase_3_dotfiles_absorption: in-progress (mechanical steps 1-9 merged via PR #1 at marlinjai/bootstrap@545449c; classification doc at docs/phase-3-classification.md; step 10 reconcile against Marlin's laptop pending; steps 11 freeze + 12 archive pending)
+  phase_3_dotfiles_absorption: completed (2026-05-25). Mechanical migration (steps 1-9) merged at marlinjai/bootstrap@545449c via PR #1. gitconfig template patched for gh credential helpers at marlinjai/bootstrap@1b88d59. Step 10 reconcile applied via `./bootstrap --profile marlin-dev --force` on Marlin's laptop; post-apply reconcile shows 2 cosmetic drift entries (1password-cli @beta vs stable, printing-press PATH detection at ~/go/bin) tracked in the polish queue. Step 11 ARCHIVED banner added to marlinjai/dotfiles README at dotfiles@c953a3c. Step 12 `gh repo archive marlinjai/dotfiles` succeeded; isArchived=true on GitHub. Local checkout at ~/software-dev/dotfiles preserved for git history. Reversible with `gh repo unarchive`.
   phase_4_custom_multiselect: queued
   phase_5_infisical_enforcement: queued
+  phase_polish_queue:
+    - Switch from Colima to Docker Desktop (Brewfile + drop colima-start module)
+    - Resolve 1password-cli @beta vs stable conflict
+    - Fix printing-press PATH detection (set GOBIN or check ~/go/bin)
+    - Fix pnpm symlink conflict (brew link --overwrite)
+    - Soft-fail UX for module errors (gitconfig-template fail() halts whole bootstrap)
+    - SSH key upload scope: gh auth refresh -h github.com -s admin:public_key
 ---
 
 # Unified marlinjai/bootstrap
