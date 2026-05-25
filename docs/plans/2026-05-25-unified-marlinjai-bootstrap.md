@@ -1,11 +1,17 @@
 ---
 type: plan
-status: draft
+status: in-progress
 date: 2026-05-25
 title: Unified marlinjai/bootstrap with profile-driven installation
 summary: Collapse Lola-Stories/bootstrap and dotfiles/install.sh into a single public marlinjai/bootstrap repo with profile selection (lola-contributor, marlin-dev, custom). Infisical-first secret handling baked in.
 tags: [bootstrap, dotfiles, lola-stories, orchestrator, infisical, dx]
 projects: [orchestrator, dotfiles, lola-stories]
+phase_status:
+  phase_1_scaffold: completed (2026-05-25, merged at marlinjai/bootstrap@c3c6249)
+  phase_2_lola_contributor: completed (2026-05-25, merged to Lola-Stories/bootstrap via PR #3)
+  phase_3_dotfiles_absorption: queued (requires interactive --reconcile against Marlin's live laptop)
+  phase_4_custom_multiselect: queued
+  phase_5_infisical_enforcement: queued
 ---
 
 # Unified marlinjai/bootstrap
