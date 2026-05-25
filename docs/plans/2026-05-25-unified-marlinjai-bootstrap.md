@@ -9,7 +9,7 @@ projects: [orchestrator, dotfiles, lola-stories]
 phase_status:
   phase_1_scaffold: completed (2026-05-25, merged at marlinjai/bootstrap@c3c6249)
   phase_2_lola_contributor: completed (2026-05-25, merged to Lola-Stories/bootstrap via PR #3)
-  phase_3_dotfiles_absorption: queued (requires interactive --reconcile against Marlin's live laptop)
+  phase_3_dotfiles_absorption: in-progress (mechanical steps 1-9 merged via PR #1 at marlinjai/bootstrap@545449c; classification doc at docs/phase-3-classification.md; step 10 reconcile against Marlin's laptop pending; steps 11 freeze + 12 archive pending)
   phase_4_custom_multiselect: queued
   phase_5_infisical_enforcement: queued
 ---
