@@ -9,3 +9,4 @@ build/
 .orchestrator/
 .infisical.json
 .DS_Store
+.claude/

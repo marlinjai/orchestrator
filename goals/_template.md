@@ -1,6 +1,10 @@
 ---
 task: <task-id-kebab-case>
 spec: <relative/path/to/spec.md inside the target repo, if applicable>
+# Optional, for batch dispatch. See the autonomous-orchestration skill's
+# "Batch dispatch (dependency-aware)" section.
+# depends_on: [<other-task-id>, ...]   # must MERGE before this task launches
+# shared_state: [<tag>, ...]           # canonical tags: lockfile, prisma, migrations, env, workspace, next-config, claude-md
 ---
 
 # Goal
