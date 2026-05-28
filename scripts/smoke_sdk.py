@@ -44,7 +44,7 @@ async def main() -> int:
     leaked = [fp for fp in HOOK_FINGERPRINTS if fp in joined]
     pong_seen = "pong" in joined.lower()
 
-    print(f"\n--- smoke summary ---")
+    print("\n--- smoke summary ---")
     print(f"elapsed: {elapsed:.2f}s")
     print(f"pong seen: {pong_seen}")
     print(f"hook fingerprints leaked: {leaked}")
