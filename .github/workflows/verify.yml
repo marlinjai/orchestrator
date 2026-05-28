@@ -1,0 +1,49 @@
+name: Verify
+
+# Lint + test gate. The push trigger is the post-merge alarm on master; the
+# pull_request trigger is what branch protection pins against so a PR cannot
+# merge with red tests or lint. There is no deploy here: the orchestrator ships
+# as a uv tool / PyPI package, not a Coolify app.
+on:
+  push:
+    branches: [master]
+  pull_request:
+    branches: [master]
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+jobs:
+  verify:
+    name: ruff + pytest
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    strategy:
+      fail-fast: false
+      matrix:
+        python-version: ["3.11", "3.13"]
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up uv
+        uses: astral-sh/setup-uv@v5
+        with:
+          enable-cache: true
+
+      - name: Install Python ${{ matrix.python-version }}
+        run: uv python install ${{ matrix.python-version }}
+
+      - name: Create venv and install
+        run: |
+          uv venv --python ${{ matrix.python-version }}
+          uv pip install -e ".[dev]"
+
+      - name: Ruff
+        run: uv run ruff check
+
+      - name: Pytest
+        run: uv run pytest -q
