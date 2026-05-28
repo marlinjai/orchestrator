@@ -37,6 +37,10 @@ The control loop lives in `orchestrator/orchestrator.py`. One iteration =
 
 Key boundary: the Worker is the only thing that touches the project repo. The Proxy never executes code, only reads state. The orchestrator process owns state.json and the kill switch.
 
+### Marlin Proxy (layered autonomy)
+
+When the Decision Proxy returns `escalate`, the orchestrator (if `marlin_proxy.mode != off`) calls the Marlin Proxy (`marlin_proxy.py`) before interrupting Marlin. It is a second stateless single-shot LLM call using `personas/marlin.md`, returning a `MarlinDecision` (`auto_approve | auto_defer | escalate`) plus a category. Config (`config.py`, from `~/.config/orchestrator/config.toml` + per-task goal frontmatter) maps each category to `live | shadow | escalate`. `live` lets the proxy decide; `shadow` decides-but-still-escalates (logging the would-be choice for later agreement review); `escalate` always interrupts. `irreversible_ops` (prod, secrets, DNS) is hard-wired to escalate and cannot be relaxed by config or per-task frontmatter. Every decision is appended to an append-only JSONL ledger (`ledger.py`) plus a human-readable `notes.md`; `state.autonomy_stats` tracks streaks and autonomous runtime. Fast paths: a kill-switch file and context-saturation both force escalate before any token spend. Malformed persona output or a timeout also fail safe to escalate, never to a silent auto-approve. Review via `orchestrator marlin-proxy review`. Defaults to `mode=off`; nothing auto-decides until explicitly enabled.
+
 ### SDK gotchas (load-bearing, learned via dogfood)
 
 - `CLAUDE_DISABLE_HOOKS=1` is a phantom env var. Hook isolation is achieved via `ClaudeAgentOptions(setting_sources=[])` in `worker.py`. Do not regress this: SessionStart token bloat will silently consume the Worker's context.
@@ -57,6 +61,10 @@ State directory layout per task:
       state.json         # pydantic-validated, atomic writes
       run.log            # tee'd stdout/stderr from the Worker session
       kill                # presence = halt at next iteration boundary
+
+## Operator skill (bundled)
+
+The Claude Code operator playbook lives in this repo at `skills/autonomous-orchestration/SKILL.md`, versioned alongside the code it documents. The `marlinjai/bootstrap` `orchestrator-cli` module installs the CLI and symlinks this skill into `~/.claude/skills/`, so the skill never drifts from the CLI version. When you change CLI behavior (new flags, state fields, the Marlin Proxy), update the skill in the same PR.
 
 ## Style
 

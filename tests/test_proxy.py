@@ -1,7 +1,4 @@
-from pathlib import Path
-import pytest
 from orchestrator.proxy import (
-    ProxyDecision,
     build_proxy_prompt,
     parse_proxy_output,
 )

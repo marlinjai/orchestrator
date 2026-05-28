@@ -57,6 +57,19 @@ class IterationUsage(BaseModel):
     proxy_ms: int = 0
 
 
+class AutonomyStats(BaseModel):
+    # consecutive marlin-proxy auto-decisions since the last escalation
+    decisions_between_escalations: int = 0
+    # highest streak observed across the run
+    max_decisions_between_escalations: int = 0
+    # cumulative wall time of iterations the marlin-proxy auto-approved
+    autonomous_runtime_ms: int = 0
+    # totals across the run
+    auto_approved: int = 0
+    auto_deferred: int = 0
+    escalated: int = 0
+
+
 class State(BaseModel):
     task_id: str
     started_at: datetime = Field(default_factory=lambda: datetime.now(timezone.utc))
@@ -71,6 +84,7 @@ class State(BaseModel):
     max_iterations: int = 50
     handovers: list[Handover] = []
     usage: list[IterationUsage] = []
+    autonomy_stats: AutonomyStats = Field(default_factory=AutonomyStats)
     baseline_ref: str | None = None
     status: TaskStatus = "running"
     exit_reason: str | None = None
