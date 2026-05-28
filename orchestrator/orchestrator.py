@@ -7,16 +7,23 @@ from pathlib import Path
 from claude_agent_sdk import ClaudeSDKClient
 from rich.console import Console
 
+from orchestrator.config import MarlinProxyConfig, apply_task_overrides, load_config
 from orchestrator.guardrails import (
     iteration_cap_hit,
     kill_switch_active,
     wall_clock_cap_hit,
 )
+from orchestrator.ledger import LedgerEntry, append_decision, append_note, now_iso
+from orchestrator.marlin_proxy import MarlinDecision, run_marlin_decision
+from orchestrator.parse import parse_frontmatter
 from orchestrator.proxy import ProxyDecision, run_proxy_decision
 from orchestrator.reconcile import git_head, reconcile
 from orchestrator.state import IterationUsage, State, load_state, save_state
 from orchestrator.transcript import AssistantTurn, extract_model, extract_text, extract_usage
 from orchestrator.worker import build_worker_options, run_worker_turn
+
+
+_BUNDLED_MARLIN_PERSONA = Path(__file__).parent.parent / "personas" / "marlin.md"
 
 
 @dataclass
@@ -30,6 +37,7 @@ class OrchestratorConfig:
     max_seconds: float = 4 * 3600
     transcript_window: int = 10
     log_path: Path | None = None
+    marlin_persona_file: Path | None = None
 
 
 console = Console()
@@ -120,10 +128,85 @@ async def _run_one_turn(
     return chunks, decision, usage
 
 
+def _load_marlin(cfg: OrchestratorConfig, goal_text: str) -> tuple[MarlinProxyConfig, str]:
+    """Resolve the Marlin Proxy config (global config + per-task frontmatter)
+    and its persona text. If the proxy is enabled but the persona is missing,
+    force mode=off so the orchestrator fails safe to plain escalation.
+    """
+    mp_config = load_config()
+    frontmatter = parse_frontmatter(goal_text)
+    mp_config = apply_task_overrides(mp_config, frontmatter)
+
+    if mp_config.mode == "off":
+        return mp_config, ""
+
+    persona_path = cfg.marlin_persona_file or _BUNDLED_MARLIN_PERSONA
+    if not persona_path.exists():
+        mp_config.mode = "off"
+        return mp_config, ""
+    return mp_config, persona_path.read_text().strip()
+
+
+def _record_marlin_decision(
+    *,
+    config: MarlinProxyConfig,
+    state: State,
+    marlin: MarlinDecision,
+    tokens_in: int,
+    wall_ms: int,
+    iter_ms: int,
+) -> None:
+    """Update autonomy stats and append to the ledger (+ notes on auto-actions).
+    A shadow-mode decision is logged with executed=False and its would-be choice
+    preserved, so the weekly review can compute agreement against Marlin's later
+    real choice (filled in out of band)."""
+    stats = state.autonomy_stats
+    if marlin.executed and marlin.choice == "auto_approve":
+        stats.decisions_between_escalations += 1
+        stats.max_decisions_between_escalations = max(
+            stats.max_decisions_between_escalations,
+            stats.decisions_between_escalations,
+        )
+        stats.autonomous_runtime_ms += iter_ms
+        stats.auto_approved += 1
+        append_note(
+            config.notes_path,
+            f"[{state.task_id} iter {state.iteration}] auto-approved "
+            f"({marlin.category}): {marlin.reason}",
+        )
+    elif marlin.executed and marlin.choice == "auto_defer":
+        stats.auto_deferred += 1
+        append_note(
+            config.notes_path,
+            f"[{state.task_id} iter {state.iteration}] deferred "
+            f"({marlin.category}): {marlin.reason}",
+        )
+    else:
+        stats.escalated += 1
+        stats.decisions_between_escalations = 0
+
+    append_decision(
+        config.ledger_path,
+        LedgerEntry(
+            ts=now_iso(),
+            task_id=state.task_id,
+            iteration=state.iteration,
+            category=marlin.category,
+            effective_mode=marlin.effective_mode,
+            proxy_choice=marlin.proxy_choice,
+            proxy_reason=marlin.reason,
+            executed=marlin.executed,
+            tokens_in=tokens_in,
+            wall_ms=wall_ms,
+        ),
+    )
+
+
 async def run_orchestrator(cfg: OrchestratorConfig) -> None:
     state = _initialize_state(cfg)
     state_path = cfg.state_dir / "state.json"
     persona = cfg.persona_file.read_text().strip()
+    mp_config, marlin_persona = _load_marlin(cfg, state.goal)
     started_at = time.time()
     kill_switch = cfg.state_dir / "STOP"
 
@@ -211,10 +294,61 @@ async def run_orchestrator(cfg: OrchestratorConfig) -> None:
                         save_state(state_path, state)
                         return
                     if decision.action == "escalate":
-                        state.status = "escalated"
-                        state.exit_reason = decision.text or decision.reasoning or "escalated"
+                        # The Decision Proxy wants Marlin. If the Marlin Proxy is
+                        # enabled, let it try to answer on his behalf first.
+                        if mp_config.mode == "off":
+                            state.status = "escalated"
+                            state.exit_reason = decision.text or decision.reasoning or "escalated"
+                            save_state(state_path, state)
+                            local_console.print(f"[bold red]ESCALATE:[/bold red] {decision.text}")
+                            return
+
+                        recent = [
+                            AssistantTurn(text=t) for t in chunks if t.strip()
+                        ][-cfg.transcript_window:]
+                        escalation_text = decision.text or decision.reasoning or "escalated"
+                        mp_start = time.monotonic()
+                        marlin = await run_marlin_decision(
+                            config=mp_config,
+                            persona=marlin_persona,
+                            state=state,
+                            escalation_text=escalation_text,
+                            recent_turns=recent,
+                        )
+                        mp_ms = int((time.monotonic() - mp_start) * 1000)
+                        iter_ms = usage.worker_ms + usage.proxy_ms + mp_ms
+                        _record_marlin_decision(
+                            config=mp_config,
+                            state=state,
+                            marlin=marlin,
+                            tokens_in=usage.input_tokens,
+                            wall_ms=mp_ms,
+                            iter_ms=iter_ms,
+                        )
                         save_state(state_path, state)
-                        local_console.print(f"[bold red]ESCALATE:[/bold red] {decision.text}")
+                        local_console.print(
+                            f"[bold blue]marlin-proxy:[/bold blue] {marlin.choice} "
+                            f"[{marlin.category}/{marlin.effective_mode}] ({marlin.reason})"
+                        )
+
+                        if marlin.choice == "auto_approve":
+                            next_message = (
+                                f"Marlin approved: {marlin.reason}. Continue."
+                            )
+                            continue
+                        if marlin.choice == "auto_defer":
+                            state.status = "stopped"
+                            state.exit_reason = f"deferred by marlin-proxy: {marlin.reason}"
+                            save_state(state_path, state)
+                            local_console.print(
+                                f"[yellow]DEFERRED:[/yellow] {marlin.reason}"
+                            )
+                            return
+                        # escalate (includes shadow mode, which always interrupts)
+                        state.status = "escalated"
+                        state.exit_reason = escalation_text
+                        save_state(state_path, state)
+                        local_console.print(f"[bold red]ESCALATE:[/bold red] {escalation_text}")
                         return
                     next_message = decision.text or "Continue."
         except Exception as e:

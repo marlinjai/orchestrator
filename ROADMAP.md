@@ -24,7 +24,12 @@ Living tracker for orchestrator work. Read top to bottom: shipped at the top, in
 
 ## In flight
 
-None right now. Pick the next slice from "Queued" below.
+### Marlin Proxy: layered autonomy (Phase 0 landed)
+- A persona-driven layer on the Decision Proxy `escalate` path: mechanical decisions (merge-after-verify, branch cleanup, status, procedural) auto-approved, taste/scope/product/irreversible escalated.
+- Modules: `config.py` (config.toml + per-task frontmatter + per-category modes, hard-wired `irreversible_ops` escalate), `ledger.py` (append-only JSONL + notes.md, agreement aggregation), `marlin_proxy.py` (single-shot persona call, kill-switch + context-saturation fast paths, fail-safe-to-escalate).
+- Wired into `orchestrator.py` escalate branch; `autonomy_stats` in `state.json`; `orchestrator marlin-proxy review` CLI; `personas/marlin.md` grounded in mined transcript patterns.
+- Defaults to `mode=off`. Rollout: off -> shadow (collect agreement data) -> live on safe categories -> Phase 4 self-improvement.
+- Plan: `docs/plans/2026-05-27-marlin-proxy.md` (in-progress).
 
 ## Queued (v2 themes, prioritized)
 

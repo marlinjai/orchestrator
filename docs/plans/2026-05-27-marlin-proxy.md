@@ -1,6 +1,6 @@
 ---
 type: plan
-status: draft
+status: in-progress
 date: 2026-05-27
 title: Marlin Proxy, a layered policy for replacing the mechanical 70% of human back-and-forth
 tags: [orchestrator, autonomy, proxy, persona, telemetry]

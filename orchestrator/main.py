@@ -7,11 +7,15 @@ import typer
 from rich.console import Console
 from rich.table import Table
 
+from orchestrator.config import load_config
+from orchestrator.ledger import agreement_by_category, read_entries
 from orchestrator.orchestrator import OrchestratorConfig, run_orchestrator
 from orchestrator.state import load_state
 
 
 app = typer.Typer(help="Autonomous Claude Code orchestrator")
+marlin_app = typer.Typer(help="Marlin Proxy: review and manage layered-autonomy decisions")
+app.add_typer(marlin_app, name="marlin-proxy")
 console = Console()
 
 
@@ -35,6 +39,11 @@ def start(
     task_id: str = typer.Option("", "--task-id", help="Task ID (auto-generated if empty)"),
     max_iterations: int = typer.Option(50, "--max-iterations"),
     max_hours: float = typer.Option(4.0, "--max-hours"),
+    marlin_persona: Path = typer.Option(
+        Path(__file__).parent.parent / "personas" / "marlin.md",
+        "--marlin-persona",
+        help="Path to the Marlin Proxy persona (used when marlin_proxy mode != off)",
+    ),
 ):
     """Start a new autonomous task."""
     tid = task_id or uuid.uuid4().hex[:8]
@@ -48,6 +57,7 @@ def start(
         max_iterations=max_iterations,
         max_seconds=max_hours * 3600,
         log_path=state_dir / "run.log",
+        marlin_persona_file=marlin_persona,
     )
     console.print(f"[bold green]starting task {tid}[/bold green]")
     console.print(f"  goal: {goal}")
@@ -107,8 +117,51 @@ def status(task_id: str = typer.Option(..., "--task-id")):
             f"in={in_tok} out={out_tok} cache_r={cache_r} cache_c={cache_c}",
         )
         table.add_row("wall_ms", f"worker={worker_ms} proxy={proxy_ms}")
+    a = state.autonomy_stats
+    if a.auto_approved or a.auto_deferred or a.escalated:
+        table.add_row(
+            "marlin-proxy",
+            f"approved={a.auto_approved} deferred={a.auto_deferred} escalated={a.escalated}",
+        )
+        table.add_row(
+            "autonomy",
+            f"max_streak={a.max_decisions_between_escalations} "
+            f"runtime_ms={a.autonomous_runtime_ms}",
+        )
     table.add_row("exit_reason", state.exit_reason or "")
     console.print(table)
+
+
+@marlin_app.command("review")
+def marlin_review():
+    """Review Marlin Proxy decisions: agreement rate by category, disagreements."""
+    cfg = load_config()
+    entries = read_entries(cfg.ledger_path)
+    if not entries:
+        console.print(f"[yellow]no marlin-proxy decisions yet at {cfg.ledger_path}[/yellow]")
+        return
+
+    agg = agreement_by_category(entries)
+    table = Table(title=f"Marlin Proxy review ({len(entries)} decisions)")
+    table.add_column("category")
+    table.add_column("total", justify="right")
+    table.add_column("judged", justify="right")
+    table.add_column("agreed", justify="right")
+    table.add_column("rate", justify="right")
+    for cat in sorted(agg):
+        c = agg[cat]
+        rate = "n/a" if c.agreement_rate is None else f"{c.agreement_rate * 100:.0f}%"
+        table.add_row(cat, str(c.total), str(c.judged), str(c.agreed), rate)
+    console.print(table)
+
+    disagreements = [e for e in entries if e.agreed is False]
+    if disagreements:
+        console.print(f"\n[bold red]{len(disagreements)} disagreements:[/bold red]")
+        for e in disagreements[-10:]:
+            console.print(
+                f"  [{e.category}] proxy={e.proxy_choice} actual={e.actual_choice} "
+                f": {e.proxy_reason}"
+            )
 
 
 @app.command()
