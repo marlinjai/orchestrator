@@ -62,6 +62,10 @@ State directory layout per task:
       run.log            # tee'd stdout/stderr from the Worker session
       kill                # presence = halt at next iteration boundary
 
+## Operator skill (bundled)
+
+The Claude Code operator playbook lives in this repo at `skills/autonomous-orchestration/SKILL.md`, versioned alongside the code it documents. The `marlinjai/bootstrap` `orchestrator-cli` module installs the CLI and symlinks this skill into `~/.claude/skills/`, so the skill never drifts from the CLI version. When you change CLI behavior (new flags, state fields, the Marlin Proxy), update the skill in the same PR.
+
 ## Style
 
 Repo-level: no em-dashes / en-dashes in any output (commit messages included). Conventional-commit messages. Single commit per Worker-completed spec on its branch.
