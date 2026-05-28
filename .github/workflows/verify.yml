@@ -42,8 +42,11 @@ jobs:
           uv venv --python ${{ matrix.python-version }}
           uv pip install -e ".[dev]"
 
+      # Call the venv binaries directly. `uv run` would re-sync and rebuild the
+      # environment against requires-python (3.11), discarding the matrix venv
+      # and the dev extras, so ruff/pytest would vanish on the 3.13 leg.
       - name: Ruff
-        run: uv run ruff check
+        run: .venv/bin/ruff check
 
       - name: Pytest
-        run: uv run pytest -q
+        run: .venv/bin/pytest -q
