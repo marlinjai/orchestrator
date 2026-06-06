@@ -40,6 +40,22 @@ cd ~/software-dev/orchestrator && uv tool install --editable .
 
 After install, the `orchestrator` binary is on PATH everywhere.
 
+## Version check (run this before every dispatch)
+
+The minimum required version is **0.3.0** (adds Layer 3 context-handover). Before dispatching any task, verify and auto-upgrade if needed:
+
+```bash
+INSTALLED=$(uv tool list 2>/dev/null | grep claude-code-orchestrator | grep -oE '[0-9]+\.[0-9]+\.[0-9]+' || echo "0.0.0")
+MIN="0.3.0"
+if [ "$(printf '%s\n' "$MIN" "$INSTALLED" | sort -V | head -n1)" != "$MIN" ]; then
+  echo "orchestrator $INSTALLED < $MIN, upgrading..."
+  uv tool upgrade claude-code-orchestrator
+  uv tool list | grep claude-code-orchestrator
+fi
+```
+
+If `orchestrator` is not found at all, run the one-time install above first. The bootstrap (`marlinjai/bootstrap --profile marlin-dev`) handles this automatically on new machines via the `orchestrator-cli` module.
+
 ## The canonical flow
 
 1. **Write a goal file** at `~/software-dev/orchestrator/goals/<task-id>.md`. Use `goals/_template.md` as the starting shape. The goal file is the Worker's full instruction set: definition-of-done, constraints, what NOT to touch.
@@ -99,10 +115,14 @@ task: <task-id>
 spec: <path/to/spec.md>
 depends_on: [<other-task-id>, ...]   # must MERGE before this task launches
 shared_state: [<tag>, ...]           # serializes with any task sharing a tag
+verify: pnpm test && pnpm build && tsc --noEmit && pnpm lint   # gate before accepting `completed`
+verify_fix_cap: 2                    # consecutive verify failures tolerated, then escalate
 ---
 ```
 
-Both fields are optional. Absent both, the task is parallel-safe (an independent unit).
+`depends_on` and `shared_state` are optional. Absent both, the task is parallel-safe (an independent unit).
+
+`verify` is the in-loop completion gate (orchestrator source, not the operator's job): before the orchestrator accepts the Worker's `stop` as `completed`, it runs this command in the worktree. Pass goes to `completed`; a failure is fed back to the Worker for up to `verify_fix_cap` retries (default 2) then escalates; a denylisted command or a timeout escalates immediately. Omit `verify` and completion is NOT build-verified (the run logs a warning, and the operator's manual `pnpm test && pnpm build` stays mandatory). The gate runs a shell command and reads the exit code, so a project-specific critic (e.g. a values-only schema round-trip) is just appended to the command: `... && pnpm verify:schema-roundtrip`.
 
 `depends_on` is for explicit ordering: slice 3 cannot start until slice 2's PR has merged into the base branch.
 
@@ -178,7 +198,8 @@ context_saturation  = "shadow"
 unknown             = "escalate"
 
 [marlin_proxy.thresholds]
-context_saturation_tokens = 120000
+context_handover_tokens   = 80000   # auto-handover trigger (~50% of 200k window)
+context_saturation_tokens = 120000  # hard escalation fallback if handover fails
 per_decision_timeout_ms   = 30000
 ```
 
@@ -231,13 +252,14 @@ This means:
   STOP          # touch to halt at next iteration boundary
 ```
 
-Key state.json fields (v0.2+):
+Key state.json fields (v0.3+):
 - `status`: running | completed | escalated | stopped | failed
 - `iteration`, `max_iterations`
 - `baseline_ref`: git HEAD of project at orchestrator start
 - `commits[]`: each entry has `sha`, `message`, `decided_by` (proxy = Worker self-reported via update_state; system = orchestrator detected via git reconcile)
 - `files_touched[]`: same provenance model
 - `usage[]`: per-iteration `input_tokens`, `output_tokens`, `cache_read_tokens`, `cache_creation_tokens`, `model`, `worker_ms`, `proxy_ms`
+- `handovers[]`: each entry has `at_turn`, `reason`, and `doc` (path to HANDOVER.md). Populated when context crosses `context_handover_tokens` and the Worker produces a git-verified checkpoint. A non-empty list means the run survived multiple session legs.
 - `autonomy_stats`: Marlin Proxy counters: `auto_approved`, `auto_deferred`, `escalated`, `decisions_between_escalations`, `max_decisions_between_escalations`, `autonomous_runtime_ms`
 - `exit_reason`: terminal explanation string
 
