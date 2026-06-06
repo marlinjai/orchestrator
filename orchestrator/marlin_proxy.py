@@ -194,14 +194,16 @@ async def run_marlin_decision(
     if config.kill_switch_path.exists():
         return _escalate("unknown", "marlin-proxy kill switch active")
 
-    # Context saturation: fast path before any LLM call. Handover execution is
-    # Phase 5, so for now a saturated context always escalates rather than
-    # silently running deeper into the Dumb Zone.
+    # Hard saturation fallback: if we reach context_saturation_tokens on the
+    # escalate path, the proactive handover (fired at context_handover_tokens
+    # on the reply path in orchestrator.py) did not trigger in time. Escalate
+    # rather than spending more tokens in the Dumb Zone.
     if context_saturated(state, config.context_saturation_tokens):
         tokens = state.usage[-1].input_tokens
         return _escalate(
             "context_saturation",
-            f"context saturated ({tokens} tokens), handover not yet automated",
+            f"context saturated ({tokens} tokens >= {config.context_saturation_tokens}); "
+            f"proactive handover threshold is {config.context_handover_tokens}",
         )
 
     prompt = build_marlin_prompt(

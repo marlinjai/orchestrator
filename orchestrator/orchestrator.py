@@ -13,14 +13,31 @@ from orchestrator.guardrails import (
     kill_switch_active,
     wall_clock_cap_hit,
 )
+from orchestrator.handover import (
+    build_handover_prompt,
+    is_handover_complete,
+    seed_fresh_session_message,
+    verify_handover_doc,
+)
 from orchestrator.ledger import LedgerEntry, append_decision, append_note, now_iso
 from orchestrator.marlin_proxy import MarlinDecision, run_marlin_decision
 from orchestrator.parse import parse_frontmatter
 from orchestrator.proxy import ProxyDecision, run_proxy_decision
 from orchestrator.reconcile import git_head, reconcile
-from orchestrator.state import IterationUsage, State, load_state, save_state
+from orchestrator.state import Handover, IterationUsage, State, load_state, save_state
 from orchestrator.transcript import AssistantTurn, extract_model, extract_text, extract_usage
 from orchestrator.worker import build_worker_options, run_worker_turn
+
+
+_MAX_HANDOVER_LEGS = 10
+
+
+class _HandoverSignal(Exception):
+    """Raised inside the Worker loop to break out of the ClaudeSDKClient session
+    and start a fresh one with the provided seed message."""
+
+    def __init__(self, seed: str) -> None:
+        self.seed = seed
 
 
 _BUNDLED_MARLIN_PERSONA = Path(__file__).parent.parent / "personas" / "marlin.md"
@@ -202,6 +219,86 @@ def _record_marlin_decision(
     )
 
 
+async def _execute_handover(
+    *,
+    client: ClaudeSDKClient,
+    handover_prompt: str,
+    state: State,
+    state_path: Path,
+    cfg: OrchestratorConfig,
+    persona: str,
+    mp_config: MarlinProxyConfig,
+    local_console: Console,
+) -> str | None:
+    """Send the handover prompt to the Worker, verify HANDOVER.md against git,
+    record the handover in state, and return the fresh-session seed message.
+
+    Returns None and sets state.status = "escalated" if the Worker fails to
+    produce HANDOVER.md within one turn.
+    """
+    local_console.print("[bold yellow]handover:[/bold yellow] sending checkpoint prompt to Worker")
+    state.iteration += 1
+    save_state(state_path, state)
+
+    handover_chunks, _, handover_usage = await _run_one_turn(
+        client=client,
+        user_message=handover_prompt,
+        persona=persona,
+        state=state,
+        transcript_window=cfg.transcript_window,
+        out_console=local_console,
+    )
+    worker_output = "".join(handover_chunks)
+
+    # Reload + reconcile before checking the doc
+    state = load_state(state_path)
+    state.usage.append(handover_usage)
+    reconcile(state, cfg.project_dir)
+    save_state(state_path, state)
+
+    doc_path = cfg.project_dir / "HANDOVER.md"
+
+    if not is_handover_complete(worker_output) or not doc_path.exists():
+        state.status = "escalated"
+        missing = []
+        if not is_handover_complete(worker_output):
+            missing.append("HANDOVER_COMPLETE marker")
+        if not doc_path.exists():
+            missing.append("HANDOVER.md file")
+        state.exit_reason = (
+            f"handover failed: Worker did not produce {' or '.join(missing)}"
+        )
+        save_state(state_path, state)
+        local_console.print(
+            f"[bold red]HANDOVER FAILED:[/bold red] {state.exit_reason}"
+        )
+        return None
+
+    discrepancies = verify_handover_doc(doc_path.read_text(), state, cfg.project_dir)
+    if discrepancies:
+        local_console.print(
+            f"[yellow]handover: {len(discrepancies)} git discrepancy(s) noted in seed[/yellow]"
+        )
+        for d in discrepancies:
+            local_console.print(f"[dim]  - {d}[/dim]")
+
+    tokens = state.usage[-1].input_tokens if state.usage else 0
+    state.handovers.append(
+        Handover(
+            at_turn=state.iteration,
+            reason=f"context threshold ({tokens:,} tokens)",
+            doc=str(doc_path),
+        )
+    )
+    save_state(state_path, state)
+
+    local_console.print(
+        f"[bold yellow]handover:[/bold yellow] HANDOVER.md verified "
+        f"(leg {len(state.handovers)}, {len(discrepancies)} discrepancies)"
+    )
+    return seed_fresh_session_message(doc_path, state, discrepancies)
+
+
 async def run_orchestrator(cfg: OrchestratorConfig) -> None:
     state = _initialize_state(cfg)
     state_path = cfg.state_dir / "state.json"
@@ -241,123 +338,173 @@ async def run_orchestrator(cfg: OrchestratorConfig) -> None:
             denied_bash=[],
         )
 
-        try:
-            async with ClaudeSDKClient(options=options) as client:
-                next_message = initial_message
-                while True:
-                    if iteration_cap_hit(iteration=state.iteration, max_iterations=cfg.max_iterations):
-                        state.status = "stopped"
-                        state.exit_reason = f"iteration cap reached ({cfg.max_iterations})"
-                        save_state(state_path, state)
-                        local_console.print(f"[yellow]{state.exit_reason}[/yellow]")
-                        return
-                    if wall_clock_cap_hit(started_at=started_at, max_seconds=cfg.max_seconds):
-                        state.status = "stopped"
-                        state.exit_reason = f"wall-clock cap reached ({cfg.max_seconds}s)"
-                        save_state(state_path, state)
-                        local_console.print(f"[yellow]{state.exit_reason}[/yellow]")
-                        return
-                    if kill_switch_active(kill_switch):
-                        state.status = "stopped"
-                        state.exit_reason = "kill switch activated"
-                        save_state(state_path, state)
-                        local_console.print("[red]kill switch activated. exiting.[/red]")
-                        return
-
-                    state.iteration += 1
-                    save_state(state_path, state)
-                    local_console.print(f"\n[bold cyan]=== iteration {state.iteration} ===[/bold cyan]")
-
-                    chunks, decision, usage = await _run_one_turn(
-                        client=client,
-                        user_message=next_message,
-                        persona=persona,
-                        state=state,
-                        transcript_window=cfg.transcript_window,
-                        out_console=local_console,
-                    )
-                    local_console.print(f"\n[bold magenta]proxy:[/bold magenta] {decision.action} ({decision.reasoning})")
-
-                    # Reload state (Worker may have appended via update_state),
-                    # then reconcile against git and append usage. Persist once.
-                    state = load_state(state_path)
-                    state.usage.append(usage)
-                    commits_added, files_added = reconcile(state, cfg.project_dir)
-                    if commits_added or files_added:
-                        local_console.print(
-                            f"[dim]reconciled: +{commits_added} commits, +{files_added} files[/dim]"
-                        )
-                    save_state(state_path, state)
-                    if decision.action == "stop":
-                        state.status = "completed"
-                        state.exit_reason = decision.reasoning or "proxy stopped"
-                        save_state(state_path, state)
-                        return
-                    if decision.action == "escalate":
-                        # The Decision Proxy wants Marlin. If the Marlin Proxy is
-                        # enabled, let it try to answer on his behalf first.
-                        if mp_config.mode == "off":
-                            state.status = "escalated"
-                            state.exit_reason = decision.text or decision.reasoning or "escalated"
+        next_message = initial_message
+        for _leg in range(_MAX_HANDOVER_LEGS):
+            try:
+                async with ClaudeSDKClient(options=options) as client:
+                    while True:
+                        if iteration_cap_hit(iteration=state.iteration, max_iterations=cfg.max_iterations):
+                            state.status = "stopped"
+                            state.exit_reason = f"iteration cap reached ({cfg.max_iterations})"
                             save_state(state_path, state)
-                            local_console.print(f"[bold red]ESCALATE:[/bold red] {decision.text}")
+                            local_console.print(f"[yellow]{state.exit_reason}[/yellow]")
+                            return
+                        if wall_clock_cap_hit(started_at=started_at, max_seconds=cfg.max_seconds):
+                            state.status = "stopped"
+                            state.exit_reason = f"wall-clock cap reached ({cfg.max_seconds}s)"
+                            save_state(state_path, state)
+                            local_console.print(f"[yellow]{state.exit_reason}[/yellow]")
+                            return
+                        if kill_switch_active(kill_switch):
+                            state.status = "stopped"
+                            state.exit_reason = "kill switch activated"
+                            save_state(state_path, state)
+                            local_console.print("[red]kill switch activated. exiting.[/red]")
                             return
 
-                        recent = [
-                            AssistantTurn(text=t) for t in chunks if t.strip()
-                        ][-cfg.transcript_window:]
-                        escalation_text = decision.text or decision.reasoning or "escalated"
-                        mp_start = time.monotonic()
-                        marlin = await run_marlin_decision(
-                            config=mp_config,
-                            persona=marlin_persona,
-                            state=state,
-                            escalation_text=escalation_text,
-                            recent_turns=recent,
-                        )
-                        mp_ms = int((time.monotonic() - mp_start) * 1000)
-                        iter_ms = usage.worker_ms + usage.proxy_ms + mp_ms
-                        _record_marlin_decision(
-                            config=mp_config,
-                            state=state,
-                            marlin=marlin,
-                            tokens_in=usage.input_tokens,
-                            wall_ms=mp_ms,
-                            iter_ms=iter_ms,
-                        )
+                        state.iteration += 1
                         save_state(state_path, state)
-                        local_console.print(
-                            f"[bold blue]marlin-proxy:[/bold blue] {marlin.choice} "
-                            f"[{marlin.category}/{marlin.effective_mode}] ({marlin.reason})"
-                        )
+                        local_console.print(f"\n[bold cyan]=== iteration {state.iteration} ===[/bold cyan]")
 
-                        if marlin.choice == "auto_approve":
-                            next_message = (
-                                f"Marlin approved: {marlin.reason}. Continue."
+                        chunks, decision, usage = await _run_one_turn(
+                            client=client,
+                            user_message=next_message,
+                            persona=persona,
+                            state=state,
+                            transcript_window=cfg.transcript_window,
+                            out_console=local_console,
+                        )
+                        local_console.print(f"\n[bold magenta]proxy:[/bold magenta] {decision.action} ({decision.reasoning})")
+
+                        # Reload state (Worker may have appended via update_state),
+                        # then reconcile against git and append usage. Persist once.
+                        state = load_state(state_path)
+                        state.usage.append(usage)
+                        commits_added, files_added = reconcile(state, cfg.project_dir)
+                        if commits_added or files_added:
+                            local_console.print(
+                                f"[dim]reconciled: +{commits_added} commits, +{files_added} files[/dim]"
                             )
-                            continue
-                        if marlin.choice == "auto_defer":
-                            state.status = "stopped"
-                            state.exit_reason = f"deferred by marlin-proxy: {marlin.reason}"
+
+                        # Proactive handover check: override a "reply" decision
+                        # when context crosses the handover threshold, before
+                        # quality degrades further.
+                        if (
+                            decision.action == "reply"
+                            and mp_config.context_handover_tokens > 0
+                            and state.usage
+                            and state.usage[-1].input_tokens >= mp_config.context_handover_tokens
+                        ):
+                            tokens_now = state.usage[-1].input_tokens
+                            local_console.print(
+                                f"[bold yellow]handover:[/bold yellow] context threshold "
+                                f"({tokens_now:,} >= {mp_config.context_handover_tokens:,} tokens), "
+                                f"overriding reply with handover"
+                            )
+                            decision = ProxyDecision(
+                                action="handover",
+                                text=build_handover_prompt(state),
+                                reasoning=f"context threshold ({tokens_now:,} tokens)",
+                            )
+
+                        save_state(state_path, state)
+
+                        if decision.action == "stop":
+                            state.status = "completed"
+                            state.exit_reason = decision.reasoning or "proxy stopped"
+                            save_state(state_path, state)
+                            return
+
+                        if decision.action == "handover":
+                            seed = await _execute_handover(
+                                client=client,
+                                handover_prompt=decision.text,
+                                state=state,
+                                state_path=state_path,
+                                cfg=cfg,
+                                persona=persona,
+                                mp_config=mp_config,
+                                local_console=local_console,
+                            )
+                            if seed is None:
+                                # Worker failed to produce HANDOVER.md; already escalated.
+                                return
+                            raise _HandoverSignal(seed)
+
+                        if decision.action == "escalate":
+                            # The Decision Proxy wants Marlin. If the Marlin Proxy is
+                            # enabled, let it try to answer on his behalf first.
+                            if mp_config.mode == "off":
+                                state.status = "escalated"
+                                state.exit_reason = decision.text or decision.reasoning or "escalated"
+                                save_state(state_path, state)
+                                local_console.print(f"[bold red]ESCALATE:[/bold red] {decision.text}")
+                                return
+
+                            recent = [
+                                AssistantTurn(text=t) for t in chunks if t.strip()
+                            ][-cfg.transcript_window:]
+                            escalation_text = decision.text or decision.reasoning or "escalated"
+                            mp_start = time.monotonic()
+                            marlin = await run_marlin_decision(
+                                config=mp_config,
+                                persona=marlin_persona,
+                                state=state,
+                                escalation_text=escalation_text,
+                                recent_turns=recent,
+                            )
+                            mp_ms = int((time.monotonic() - mp_start) * 1000)
+                            iter_ms = usage.worker_ms + usage.proxy_ms + mp_ms
+                            _record_marlin_decision(
+                                config=mp_config,
+                                state=state,
+                                marlin=marlin,
+                                tokens_in=usage.input_tokens,
+                                wall_ms=mp_ms,
+                                iter_ms=iter_ms,
+                            )
                             save_state(state_path, state)
                             local_console.print(
-                                f"[yellow]DEFERRED:[/yellow] {marlin.reason}"
+                                f"[bold blue]marlin-proxy:[/bold blue] {marlin.choice} "
+                                f"[{marlin.category}/{marlin.effective_mode}] ({marlin.reason})"
                             )
+
+                            if marlin.choice == "auto_approve":
+                                next_message = (
+                                    f"Marlin approved: {marlin.reason}. Continue."
+                                )
+                                continue
+                            if marlin.choice == "auto_defer":
+                                state.status = "stopped"
+                                state.exit_reason = f"deferred by marlin-proxy: {marlin.reason}"
+                                save_state(state_path, state)
+                                local_console.print(
+                                    f"[yellow]DEFERRED:[/yellow] {marlin.reason}"
+                                )
+                                return
+                            # escalate (includes shadow mode, which always interrupts)
+                            state.status = "escalated"
+                            state.exit_reason = escalation_text
+                            save_state(state_path, state)
+                            local_console.print(f"[bold red]ESCALATE:[/bold red] {escalation_text}")
                             return
-                        # escalate (includes shadow mode, which always interrupts)
-                        state.status = "escalated"
-                        state.exit_reason = escalation_text
-                        save_state(state_path, state)
-                        local_console.print(f"[bold red]ESCALATE:[/bold red] {escalation_text}")
-                        return
-                    next_message = decision.text or "Continue."
-        except Exception as e:
-            state = load_state(state_path)
-            state.status = "failed"
-            state.exit_reason = f"sdk error: {type(e).__name__}: {e}"
-            save_state(state_path, state)
-            local_console.print(f"[bold red]SDK ERROR:[/bold red] {e}")
-            raise
+                        next_message = decision.text or "Continue."
+            except _HandoverSignal as hs:
+                next_message = hs.seed
+                leg_count = len(state.handovers)
+                local_console.print(
+                    f"[bold yellow]handover:[/bold yellow] starting fresh leg {leg_count + 1}"
+                )
+                continue
+            except Exception as e:
+                state = load_state(state_path)
+                state.status = "failed"
+                state.exit_reason = f"sdk error: {type(e).__name__}: {e}"
+                save_state(state_path, state)
+                local_console.print(f"[bold red]SDK ERROR:[/bold red] {e}")
+                raise
+            # Normal exit (stop, escalate, deferred) - do not start another leg.
+            break
     finally:
         if log_file is not None:
             try:

@@ -56,11 +56,16 @@ Each theme is a candidate "next slice." Pick by urgency × leverage; the smalles
 **Blast radius:** Small.
 **Evidence:** v0.1.x open issues; 2026-05-24 reporting gap.
 
-### Theme 5: context-handover scaffold (skeleton, not full impl)
-**Status:** queued. Should land after Theme 4 (we need stagnation signals to know when to trigger handover) and ideally after Theme 2 telemetry has produced real data (which has now shipped).
-**Problem:** Handover is the other deferred headline feature. No run has approached context budget so the trigger threshold is unknown. Telemetry capture now creates the precondition, but without a handover *destination* the alarms have nowhere to escalate to.
-**Approach:** Define the handover artifact only: a `HANDOVER.md` template that the Worker authors when the Proxy issues a new `handover` action (between `continue` and `escalate`). The orchestrator stops the current Worker session, starts a fresh `ClaudeSDKClient`, seeds the new turn with `HANDOVER.md` as the initial user message. Do not implement automatic triggering yet, make it a manual Proxy decision.
-**Blast radius:** Medium. New Proxy action verb, new persona instructions, session-restart logic in `orchestrator.py`.
+### Theme 5: context-handover scaffold
+**Status:** shipped (2026-06-06). Plan: `docs/plans/2026-06-06-context-handover-layer3.md`.
+**What shipped:**
+- `"handover"` added to `ProxyAction` (orchestrator-internal only, not LLM-emittable).
+- `config.context_handover_tokens = 80_000` (proactive trigger, ~50% of 200k window). Hard escalation fallback remains at `context_saturation_tokens = 120_000`.
+- `orchestrator/handover.py`: `build_handover_prompt`, `verify_handover_doc` (git-anchored, Layer 3), `seed_fresh_session_message`.
+- `orchestrator.py`: proactive override on reply path when token threshold crossed; `_execute_handover` helper; `_HandoverSignal` exception for clean leg breaks; multi-leg outer loop capped at 10 legs.
+- `state.handovers[]` now populated on every handover.
+- 15 new tests, 168/168 passing.
+**Not shipped (Phase B):** sub-goal boundary trigger (needs Theme 4 stagnation signals).
 **Evidence:** Both field reports; original spec.
 
 ### Theme 7: `orchestrator batch` subcommand

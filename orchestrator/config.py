@@ -41,6 +41,7 @@ DEFAULT_CATEGORY_MODES: dict[str, CategoryMode] = {
     "unknown": "escalate",
 }
 
+DEFAULT_CONTEXT_HANDOVER_TOKENS = 80_000
 DEFAULT_CONTEXT_SATURATION_TOKENS = 120_000
 DEFAULT_PER_DECISION_TIMEOUT_MS = 30_000
 
@@ -67,6 +68,7 @@ class MarlinProxyConfig:
     notes_path: Path = field(default_factory=lambda: _orchestrator_home() / "marlin-proxy-notes.md")
     kill_switch_path: Path = field(default_factory=lambda: _orchestrator_home() / "marlin-proxy.disabled")
     category_modes: dict[str, CategoryMode] = field(default_factory=lambda: dict(DEFAULT_CATEGORY_MODES))
+    context_handover_tokens: int = DEFAULT_CONTEXT_HANDOVER_TOKENS
     context_saturation_tokens: int = DEFAULT_CONTEXT_SATURATION_TOKENS
     per_decision_timeout_ms: int = DEFAULT_PER_DECISION_TIMEOUT_MS
 
@@ -146,6 +148,8 @@ def load_config(path: Path | None = None) -> MarlinProxyConfig:
 
     thresholds = section.get("thresholds", {})
     if thresholds:
+        if "context_handover_tokens" in thresholds:
+            cfg.context_handover_tokens = int(thresholds["context_handover_tokens"])
         if "context_saturation_tokens" in thresholds:
             cfg.context_saturation_tokens = int(thresholds["context_saturation_tokens"])
         if "per_decision_timeout_ms" in thresholds:
@@ -166,6 +170,7 @@ def apply_task_overrides(cfg: MarlinProxyConfig, frontmatter: dict) -> MarlinPro
         notes_path=cfg.notes_path,
         kill_switch_path=cfg.kill_switch_path,
         category_modes=dict(cfg.category_modes),
+        context_handover_tokens=cfg.context_handover_tokens,
         context_saturation_tokens=cfg.context_saturation_tokens,
         per_decision_timeout_ms=cfg.per_decision_timeout_ms,
     )

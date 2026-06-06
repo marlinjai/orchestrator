@@ -8,7 +8,7 @@ from orchestrator.state import State
 from orchestrator.transcript import AssistantTurn, extract_text
 
 
-ProxyAction = Literal["reply", "stop", "escalate"]
+ProxyAction = Literal["reply", "stop", "handover", "escalate"]
 
 
 @dataclass
@@ -38,6 +38,9 @@ You MUST emit your final decision as a JSON object with this exact shape:
 - "escalate": a human decision is required (money, comms, irreversible action,
   or scope ambiguity you cannot resolve). `text` describes what the human needs
   to decide.
+
+Note: "handover" is reserved for orchestrator-internal use only (context
+threshold auto-trigger). Never emit it yourself.
 
 Wrap the JSON in a fenced code block if you want; the orchestrator will extract
 it. Do not output anything after the JSON.
@@ -97,6 +100,7 @@ def parse_proxy_output(raw: str) -> ProxyDecision:
     try:
         data, _ = decoder.raw_decode(raw, start)
         action = data.get("action")
+        # "handover" is orchestrator-internal, never valid from LLM output.
         if action not in ("reply", "stop", "escalate"):
             raise ValueError(f"bad action: {action}")
         return ProxyDecision(
