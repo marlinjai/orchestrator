@@ -10,3 +10,8 @@ build/
 .infisical.json
 .DS_Store
 .claude/
+
+# goals/ is a tracked corpus of dispatched spec files (*.md only).
+# Workflow scratch (auto-persisted under the session dir) must not leak in.
+goals/*.mjs
+goals/*.py
