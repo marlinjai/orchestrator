@@ -27,7 +27,7 @@ from orchestrator.reconcile import git_head, reconcile
 from orchestrator.state import Handover, IterationUsage, State, VerifyRecord, load_state, save_state
 from orchestrator.transcript import AssistantTurn, extract_model, extract_text, extract_usage
 from orchestrator.verify import decide_after_verify, load_verify_config, run_verify
-from orchestrator.worker import build_worker_options, run_worker_turn
+from orchestrator.worker import build_worker_options, load_worker_extras, run_worker_turn
 
 
 _MAX_HANDOVER_LEGS = 10
@@ -305,7 +305,9 @@ async def run_orchestrator(cfg: OrchestratorConfig) -> None:
     state_path = cfg.state_dir / "state.json"
     persona = cfg.persona_file.read_text().strip()
     mp_config, marlin_persona = _load_marlin(cfg, state.goal)
-    verify_config = load_verify_config(parse_frontmatter(state.goal))
+    goal_frontmatter = parse_frontmatter(state.goal)
+    verify_config = load_verify_config(goal_frontmatter)
+    worker_extras = load_worker_extras(goal_frontmatter)
     started_at = time.time()
     kill_switch = cfg.state_dir / "STOP"
 
@@ -345,10 +347,16 @@ async def run_orchestrator(cfg: OrchestratorConfig) -> None:
             )
 
         initial_message = state.goal
+        if worker_extras.mcp_server_keys or worker_extras.allowed_tools:
+            local_console.print(
+                f"[dim]worker extras: mcp_servers={worker_extras.mcp_server_keys} "
+                f"allowed_tools={worker_extras.allowed_tools}[/dim]"
+            )
         options = build_worker_options(
             state_path=state_path,
             project_dir=cfg.project_dir,
             denied_bash=[],
+            extras=worker_extras,
         )
 
         next_message = initial_message
