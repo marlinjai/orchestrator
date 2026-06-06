@@ -26,6 +26,49 @@ def test_worker_options_has_state_mcp(tmp_path: Path):
     assert "mcp__orchestrator-state__update_state" in options.allowed_tools
 
 
+def test_worker_options_has_secrets_proxy_mcp(tmp_path: Path):
+    """Credential-requiring commands route through the secrets-proxy MCP server so
+    raw secrets never enter Worker subprocess env or the transcript."""
+    options = build_worker_options(
+        state_path=tmp_path / "s.json",
+        project_dir=tmp_path,
+        denied_bash=[],
+    )
+    assert "secrets-proxy" in options.mcp_servers
+    server = options.mcp_servers["secrets-proxy"]
+    assert server["type"] == "stdio"
+    assert server["command"] == "node"
+    assert server["args"][0].endswith("/secrets-proxy/mcp/dist/index.js")
+    assert "mcp__secrets-proxy__execute_with_secrets" in options.allowed_tools
+
+
+def test_worker_options_secrets_proxy_token_from_env(tmp_path: Path, monkeypatch):
+    """The proxy token passes through from env (injected by cc.sh) into the MCP
+    server subprocess env. It is never scrubbed: only ANTHROPIC_API_KEY is."""
+    monkeypatch.setenv("SECRETS_PROXY_TOKEN", "tok-from-cc-sh")
+    options = build_worker_options(
+        state_path=tmp_path / "s.json",
+        project_dir=tmp_path,
+        denied_bash=[],
+    )
+    assert options.mcp_servers["secrets-proxy"]["env"]["PROXY_TOKEN"] == "tok-from-cc-sh"
+    # token must survive build_worker_options (only ANTHROPIC_API_KEY is scrubbed)
+    assert os.environ.get("SECRETS_PROXY_TOKEN") == "tok-from-cc-sh"
+
+
+def test_worker_options_secrets_proxy_token_defaults_empty(tmp_path: Path, monkeypatch):
+    """When the token is absent, env carries an empty string. The MCP server will
+    exit(1) at startup and the tool degrades to unavailable; the orchestrator
+    itself stays up."""
+    monkeypatch.delenv("SECRETS_PROXY_TOKEN", raising=False)
+    options = build_worker_options(
+        state_path=tmp_path / "s.json",
+        project_dir=tmp_path,
+        denied_bash=[],
+    )
+    assert options.mcp_servers["secrets-proxy"]["env"]["PROXY_TOKEN"] == ""
+
+
 def test_worker_options_includes_default_tools(tmp_path: Path):
     options = build_worker_options(
         state_path=tmp_path / "s.json",

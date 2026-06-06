@@ -17,6 +17,10 @@ DENIED_BASH_PATTERNS: list[tuple[re.Pattern, str]] = [
         "infisical secret writes are denied",
     ),
     (
+        re.compile(r"\binfisical\s+run\b"),
+        "direct infisical run is denied: use the execute_with_secrets tool",
+    ),
+    (
         re.compile(r"\bcurl\b[^\n;&|]*\bhttps?://[^\s;&|]*\bapi\."),
         "outbound curl to api.* hosts is denied",
     ),

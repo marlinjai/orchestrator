@@ -29,6 +29,8 @@ from orchestrator.guardrails import (
         "npm publish",
         "pnpm publish",
         "infisical secrets set FOO=bar",
+        "infisical run -- pnpm migrate",
+        "infisical run --env=dev -- node script.js",
         "curl https://api.openai.com/...",
         "gh pr comment 123 --body x",
         "gh pr merge 123",

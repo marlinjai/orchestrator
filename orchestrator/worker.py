@@ -52,6 +52,12 @@ tables, registries, etc.):
 When parallel tasks edit the same index file with different self-invented
 formats, every run after the first becomes a merge conflict for the human
 doing the integration. Stay in your lane.
+
+Tool: execute_with_secrets
+Use this instead of Bash for any command that requires Infisical secrets (database
+migrations, API calls needing tokens, infisical run wrappers). Pass projectId and path
+so the proxy fetches from the right Infisical location. Never run `infisical run`
+directly via Bash -- it injects raw secrets into this process.
 """
 
 
@@ -85,7 +91,25 @@ def build_worker_options(
         # this, the user's SessionStart/Stop/UserPromptSubmit hooks fire in
         # spawned Worker processes and pollute the agent context.
         setting_sources=[],
-        mcp_servers={"orchestrator-state": state_server},
+        mcp_servers={
+            "orchestrator-state": state_server,
+            # Secrets proxy: credential-requiring commands route through this MCP
+            # server (which calls the Tailscale-only proxy) instead of running
+            # `infisical run` in Worker context, where raw secrets would land in
+            # the subprocess env and the transcript sent to Anthropic. If
+            # SECRETS_PROXY_TOKEN is unset (e.g. bare `orchestrator start` not
+            # launched via cc.sh), this stdio server exits(1) at startup and the
+            # tool simply degrades to unavailable.
+            "secrets-proxy": {
+                "type": "stdio",
+                "command": "node",
+                "args": ["/Users/marlinjai/software-dev/secrets-proxy/mcp/dist/index.js"],
+                "env": {
+                    "SECRETS_PROXY_URL": "http://100.124.97.31:8765",
+                    "PROXY_TOKEN": os.environ.get("SECRETS_PROXY_TOKEN", ""),
+                },
+            },
+        },
         allowed_tools=[
             "Read",
             "Edit",
@@ -96,6 +120,7 @@ def build_worker_options(
             "WebSearch",
             "WebFetch",
             "mcp__orchestrator-state__update_state",
+            "mcp__secrets-proxy__execute_with_secrets",
         ],
     )
 
