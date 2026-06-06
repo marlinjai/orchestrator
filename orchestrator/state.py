@@ -11,6 +11,8 @@ from pydantic import BaseModel, Field, ValidationError
 PlanStatus = Literal["pending", "in_progress", "completed", "skipped"]
 TaskStatus = Literal["running", "stopped", "completed", "escalated", "failed"]
 DecidedBy = Literal["proxy", "user", "system"]
+# Mirrors VerifyStatus in verify.py; kept inline so state.py stays a leaf module.
+VerifyStatus = Literal["pass", "fail", "misconfigured"]
 
 
 class PlanStep(BaseModel):
@@ -51,7 +53,7 @@ class VerifyRecord(BaseModel):
 
     iteration: int
     command: str
-    status: str  # pass | fail | misconfigured
+    status: VerifyStatus
     exit_code: int | None = None
     tail: str = ""
     ran_at: datetime = Field(default_factory=lambda: datetime.now(timezone.utc))

@@ -117,6 +117,7 @@ depends_on: [<other-task-id>, ...]   # must MERGE before this task launches
 shared_state: [<tag>, ...]           # serializes with any task sharing a tag
 verify: pnpm test && pnpm build && tsc --noEmit && pnpm lint   # gate before accepting `completed`
 verify_fix_cap: 2                    # consecutive verify failures tolerated, then escalate
+verify_timeout_s: 1200               # per-run wall-clock timeout (default 1200 = 20 min)
 ---
 ```
 
