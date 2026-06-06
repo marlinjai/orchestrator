@@ -1,11 +1,8 @@
 """Tests for orchestrator/handover.py: prompt builder, git verifier, seed builder."""
 
-import subprocess
 import textwrap
-from pathlib import Path
 from unittest.mock import patch
 
-import pytest
 
 from orchestrator.handover import (
     build_handover_prompt,
