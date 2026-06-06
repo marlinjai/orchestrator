@@ -34,6 +34,7 @@ The control loop lives in `orchestrator/orchestrator.py`. One iteration =
 1. Worker (Claude Agent SDK session, configured in `worker.py`) runs against the goal file inside `--project`. The Worker reports progress by calling the custom MCP tool `update_state` from `tools.py` (kinds: `file_touched`, `commit`, `decision`, `open_thread`, ...).
 2. After the Worker turn, the orchestrator parses the JSONL transcript (`transcript.py::extract_text`) and asks the Decision Proxy (`proxy.py`, persona at `personas/default.md`) for the next action. Proxy is stateless: each call is a fresh single-shot LLM with the persona + the iteration's state snapshot.
 3. State is a pydantic model in `state.py` written atomically (tmp + rename) to `state.json`. `guardrails.py` enforces iteration cap, wall-clock cap, bash denylist, and the kill-switch file.
+4. On a `stop`-candidate iteration, the in-loop verify gate (`verify.py`) runs the goal's `verify` command (frontmatter-declared, e.g. `pnpm test && pnpm build && tsc --noEmit && pnpm lint`) in the project worktree BEFORE accepting `completed`. Pass goes straight to `completed`; a failure is fed back to the Worker (evaluator-optimizer) for up to `verify_fix_cap` retries (default 2) then escalates; a denylisted command or a timeout escalates immediately. A goal with no `verify` command completes with a logged warning (no build verification). The gate is domain-agnostic: project-specific critics (e.g. a values-only schema round-trip) are appended to the goal's `verify` command (`... && pnpm verify:schema-roundtrip`), never built into the orchestrator.
 
 Key boundary: the Worker is the only thing that touches the project repo. The Proxy never executes code, only reads state. The orchestrator process owns state.json and the kill switch.
 
@@ -60,7 +61,7 @@ State directory layout per task:
     ~/.orchestrator/tasks/<task-id>/
       state.json         # pydantic-validated, atomic writes
       run.log            # tee'd stdout/stderr from the Worker session
-      kill                # presence = halt at next iteration boundary
+      STOP                # presence = halt at next iteration boundary (written by `orchestrator stop`)
 
 ## Operator skill (bundled)
 

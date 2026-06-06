@@ -128,3 +128,57 @@ async def test_orchestrator_marks_failed_on_sdk_error(cfg: OrchestratorConfig):
     state = load_state(cfg.state_dir / "state.json")
     assert state.status == "failed"
     assert "auth blew up" in (state.exit_reason or "")
+
+
+# ---- verify gate (real subprocess; _run_one_turn mocked) ----
+
+
+async def test_verify_gate_pass_completes(cfg: OrchestratorConfig):
+    cfg.goal_file.write_text('---\nverify: "true"\n---\ndo the thing')
+    with patch("orchestrator.orchestrator._run_one_turn") as mock_turn:
+        mock_turn.side_effect = [_turn("done", "stop", text_out="", reasoning="done")]
+        await run_orchestrator(cfg)
+    state = load_state(cfg.state_dir / "state.json")
+    assert state.status == "completed"
+    assert state.last_verify is not None and state.last_verify.status == "pass"
+    assert state.verify_attempts == 0
+
+
+async def test_verify_gate_failure_escalates_at_cap(cfg: OrchestratorConfig):
+    cfg.goal_file.write_text('---\nverify: "exit 1"\n---\ndo the thing')
+    with patch("orchestrator.orchestrator._run_one_turn") as mock_turn:
+        mock_turn.side_effect = [
+            _turn("done", "stop", iteration=1, text_out="", reasoning="done"),
+            _turn("done", "stop", iteration=2, text_out="", reasoning="done"),
+        ]
+        await run_orchestrator(cfg)
+    state = load_state(cfg.state_dir / "state.json")
+    assert state.status == "escalated"
+    assert state.verify_attempts == 2  # fix_cap default
+    assert state.last_verify is not None and state.last_verify.status == "fail"
+
+
+async def test_verify_gate_retries_then_completes(cfg: OrchestratorConfig):
+    # Fails the first run (sentinel absent), passes the second (sentinel present).
+    cfg.goal_file.write_text(
+        '---\nverify: "test -f vok || { touch vok; exit 1; }"\n---\ndo the thing'
+    )
+    with patch("orchestrator.orchestrator._run_one_turn") as mock_turn:
+        mock_turn.side_effect = [
+            _turn("done", "stop", iteration=1, text_out="", reasoning="done"),
+            _turn("done", "stop", iteration=2, text_out="", reasoning="done"),
+        ]
+        await run_orchestrator(cfg)
+    state = load_state(cfg.state_dir / "state.json")
+    assert state.status == "completed"
+    assert state.verify_attempts == 0  # reset on the passing run
+
+
+async def test_verify_gate_misconfigured_escalates(cfg: OrchestratorConfig):
+    cfg.goal_file.write_text('---\nverify: "gh pr merge 1"\n---\ndo the thing')
+    with patch("orchestrator.orchestrator._run_one_turn") as mock_turn:
+        mock_turn.side_effect = [_turn("done", "stop", text_out="", reasoning="done")]
+        await run_orchestrator(cfg)
+    state = load_state(cfg.state_dir / "state.json")
+    assert state.status == "escalated"
+    assert state.last_verify is not None and state.last_verify.status == "misconfigured"

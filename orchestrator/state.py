@@ -46,6 +46,17 @@ class FileTouched(BaseModel):
     recorded_at: datetime = Field(default_factory=lambda: datetime.now(timezone.utc))
 
 
+class VerifyRecord(BaseModel):
+    """Result of the most recent in-loop verify-gate run (see verify.py)."""
+
+    iteration: int
+    command: str
+    status: str  # pass | fail | misconfigured
+    exit_code: int | None = None
+    tail: str = ""
+    ran_at: datetime = Field(default_factory=lambda: datetime.now(timezone.utc))
+
+
 class IterationUsage(BaseModel):
     iteration: int
     input_tokens: int = 0
@@ -86,6 +97,8 @@ class State(BaseModel):
     usage: list[IterationUsage] = []
     autonomy_stats: AutonomyStats = Field(default_factory=AutonomyStats)
     baseline_ref: str | None = None
+    verify_attempts: int = 0
+    last_verify: VerifyRecord | None = None
     status: TaskStatus = "running"
     exit_reason: str | None = None
 

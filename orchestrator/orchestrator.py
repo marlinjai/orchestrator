@@ -24,8 +24,9 @@ from orchestrator.marlin_proxy import MarlinDecision, run_marlin_decision
 from orchestrator.parse import parse_frontmatter
 from orchestrator.proxy import ProxyDecision, run_proxy_decision
 from orchestrator.reconcile import git_head, reconcile
-from orchestrator.state import Handover, IterationUsage, State, load_state, save_state
+from orchestrator.state import Handover, IterationUsage, State, VerifyRecord, load_state, save_state
 from orchestrator.transcript import AssistantTurn, extract_model, extract_text, extract_usage
+from orchestrator.verify import decide_after_verify, load_verify_config, run_verify
 from orchestrator.worker import build_worker_options, run_worker_turn
 
 
@@ -304,6 +305,7 @@ async def run_orchestrator(cfg: OrchestratorConfig) -> None:
     state_path = cfg.state_dir / "state.json"
     persona = cfg.persona_file.read_text().strip()
     mp_config, marlin_persona = _load_marlin(cfg, state.goal)
+    verify_config = load_verify_config(parse_frontmatter(state.goal))
     started_at = time.time()
     kill_switch = cfg.state_dir / "STOP"
 
@@ -330,6 +332,17 @@ async def run_orchestrator(cfg: OrchestratorConfig) -> None:
             save_state(state_path, state)
             local_console.print("[red]kill switch active. exiting.[/red]")
             return
+
+        if verify_config.command:
+            local_console.print(
+                f"[dim]verify gate: {verify_config.command} "
+                f"(fix_cap={verify_config.fix_cap}, timeout={verify_config.timeout_s:.0f}s)[/dim]"
+            )
+        else:
+            local_console.print(
+                "[yellow]verify gate: no `verify` command in goal frontmatter; "
+                "completion will NOT be build-verified[/yellow]"
+            )
 
         initial_message = state.goal
         options = build_worker_options(
@@ -410,10 +423,70 @@ async def run_orchestrator(cfg: OrchestratorConfig) -> None:
                         save_state(state_path, state)
 
                         if decision.action == "stop":
-                            state.status = "completed"
-                            state.exit_reason = decision.reasoning or "proxy stopped"
+                            if verify_config.command is None:
+                                state.status = "completed"
+                                state.exit_reason = (
+                                    decision.reasoning or "proxy stopped (no verify gate)"
+                                )
+                                save_state(state_path, state)
+                                local_console.print(
+                                    "[yellow]completed WITHOUT verify gate "
+                                    "(no `verify` command in goal frontmatter)[/yellow]"
+                                )
+                                return
+
+                            local_console.print(
+                                "[bold]verify:[/bold] running gate before accepting completion"
+                            )
+                            outcome = await run_verify(
+                                verify_config.command,
+                                cfg.project_dir,
+                                verify_config.timeout_s,
+                            )
+                            state.last_verify = VerifyRecord(
+                                iteration=state.iteration,
+                                command=outcome.command,
+                                status=outcome.status,
+                                exit_code=outcome.exit_code,
+                                tail=outcome.tail,
+                            )
+                            gate = decide_after_verify(
+                                outcome=outcome,
+                                prior_attempts=state.verify_attempts,
+                                fix_cap=verify_config.fix_cap,
+                            )
+                            state.verify_attempts = gate.attempts
+
+                            if gate.action == "complete":
+                                state.status = "completed"
+                                state.exit_reason = (
+                                    decision.reasoning or "proxy stopped; verify passed"
+                                )
+                                save_state(state_path, state)
+                                local_console.print(
+                                    "[bold green]verify: PASS[/bold green] -> completed"
+                                )
+                                return
+
+                            if gate.action == "escalate":
+                                state.status = "escalated"
+                                state.exit_reason = gate.exit_reason
+                                save_state(state_path, state)
+                                local_console.print(
+                                    f"[bold red]verify: ESCALATE[/bold red] {gate.exit_reason}"
+                                )
+                                return
+
+                            # retry: feed the failure back to the Worker
+                            # (evaluator-optimizer); the Proxy re-decides next turn.
                             save_state(state_path, state)
-                            return
+                            local_console.print(
+                                f"[yellow]verify: FAIL[/yellow] attempt "
+                                f"{state.verify_attempts}/{verify_config.fix_cap}; "
+                                "feeding failure back to the Worker"
+                            )
+                            next_message = gate.next_message
+                            continue
 
                         if decision.action == "handover":
                             seed = await _execute_handover(
