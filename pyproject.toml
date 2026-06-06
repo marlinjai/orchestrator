@@ -1,6 +1,6 @@
 [project]
 name = "claude-code-orchestrator"
-version = "0.2.0"
+version = "0.3.0"
 description = "Autonomous Claude Code orchestrator: Worker + Decision Proxy loop driven by a goal file"
 readme = "README.md"
 requires-python = ">=3.11"
