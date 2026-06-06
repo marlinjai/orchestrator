@@ -118,12 +118,18 @@ shared_state: [<tag>, ...]           # serializes with any task sharing a tag
 verify: pnpm test && pnpm build && tsc --noEmit && pnpm lint   # gate before accepting `completed`
 verify_fix_cap: 2                    # consecutive verify failures tolerated, then escalate
 verify_timeout_s: 1200               # per-run wall-clock timeout (default 1200 = 20 min)
+worker_mcp_servers: [context7]       # extra MCP servers for the Worker (allowlist keys only)
+worker_allowed_tools: [NotebookEdit] # extra tool names unioned into the Worker's allowed_tools
 ---
 ```
 
 `depends_on` and `shared_state` are optional. Absent both, the task is parallel-safe (an independent unit).
 
 `verify` is the in-loop completion gate (orchestrator source, not the operator's job): before the orchestrator accepts the Worker's `stop` as `completed`, it runs this command in the worktree. Pass goes to `completed`; a failure is fed back to the Worker for up to `verify_fix_cap` retries (default 2) then escalates; a denylisted command or a timeout escalates immediately. Omit `verify` and completion is NOT build-verified (the run logs a warning, and the operator's manual `pnpm test && pnpm build` stays mandatory). The gate runs a shell command and reads the exit code, so a project-specific critic (e.g. a values-only schema round-trip) is just appended to the command: `... && pnpm verify:schema-roundtrip`.
+
+`worker_mcp_servers` and `worker_allowed_tools` let a goal opt its Worker into extra capabilities without editing `worker.py`. Both are pure additions: they UNION onto the safe defaults (the `orchestrator-state` and `secrets-proxy` MCP servers, plus the default tool list) and can never remove a default. `worker_mcp_servers` names servers by key from a fixed allowlist in `worker.py` (`WORKER_MCP_REGISTRY`); a goal can only enable a vetted, registered server, never inject an arbitrary stdio/env config (which would be a secret-exfiltration / RCE channel since a goal file runs with the operator's credentials). An unknown key is dropped with a logged warning, so a typo degrades to the default Worker rather than halting the run. `worker_allowed_tools` adds tool names (built-in tools or `mcp__<server>__*`) to `allowed_tools`; duplicates are ignored.
+
+Caveat (Coolify): do NOT add the Coolify MCP to the registry or request it here. Several Coolify tools (database create/get, env-var reveal) return connection strings and tokens in plaintext, which would land in the transcript sent to Anthropic. A Worker that needs Coolify uses the Coolify-via-proxy curl pattern instead: it already has the `secrets-proxy` MCP, so it calls the Coolify REST API through `execute_with_secrets`, where the API token is injected server-side and the response is redacted. The registry is only for non-secret-leaking servers.
 
 `depends_on` is for explicit ordering: slice 3 cannot start until slice 2's PR has merged into the base branch.
 
