@@ -67,19 +67,26 @@ If `orchestrator` is not found at all, run the one-time install above first. The
    cd ../<repo>-orch-<task-id> && <install command if any>  # e.g. pnpm install
    ```
 
-3. **Launch detached** so the Worker survives the shell:
-   ```bash
-   cd ~/software-dev/orchestrator
-   nohup orchestrator start \
-     --goal goals/<task-id>.md \
-     --project <worktree-path> \
-     --task-id <task-id> \
-     --max-iterations 30 \
-     --max-hours 1.0 \
-     > /tmp/orch-<task-id>.log 2>&1 &
-   ```
+3. **Launch.** Two modes; pick by whether you want the dispatching session woken on completion:
 
-4. **Monitor** by polling `state.json` or via `orchestrator status --task-id <id>`. Terminal states are `completed | escalated | stopped | failed`.
+   - **Harness-tracked (preferred when you, Claude, are dispatching and will do the follow-up).** Run `orchestrator start` via the Bash tool's background mode (`run_in_background: true`), NOT `nohup`. The harness re-invokes this session when the run exits, so you auto-run the auto-review -> PR -> merge flow (step 5) and report the result, instead of the run finishing silently. Tradeoff: the run is tied to this session and dies if Claude Code is fully closed.
+     ```bash
+     orchestrator start \
+       --goal ~/software-dev/orchestrator/goals/<task-id>.md \
+       --project <worktree-path> \
+       --task-id <task-id> \
+       --max-iterations 30 \
+       --max-hours 1.0
+     ```
+   - **Detached (use only when the run MUST survive the session being closed, or for cron/headless).** `nohup ... &` as before. This is NOT auto-notified back to a session; rely on the orchestrator's own terminal-state notification (step 4) to learn it finished.
+     ```bash
+     cd ~/software-dev/orchestrator
+     nohup orchestrator start --goal goals/<task-id>.md --project <worktree-path> \
+       --task-id <task-id> --max-iterations 30 --max-hours 1.0 \
+       > /tmp/orch-<task-id>.log 2>&1 &
+     ```
+
+4. **Monitor.** The orchestrator fires a notification on every terminal state (`completed | escalated | stopped | failed`): a macOS banner + sound, plus a webhook POST when `ORCHESTRATOR_NOTIFY_URL` is set (point it at an ntfy topic / Pushover / Slack for phone push). So even a detached run no longer finishes silently. You can still poll `state.json` or `orchestrator status --task-id <id>`.
 
 5. **Auto-review, push, PR, merge** without operator-side user gates (per Marlin's standing rule for orchestrator-driven slices):
 
