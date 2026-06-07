@@ -24,6 +24,7 @@ import json
 import logging
 import os
 import platform
+import shlex
 import shutil
 import subprocess
 import urllib.request
@@ -33,6 +34,20 @@ logger = logging.getLogger(__name__)
 NOTIFY_URL_ENV = "ORCHESTRATOR_NOTIFY_URL"
 TERMINAL_STATUSES: frozenset[str] = frozenset({"completed", "escalated", "stopped", "failed"})
 _MAX_MESSAGE = 240
+
+# Telegram via the secrets-proxy: the bot token + chat id stay in Infisical and
+# are injected server-side, so they never enter this process env or any caller
+# context. Active when SECRETS_PROXY_TOKEN is present (the orchestrator already
+# carries it for the Worker's secrets-proxy MCP). The Infisical coordinates
+# default to the monitoring path and are env-overridable.
+PROXY_URL_ENV = "SECRETS_PROXY_URL"
+PROXY_TOKEN_ENV = "SECRETS_PROXY_TOKEN"
+DEFAULT_PROXY_URL = "http://100.124.97.31:8765"
+TELEGRAM_PROJECT_ID = os.environ.get(
+    "ORCHESTRATOR_TELEGRAM_PROJECT_ID", "6adabd49-59d3-4bab-8a1e-c104a0da3c64"
+)
+TELEGRAM_SECRET_PATH = os.environ.get("ORCHESTRATOR_TELEGRAM_PATH", "/monitoring")
+TELEGRAM_SECRET_ENV = os.environ.get("ORCHESTRATOR_TELEGRAM_ENV", "production")
 
 
 def _macos_notification(title: str, message: str) -> None:
@@ -71,6 +86,46 @@ def _webhook(url: str, title: str, message: str, status: str) -> None:
     urllib.request.urlopen(req, timeout=10).close()
 
 
+def _telegram_via_proxy(title: str, message: str) -> None:
+    """Send a Telegram message through the secrets-proxy.
+
+    The proxy injects TELEGRAM_BOT_TOKEN + TELEGRAM_CHAT_ID server-side from
+    Infisical, so the bot credentials never enter this process env or any
+    caller's context. Reuses the proxy token the orchestrator already holds for
+    the Worker's secrets-proxy MCP; skips silently when that token is absent.
+    """
+    token = os.environ.get(PROXY_TOKEN_ENV)
+    if not token:
+        return
+    proxy_url = os.environ.get(PROXY_URL_ENV, DEFAULT_PROXY_URL).rstrip("/")
+    text = f"{title}\n{message}"
+    # The message is untrusted (it carries the run's exit reason), so it is
+    # shell-single-quoted via shlex.quote. The $TELEGRAM_* refs are static and
+    # expand from the proxy-injected env, never from the message.
+    curl = (
+        'curl -s -X POST '
+        '"https://api.telegram.org/bot$TELEGRAM_BOT_TOKEN/sendMessage" '
+        '--data-urlencode "chat_id=$TELEGRAM_CHAT_ID" '
+        f'--data-urlencode {shlex.quote("text=" + text)}'
+    )
+    body = json.dumps(
+        {
+            "command": curl,
+            "workingDir": "/tmp",
+            "env": TELEGRAM_SECRET_ENV,
+            "projectId": TELEGRAM_PROJECT_ID,
+            "path": TELEGRAM_SECRET_PATH,
+        }
+    ).encode("utf-8")
+    req = urllib.request.Request(
+        f"{proxy_url}/execute",
+        data=body,
+        headers={"Content-Type": "application/json", "X-Proxy-Token": token},
+        method="POST",
+    )
+    urllib.request.urlopen(req, timeout=15).close()
+
+
 def notify(
     *, task_id: str, status: str, reason: str = "", webhook_url: str | None = None
 ) -> None:
@@ -94,3 +149,8 @@ def notify(
             _webhook(url, title, message, status)
         except Exception as e:  # pragma: no cover - best-effort
             logger.debug("webhook notify failed: %s", e)
+
+    try:
+        _telegram_via_proxy(title, message)
+    except Exception as e:  # pragma: no cover - best-effort
+        logger.debug("telegram notify failed: %s", e)
