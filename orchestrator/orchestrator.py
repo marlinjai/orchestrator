@@ -1,14 +1,19 @@
 import io
+import logging
 import sys
 import time
 from dataclasses import dataclass
 from pathlib import Path
+from typing import get_args
 
 from claude_agent_sdk import ClaudeSDKClient
 from rich.console import Console
 
 from orchestrator.config import MarlinProxyConfig, apply_task_overrides, load_config
 from orchestrator.guardrails import (
+    DEFAULT_API_KEY_COST_CAP_USD,
+    cost_cap_hit,
+    estimate_cost_usd,
     iteration_cap_hit,
     kill_switch_active,
     wall_clock_cap_hit,
@@ -27,8 +32,16 @@ from orchestrator.reconcile import git_head, reconcile
 from orchestrator.state import Handover, IterationUsage, State, VerifyRecord, load_state, save_state
 from orchestrator.transcript import AssistantTurn, extract_model, extract_text, extract_usage
 from orchestrator.verify import decide_after_verify, load_verify_config, run_verify
-from orchestrator.worker import build_worker_options, load_worker_extras, run_worker_turn
+from orchestrator.worker import (
+    AuthMode,
+    apply_env_contract,
+    build_worker_options,
+    load_worker_extras,
+    run_worker_turn,
+)
 
+
+logger = logging.getLogger(__name__)
 
 _MAX_HANDOVER_LEGS = 10
 
@@ -56,9 +69,34 @@ class OrchestratorConfig:
     transcript_window: int = 10
     log_path: Path | None = None
     marlin_persona_file: Path | None = None
+    auth_mode: AuthMode = "subscription"
+    max_cost_usd: float | None = None
 
 
 console = Console()
+
+
+def _resolve_auth_mode(cli_mode: AuthMode, frontmatter: dict) -> AuthMode:
+    """Per-task frontmatter `auth_mode` (more specific) overrides the CLI default.
+    An invalid value is ignored with a warning, falling back to the CLI mode."""
+    raw = frontmatter.get("auth_mode")
+    if raw is None:
+        return cli_mode
+    if raw in get_args(AuthMode):
+        return raw  # type: ignore[return-value]
+    logger.warning("goal frontmatter auth_mode=%r invalid; using %r", raw, cli_mode)
+    return cli_mode
+
+
+def _resolve_cost_cap(cli_cap: float | None, auth_mode: AuthMode) -> float | None:
+    """An explicit --max-cost-usd always wins. Otherwise api_key runs get the
+    protective default ceiling (metered tokens are real money); subscription runs
+    get no enforced ceiling (per-token cost is notional there)."""
+    if cli_cap is not None:
+        return cli_cap if cli_cap > 0 else None
+    if auth_mode == "api_key":
+        return DEFAULT_API_KEY_COST_CAP_USD
+    return None
 
 
 class _TeeStream(io.TextIOBase):
@@ -308,6 +346,8 @@ async def run_orchestrator(cfg: OrchestratorConfig) -> None:
     goal_frontmatter = parse_frontmatter(state.goal)
     verify_config = load_verify_config(goal_frontmatter)
     worker_extras = load_worker_extras(goal_frontmatter)
+    auth_mode = _resolve_auth_mode(cfg.auth_mode, goal_frontmatter)
+    effective_cost_cap = _resolve_cost_cap(cfg.max_cost_usd, auth_mode)
     started_at = time.time()
     kill_switch = cfg.state_dir / "STOP"
 
@@ -346,6 +386,21 @@ async def run_orchestrator(cfg: OrchestratorConfig) -> None:
                 "completion will NOT be build-verified[/yellow]"
             )
 
+        cap_label = f"${effective_cost_cap:.2f}" if effective_cost_cap else "none"
+        # Apply the env contract here too (idempotent: build_worker_options also
+        # calls it) so the scrubbed var NAMES are auditable in run.log, per the
+        # ROADMAP. Never logs values.
+        scrubbed = apply_env_contract(auth_mode)
+        scrub_label = f" | env scrubbed: {', '.join(scrubbed)}" if scrubbed else ""
+        local_console.print(
+            f"[dim]auth mode: {auth_mode} | cost cap: {cap_label}{scrub_label}[/dim]"
+        )
+        if auth_mode == "api_key":
+            local_console.print(
+                "[yellow]auth_mode=api_key: this run bills the metered Anthropic API "
+                "(not the flat subscription). The cost cap is the guard.[/yellow]"
+            )
+
         initial_message = state.goal
         if worker_extras.mcp_server_keys or worker_extras.allowed_tools:
             local_console.print(
@@ -357,6 +412,7 @@ async def run_orchestrator(cfg: OrchestratorConfig) -> None:
             project_dir=cfg.project_dir,
             denied_bash=[],
             extras=worker_extras,
+            auth_mode=auth_mode,
         )
 
         next_message = initial_message
@@ -406,6 +462,25 @@ async def run_orchestrator(cfg: OrchestratorConfig) -> None:
                             local_console.print(
                                 f"[dim]reconciled: +{commits_added} commits, +{files_added} files[/dim]"
                             )
+
+                        # Cost guard: record the running estimate every iteration
+                        # (so subscription runs stay cost-aware), and stop before
+                        # spending more once a dollar ceiling is set. The ceiling
+                        # is auto-enabled in api_key mode, where tokens are real
+                        # money; subscription runs pass max_usd=None and never trip.
+                        state.estimated_cost_usd = estimate_cost_usd(state.usage)
+                        if cost_cap_hit(
+                            estimate_usd=state.estimated_cost_usd,
+                            max_usd=effective_cost_cap,
+                        ):
+                            state.status = "stopped"
+                            state.exit_reason = (
+                                f"cost cap reached (~${state.estimated_cost_usd:.2f} "
+                                f">= ${effective_cost_cap:.2f}, auth_mode={auth_mode})"
+                            )
+                            save_state(state_path, state)
+                            local_console.print(f"[yellow]{state.exit_reason}[/yellow]")
+                            return
 
                         # Proactive handover check: override a "reply" decision
                         # when context crosses the handover threshold, before

@@ -7,10 +7,13 @@ import pytest
 from orchestrator.guardrails import (
     DENIED_BASH_PATTERNS,
     bash_allowed,
+    cost_cap_hit,
+    estimate_cost_usd,
     iteration_cap_hit,
     kill_switch_active,
     wall_clock_cap_hit,
 )
+from orchestrator.state import IterationUsage
 
 
 @pytest.mark.parametrize(
@@ -98,3 +101,48 @@ def test_denied_patterns_documented():
     for pat, reason in DENIED_BASH_PATTERNS:
         assert isinstance(pat, re.Pattern)
         assert reason and isinstance(reason, str)
+
+
+def test_estimate_cost_usd_known_model():
+    # 1M input + 1M output on sonnet pricing (3 / 15 per Mtok) = 18.0
+    usage = [
+        IterationUsage(
+            iteration=1,
+            input_tokens=1_000_000,
+            output_tokens=1_000_000,
+            model="claude-sonnet-4-6",
+        )
+    ]
+    assert estimate_cost_usd(usage) == pytest.approx(18.0)
+
+
+def test_estimate_cost_usd_opus_with_cache():
+    # opus: input 15, output 75, cache_read 1.5 per Mtok
+    usage = [
+        IterationUsage(
+            iteration=1,
+            input_tokens=1_000_000,
+            output_tokens=1_000_000,
+            cache_read_tokens=1_000_000,
+            model="claude-opus-4-8",
+        )
+    ]
+    assert estimate_cost_usd(usage) == pytest.approx(15.0 + 75.0 + 1.5)
+
+
+def test_estimate_cost_usd_unknown_model_uses_default():
+    usage = [IterationUsage(iteration=1, input_tokens=1_000_000, model="mystery-model")]
+    # default pricing input = 3.0 per Mtok
+    assert estimate_cost_usd(usage) == pytest.approx(3.0)
+
+
+def test_estimate_cost_usd_empty():
+    assert estimate_cost_usd([]) == 0.0
+
+
+def test_cost_cap_hit():
+    assert not cost_cap_hit(estimate_usd=5.0, max_usd=None)
+    assert not cost_cap_hit(estimate_usd=5.0, max_usd=0)
+    assert not cost_cap_hit(estimate_usd=4.99, max_usd=5.0)
+    assert cost_cap_hit(estimate_usd=5.0, max_usd=5.0)
+    assert cost_cap_hit(estimate_usd=6.0, max_usd=5.0)
