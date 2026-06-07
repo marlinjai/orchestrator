@@ -13,13 +13,39 @@ import logging
 import os
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import AsyncIterator
+from typing import AsyncIterator, Literal
 
 from claude_agent_sdk import ClaudeAgentOptions, ClaudeSDKClient
 
 from orchestrator.tools import build_state_mcp_server
 
 logger = logging.getLogger(__name__)
+
+
+# Anthropic auth mode for the spawned SDK subprocess. "subscription" scrubs
+# ANTHROPIC_API_KEY so the SDK uses the Claude login; "api_key" keeps it so the
+# SDK bills the metered API. From 2026-06-15 headless/SDK use no longer draws
+# from the flat subscription (it consumes a separate metered credit, then API
+# rates), so this choice -- and the cost guard it pairs with -- is load-bearing
+# for billing, not cosmetic.
+AuthMode = Literal["subscription", "api_key"]
+
+
+# Foreign LLM provider credentials and Anthropic auth-token overrides that are
+# ALWAYS removed from the SDK subprocess env, in either auth mode, so a wrapper
+# (Infisical, direnv, a parent shell export) cannot silently redirect auth or
+# contaminate provider/model selection. ANTHROPIC_API_KEY is handled separately
+# by auth_mode in apply_env_contract: it is the intentional subscription-vs-API
+# switch, not cross-provider contamination.
+CROSS_PROVIDER_KEY_DENYLIST: tuple[str, ...] = (
+    "ANTHROPIC_AUTH_TOKEN",
+    "OPENAI_API_KEY",
+    "GEMINI_API_KEY",
+    "GOOGLE_API_KEY",
+    "GROQ_API_KEY",
+    "MISTRAL_API_KEY",
+    "COHERE_API_KEY",
+)
 
 
 # Servers and tools that are ALWAYS present in a Worker and can never be removed
@@ -135,18 +161,49 @@ directly via Bash -- it injects raw secrets into this process.
 """
 
 
-def _scrub_anthropic_api_key() -> None:
-    """Ensure the Claude Agent SDK subprocess uses subscription auth, not API billing.
+def apply_env_contract(auth_mode: AuthMode = "subscription") -> list[str]:
+    """Normalize the SDK subprocess env to an explicit, auditable contract.
 
-    The CLI's auth precedence puts ANTHROPIC_API_KEY ahead of the ~/.config/claude
-    login credentials. If the orchestrator is launched under `infisical run` (or any
-    other wrapper that injects the key for downstream tools), the SDK silently
-    switches to pay-per-token API billing on that key. The Worker doesn't need the
-    key to author code that references it at runtime, so we drop it at the
-    SDK-spawn boundary.
+    Two concerns, one place:
+
+    1. Cross-provider hygiene (always): foreign LLM provider keys and
+       ANTHROPIC_AUTH_TOKEN (CROSS_PROVIDER_KEY_DENYLIST) are removed so a
+       wrapper (Infisical, direnv, a parent shell export) cannot silently
+       redirect auth or contaminate model selection.
+    2. Anthropic auth mode (the load-bearing billing choice):
+       - "subscription" (default): ANTHROPIC_API_KEY is removed so the SDK falls
+         back to the Claude subscription login. This is the historical behavior.
+         NOTE: from 2026-06-15, headless/SDK use no longer draws from the flat
+         subscription; it consumes a separate metered credit, then API rates.
+       - "api_key": ANTHROPIC_API_KEY is KEPT so the SDK bills the metered API.
+         If the key is absent in this mode the run will fail auth, so we warn
+         loudly. Pair this mode with a cost cap (guardrails.cost_cap_hit).
+
+    Returns the env var NAMES actually removed, for run.log audit. Never logs or
+    returns values.
     """
-    if os.environ.pop("ANTHROPIC_API_KEY", None) is not None:
-        logger.info("scrubbed ANTHROPIC_API_KEY from env so SDK uses subscription auth")
+    removed: list[str] = []
+    for var in CROSS_PROVIDER_KEY_DENYLIST:
+        if os.environ.pop(var, None) is not None:
+            removed.append(var)
+
+    if auth_mode == "subscription":
+        if os.environ.pop("ANTHROPIC_API_KEY", None) is not None:
+            removed.append("ANTHROPIC_API_KEY")
+    else:  # api_key: keep the key so the SDK bills the metered API
+        if not os.environ.get("ANTHROPIC_API_KEY"):
+            logger.warning(
+                "auth_mode=api_key but ANTHROPIC_API_KEY is not set; the SDK has "
+                "no API credential and the run will likely fail auth"
+            )
+
+    if removed:
+        logger.info(
+            "env contract (auth_mode=%s) scrubbed: %s", auth_mode, ", ".join(removed)
+        )
+    else:
+        logger.info("env contract (auth_mode=%s): nothing to scrub", auth_mode)
+    return removed
 
 
 def load_worker_extras(frontmatter: dict) -> WorkerExtras:
@@ -216,8 +273,9 @@ def build_worker_options(
     project_dir: Path,
     denied_bash: list[str],
     extras: WorkerExtras | None = None,
+    auth_mode: AuthMode = "subscription",
 ) -> ClaudeAgentOptions:
-    _scrub_anthropic_api_key()
+    apply_env_contract(auth_mode)
     state_server = build_state_mcp_server(state_path)
 
     # Safe defaults, always present. A goal can union onto these but never drop

@@ -39,6 +39,24 @@ def start(
     task_id: str = typer.Option("", "--task-id", help="Task ID (auto-generated if empty)"),
     max_iterations: int = typer.Option(50, "--max-iterations"),
     max_hours: float = typer.Option(4.0, "--max-hours"),
+    auth_mode: str = typer.Option(
+        "subscription",
+        "--auth-mode",
+        help=(
+            "Anthropic auth for the Worker: 'subscription' (scrub the API key, "
+            "use the Claude login) or 'api_key' (keep ANTHROPIC_API_KEY, bill the "
+            "metered API). From 2026-06-15 headless subscription use is metered."
+        ),
+    ),
+    max_cost_usd: float = typer.Option(
+        0.0,
+        "--max-cost-usd",
+        help=(
+            "Hard USD ceiling; the run stops when the estimated metered cost "
+            "crosses it. 0 = default (api_key mode auto-caps at "
+            "$20; subscription is uncapped)."
+        ),
+    ),
     marlin_persona: Path = typer.Option(
         Path(__file__).parent.parent / "personas" / "marlin.md",
         "--marlin-persona",
@@ -46,6 +64,11 @@ def start(
     ),
 ):
     """Start a new autonomous task."""
+    if auth_mode not in ("subscription", "api_key"):
+        console.print(
+            f"[red]invalid --auth-mode {auth_mode!r}; use 'subscription' or 'api_key'[/red]"
+        )
+        raise typer.Exit(1)
     tid = task_id or uuid.uuid4().hex[:8]
     state_dir = _task_dir(tid)
     cfg = OrchestratorConfig(
@@ -58,6 +81,8 @@ def start(
         max_seconds=max_hours * 3600,
         log_path=state_dir / "run.log",
         marlin_persona_file=marlin_persona,
+        auth_mode=auth_mode,  # type: ignore[arg-type]
+        max_cost_usd=(max_cost_usd if max_cost_usd > 0 else None),
     )
     console.print(f"[bold green]starting task {tid}[/bold green]")
     console.print(f"  goal: {goal}")
@@ -117,6 +142,7 @@ def status(task_id: str = typer.Option(..., "--task-id")):
             f"in={in_tok} out={out_tok} cache_r={cache_r} cache_c={cache_c}",
         )
         table.add_row("wall_ms", f"worker={worker_ms} proxy={proxy_ms}")
+        table.add_row("est_cost_usd", f"${state.estimated_cost_usd:.2f}")
     a = state.autonomy_stats
     if a.auto_approved or a.auto_deferred or a.escalated:
         table.add_row(

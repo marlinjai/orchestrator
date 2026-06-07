@@ -97,6 +97,7 @@ class State(BaseModel):
     max_iterations: int = 50
     handovers: list[Handover] = []
     usage: list[IterationUsage] = []
+    estimated_cost_usd: float = 0.0
     autonomy_stats: AutonomyStats = Field(default_factory=AutonomyStats)
     baseline_ref: str | None = None
     verify_attempts: int = 0

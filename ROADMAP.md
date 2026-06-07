@@ -11,6 +11,12 @@ Living tracker for orchestrator work. Read top to bottom: shipped at the top, in
 - Schema break (no migration): `commits` and `files_touched` are now objects with provenance.
 - Plan: `docs/plans/2026-05-24-orchestrator-v2-first-slice.md` (completed).
 
+### auth-mode env contract + cost guard (2026-06-07)
+- Theme 3 shipped: `_scrub_anthropic_api_key` generalized into `apply_env_contract(auth_mode)` in `worker.py`. A cross-provider deny-list (OpenAI / Gemini / Google / Groq / Mistral / Cohere keys + `ANTHROPIC_AUTH_TOKEN`) is always scrubbed; `ANTHROPIC_API_KEY` is scrubbed only in `subscription` mode and KEPT in `api_key` mode. Scrubbed var names are logged to `run.log` (never values).
+- New `AuthMode` (`subscription` | `api_key`), selectable via the `--auth-mode` CLI flag or per-goal `auth_mode` frontmatter (frontmatter wins). Motivated by the 2026-06-15 Anthropic billing change: headless/SDK use leaves the flat subscription for a metered credit then API rates, so blindly scrubbing the key would break the metered path.
+- Cost guard in `guardrails.py`: `estimate_cost_usd` (per-model price table, cache-aware) + `cost_cap_hit`. `state.estimated_cost_usd` is recorded every iteration and shown in `orchestrator status`. A hard USD ceiling stops the run; auto-applied at $20 in `api_key` mode, opt-in via `--max-cost-usd` otherwise (subscription is uncapped, where per-token cost is notional).
+- 9 new tests; 207/207 passing; ruff clean.
+
 ### v0.1.x hardening (2026-05-10 to 2026-05-24)
 - Shared-index edit discipline in `WORKER_SYSTEM_PROMPT` (commit `e2bb6ef`). Stops parallel Workers from inventing different STATUS.md formats.
 - `ANTHROPIC_API_KEY` env scrub at SDK-spawn boundary (commit `8eed8d7`). Keeps Worker on subscription auth even when launcher is wrapped in `infisical run`.
@@ -36,11 +42,10 @@ Living tracker for orchestrator work. Read top to bottom: shipped at the top, in
 Each theme is a candidate "next slice." Pick by urgency × leverage; the smallest-blast-radius ones are first.
 
 ### Theme 3: env-mode contract at SDK-spawn boundary
-**Status:** queued. Smallest slice; natural pairing with the existing `_scrub_anthropic_api_key`.
-**Problem:** The scrub catches one variable. Any wrapper (Infisical, direnv, mise, parent shell exports) can mutate auth mode, MCP server discovery, hook resolution, or model selection silently. We patched one symptom; the class remains.
-**Approach:** Generalize the scrub into an explicit env contract in `worker.py`. Allow-list (PATH, HOME, USER, LANG, locale, project-specific test runners) + deny-list (`ANTHROPIC_API_KEY`, `CLAUDE_*` legacy vars, `OPENAI_API_KEY` and other LLM provider keys to prevent cross-contamination). Log the scrubbed set to `run.log` so it's auditable.
-**Blast radius:** Small. Single function, behavior already partially implemented.
-**Evidence:** 2026-05-24 production failure (1 of 4 Workers failed on credit-balance error before the scrub landed).
+**Status:** shipped (2026-06-07). See the dated entry under Shipped.
+**What shipped:** `apply_env_contract(auth_mode)` replaces `_scrub_anthropic_api_key`: it always scrubs foreign provider keys + `ANTHROPIC_AUTH_TOKEN`, scrubs `ANTHROPIC_API_KEY` in `subscription` mode, and keeps it in `api_key` mode (the 2026-06-15 metered-billing cutover made the auth choice load-bearing). The scrubbed set is logged to `run.log`. A paired cost guard (`estimate_cost_usd` + `cost_cap_hit`) was added in `guardrails.py` with a per-run USD ceiling.
+**Not shipped (scoped out):** the full PATH / HOME / locale ALLOW-list sandbox. It is higher-risk (stripping a var the SDK needs would break runs) and the deny-list + auth-mode toggle already delivers the billing-safety win. Add the allow-list in a later slice only if env contamination beyond provider keys is actually observed.
+**Evidence:** 2026-05-24 production failure (1 of 4 Workers failed on credit-balance error before the scrub landed); 2026-06-15 Anthropic headless-billing cutover.
 
 ### Theme 4: stagnation-streak loop detection
 **Status:** queued.

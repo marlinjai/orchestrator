@@ -2,9 +2,11 @@ import os
 from pathlib import Path
 
 from orchestrator.worker import (
+    CROSS_PROVIDER_KEY_DENYLIST,
     DEFAULT_ALLOWED_TOOLS,
     WORKER_MCP_REGISTRY,
     WorkerExtras,
+    apply_env_contract,
     build_worker_options,
     load_worker_extras,
 )
@@ -50,7 +52,8 @@ def test_worker_options_has_secrets_proxy_mcp(tmp_path: Path):
 
 def test_worker_options_secrets_proxy_token_from_env(tmp_path: Path, monkeypatch):
     """The proxy token passes through from env (injected by cc.sh) into the MCP
-    server subprocess env. It is never scrubbed: only ANTHROPIC_API_KEY is."""
+    server subprocess env. The env contract only scrubs Anthropic auth and foreign
+    provider keys, so SECRETS_PROXY_TOKEN is left intact."""
     monkeypatch.setenv("SECRETS_PROXY_TOKEN", "tok-from-cc-sh")
     options = build_worker_options(
         state_path=tmp_path / "s.json",
@@ -58,7 +61,7 @@ def test_worker_options_secrets_proxy_token_from_env(tmp_path: Path, monkeypatch
         denied_bash=[],
     )
     assert options.mcp_servers["secrets-proxy"]["env"]["PROXY_TOKEN"] == "tok-from-cc-sh"
-    # token must survive build_worker_options (only ANTHROPIC_API_KEY is scrubbed)
+    # token must survive build_worker_options (it is not an auth/provider key)
     assert os.environ.get("SECRETS_PROXY_TOKEN") == "tok-from-cc-sh"
 
 
@@ -117,6 +120,51 @@ def test_worker_options_scrub_is_noop_when_key_absent(tmp_path: Path, monkeypatc
         denied_bash=[],
     )
     assert "ANTHROPIC_API_KEY" not in os.environ
+
+
+# --- auth-mode env contract (billing) ---------------------------------------
+
+
+def test_apply_env_contract_subscription_scrubs_anthropic_and_providers(monkeypatch):
+    """Subscription mode removes ANTHROPIC_API_KEY (so the SDK uses the login) and
+    always removes foreign provider keys to prevent cross-contamination."""
+    monkeypatch.setenv("ANTHROPIC_API_KEY", "sk-ant-x")
+    monkeypatch.setenv("OPENAI_API_KEY", "sk-openai-x")
+    removed = apply_env_contract("subscription")
+    assert "ANTHROPIC_API_KEY" not in os.environ
+    assert "OPENAI_API_KEY" not in os.environ
+    assert "ANTHROPIC_API_KEY" in removed
+    assert "OPENAI_API_KEY" in removed
+
+
+def test_apply_env_contract_api_key_keeps_anthropic_scrubs_providers(monkeypatch):
+    """api_key mode KEEPS ANTHROPIC_API_KEY (so the SDK bills the metered API) but
+    still removes foreign provider keys."""
+    monkeypatch.setenv("ANTHROPIC_API_KEY", "sk-ant-keep")
+    monkeypatch.setenv("GEMINI_API_KEY", "g-x")
+    removed = apply_env_contract("api_key")
+    assert os.environ.get("ANTHROPIC_API_KEY") == "sk-ant-keep"
+    assert "GEMINI_API_KEY" not in os.environ
+    assert "ANTHROPIC_API_KEY" not in removed
+    assert "GEMINI_API_KEY" in removed
+
+
+def test_apply_env_contract_returns_empty_when_nothing_to_scrub(monkeypatch):
+    for var in ("ANTHROPIC_API_KEY", *CROSS_PROVIDER_KEY_DENYLIST):
+        monkeypatch.delenv(var, raising=False)
+    assert apply_env_contract("subscription") == []
+
+
+def test_build_worker_options_api_key_mode_keeps_key(tmp_path: Path, monkeypatch):
+    """build_worker_options(auth_mode='api_key') must NOT scrub ANTHROPIC_API_KEY."""
+    monkeypatch.setenv("ANTHROPIC_API_KEY", "sk-ant-keep")
+    build_worker_options(
+        state_path=tmp_path / "s.json",
+        project_dir=tmp_path,
+        denied_bash=[],
+        auth_mode="api_key",
+    )
+    assert os.environ.get("ANTHROPIC_API_KEY") == "sk-ant-keep"
 
 
 # --- per-goal MCP / allowed-tools extras ------------------------------------
