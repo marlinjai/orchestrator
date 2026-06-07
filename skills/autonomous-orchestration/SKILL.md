@@ -86,7 +86,7 @@ If `orchestrator` is not found at all, run the one-time install above first. The
        > /tmp/orch-<task-id>.log 2>&1 &
      ```
 
-4. **Monitor.** The orchestrator fires a notification on every terminal state (`completed | escalated | stopped | failed`): a macOS banner + sound, plus a webhook POST when `ORCHESTRATOR_NOTIFY_URL` is set (point it at an ntfy topic / Pushover / Slack for phone push). So even a detached run no longer finishes silently. You can still poll `state.json` or `orchestrator status --task-id <id>`.
+4. **Monitor.** The orchestrator fires a notification on every terminal state (`completed | escalated | stopped | failed`): a macOS banner + sound; a webhook POST when `ORCHESTRATOR_NOTIFY_URL` is set; and a Telegram message via the secrets-proxy when `SECRETS_PROXY_TOKEN` is present (the bot token + chat id are injected from Infisical server-side, never in the process env). So even a detached run no longer finishes silently. You can still poll `state.json` or `orchestrator status --task-id <id>`.
 
 5. **Auto-review, push, PR, merge** without operator-side user gates (per Marlin's standing rule for orchestrator-driven slices):
 
