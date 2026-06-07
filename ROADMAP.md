@@ -11,6 +11,11 @@ Living tracker for orchestrator work. Read top to bottom: shipped at the top, in
 - Schema break (no migration): `commits` and `files_touched` are now objects with provenance.
 - Plan: `docs/plans/2026-05-24-orchestrator-v2-first-slice.md` (completed).
 
+### terminal-state notifications (2026-06-07)
+- `orchestrator/notify.py`: best-effort, fail-safe ping on every terminal state (`completed | escalated | stopped | failed`) so detached runs stop finishing silently. Two channels: macOS banner + sound (osascript), and a webhook POST when `ORCHESTRATOR_NOTIFY_URL` is set (ntfy / Pushover / Slack for phone push). Wired into `run_orchestrator`'s `finally` so it fires on every exit path including SDK-error failures; never raises.
+- The complementary "wake the dispatching session" path is a launch-method change, not code: the autonomous-orchestration skill now prefers the harness-tracked background launch (`run_in_background`) over `nohup`, so a Claude-dispatched run re-invokes the session on exit and the follow-up (review/merge/next) runs automatically. `nohup` stays documented for runs that must survive the session.
+- 9 new tests; 216/216 passing; ruff clean.
+
 ### auth-mode env contract + cost guard (2026-06-07)
 - Theme 3 shipped: `_scrub_anthropic_api_key` generalized into `apply_env_contract(auth_mode)` in `worker.py`. A cross-provider deny-list (OpenAI / Gemini / Google / Groq / Mistral / Cohere keys + `ANTHROPIC_AUTH_TOKEN`) is always scrubbed; `ANTHROPIC_API_KEY` is scrubbed only in `subscription` mode and KEPT in `api_key` mode. Scrubbed var names are logged to `run.log` (never values).
 - New `AuthMode` (`subscription` | `api_key`), selectable via the `--auth-mode` CLI flag or per-goal `auth_mode` frontmatter (frontmatter wins). Motivated by the 2026-06-15 Anthropic billing change: headless/SDK use leaves the flat subscription for a metered credit then API rates, so blindly scrubbing the key would break the metered path.

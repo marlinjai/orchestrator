@@ -26,6 +26,7 @@ from orchestrator.handover import (
 )
 from orchestrator.ledger import LedgerEntry, append_decision, append_note, now_iso
 from orchestrator.marlin_proxy import MarlinDecision, run_marlin_decision
+from orchestrator.notify import TERMINAL_STATUSES, notify
 from orchestrator.parse import parse_frontmatter
 from orchestrator.proxy import ProxyDecision, run_proxy_decision
 from orchestrator.reconcile import git_head, reconcile
@@ -662,6 +663,19 @@ async def run_orchestrator(cfg: OrchestratorConfig) -> None:
             # Normal exit (stop, escalate, deferred) - do not start another leg.
             break
     finally:
+        # Ping on terminal state so detached runs do not finish silently. This is
+        # the human-facing notify (macOS banner + optional webhook); the
+        # complementary "wake the dispatching session" path is the harness-tracked
+        # launch documented in the skill. Best-effort: never break the run.
+        try:
+            if state.status in TERMINAL_STATUSES:
+                notify(
+                    task_id=cfg.task_id,
+                    status=state.status,
+                    reason=state.exit_reason or "",
+                )
+        except Exception:
+            pass
         if log_file is not None:
             try:
                 log_file.flush()
