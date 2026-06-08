@@ -206,5 +206,36 @@ def logs(
         console.print(log_path.read_text())
 
 
+@app.command("roadmap-next")
+def roadmap_next(
+    root: list[str] = typer.Option(..., "--root", help="plan-doc root to scan (repeatable)"),
+    goals_dir: str = typer.Option("goals", "--goals-dir", help="where to write the goal file"),
+    index: int = typer.Option(0, "--index", "-i", help="queue position to scaffold (0 = top)"),
+    include_in_progress: bool = typer.Option(False, "--include-in-progress"),
+):
+    """Scaffold a goal file from the top of the closed-loop-sync roadmap queue.
+
+    Picks the work item and writes a goal stub referencing the source plan.
+    The target repo (--project) is intentionally left for you to assign before
+    dispatch: a roadmap plan does not encode which repo implements it.
+    """
+    from orchestrator.roadmap import RoadmapError, next_goal
+
+    try:
+        result = next_goal(root, goals_dir, index=index,
+                           include_in_progress=include_in_progress)
+    except RoadmapError as exc:
+        console.print(f"[red]{exc}[/red]")
+        raise typer.Exit(1)
+
+    item = result["item"]
+    console.print(f"[green]Scaffolded goal[/green] [bold]{result['task_id']}[/bold] "
+                  f"(item {index + 1} of {result['total']})")
+    console.print(f"  plan:  {item.get('path')}")
+    console.print(f"  goal:  {result['goal_path']}")
+    console.print("[yellow]Next:[/yellow] set --project + verify in the goal, "
+                  "create a worktree, then `orchestrator start`.")
+
+
 if __name__ == "__main__":
     app()
