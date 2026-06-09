@@ -19,7 +19,7 @@ Prove the generation-workflow engine on the REAL pipelines (backlog E3, the safe
 
 ## Definition of done
 
-1. **Two registered `WorkflowDefinition`s** (in a new module under `src/lib/workflow/`, e.g. `definitions.ts`, registered via the registry):
+1. **Two registered `WorkflowDefinition`s** added to the EXISTING `src/lib/workflow/curated.ts` (a prior slice created it; it already registers an example `hero-product-shot` via `registerWorkflow` inside `ensureCuratedWorkflows()`). EXTEND that module + that function, do NOT create a parallel definitions file. Mirror its existing shape:
    - `image-gen`: a single node, `method: generateImage`, model + prompt/params as `param` bindings, matching what `generate-image.ts` does today.
    - `3d-pipeline`: three nodes `generate3D -> remesh3D -> texture3D`, wired with `ref` bindings (each step's input references the prior node's output, e.g. the GLB url / parent asset id), matching the current `generate-3d -> remesh-3d -> texture-3d` chain.
    - Both must pass the registry's definition-time validation (`parseWorkflowDefinition`).
