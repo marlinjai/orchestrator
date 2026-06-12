@@ -3,7 +3,10 @@ task: lumitra-studio-brand-db-migration
 spec: docs/specs/2026-06-01-brand-db-migration.md
 depends_on: [lumitra-studio-auth-brain]
 shared_state: [prisma, migrations]
-marlin_proxy: shadow
+verify: pnpm test
+verify_fix_cap: 3
+verify_timeout_s: 1800
+marlin_proxy: live
 marlin_proxy_categories:
   scope_change: escalate
   product_decision: escalate
@@ -46,6 +49,7 @@ Implement the **brand DB migration** per the spec at `docs/specs/2026-06-01-bran
 
 ## Notes
 
+- REALITY UPDATE 2026-06-12 (read before the older notes): the auth dependency is MERGED on main (NextAuth v5 dual gate, `src/lib/auth/verifyRequest.ts`). The core package was RENAMED `@marlinjai/lumitra-core` -> `@marlinjai/studio-core` (#23); the package DIR is still `packages/lumitra-core/`, imports use `@marlinjai/studio-core/brand`. The schema now also contains `WorkflowRun`/`WorkflowNodeRun` models (#33); do not touch them. The infisical-wrapped `pnpm test` suite runs against a real test Postgres via `src/test/global-setup.ts` and was green on main as of #35; mirror `src/lib/workflow/executor.spec.ts` for the real-DB test pattern. If `pnpm test` cannot reach Infisical or the test DB, file an `open_thread` and stop rather than stubbing the DB.
 - This slice serializes after `lumitra-studio-auth-brain` (both touch `prisma` + `migrations`; the dispatcher will not run them concurrently). Recommended order is auth first.
 - Storage Brain must be reachable from the eventual deploy (it already is, for generated assets). Reuse the existing SDK and the existing URL-signing path; do not add a second storage client.
 - Out of scope (note as `open_thread` if relevant): per-tenant brand ownership, brand versioning, folding brands into the unified Asset table.
