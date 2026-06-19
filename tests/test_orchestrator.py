@@ -81,6 +81,21 @@ async def test_orchestrator_iterates_until_proxy_stops(cfg: OrchestratorConfig):
     assert len(state.usage) == 3
 
 
+async def test_stop_is_honored_even_after_stagnation_streak(cfg: OrchestratorConfig):
+    """A `stop` triggers the verify + held-out gates, so the stagnation brake must
+    never pre-empt it (regression: a slow-to-stop Proxy that replied past the cap
+    then stopped got stagnation-stopped, starving the held-out gate)."""
+    cfg.max_iterations = 5
+    with _mock_loop(
+        [_turn("t1", 1), _turn("t2", 2), _turn("t3", 3), _turn("t4", 4)],
+        [_decision("reply"), _decision("reply"), _decision("reply"), _decision("stop", "", "done")],
+    ):
+        await run_orchestrator(cfg)
+    state = load_state(cfg.state_dir / "state.json")
+    assert state.status == "completed"  # the stop ran, not a stagnation stop
+    assert state.iteration == 4
+
+
 async def test_orchestrator_halts_on_iteration_cap(cfg: OrchestratorConfig):
     cfg.max_iterations = 2
     with _mock_loop(

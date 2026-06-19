@@ -749,8 +749,15 @@ async def run_orchestrator(cfg: OrchestratorConfig) -> None:
                         # NOT route a stuck Worker through a fresh Marlin-Proxy
                         # turn it could influence (re-deciding per iteration
                         # would amplify rate-limit and spend).
+                        # A `stop` is a terminal decision that TRIGGERS the
+                        # verify + held-out gates (the real arbiters of a green),
+                        # so the stagnation brake must never pre-empt it: doing so
+                        # would let a slow-to-stop Proxy starve the gate and report
+                        # stagnation on already-finished work. Stagnation only
+                        # brakes a loop that keeps continuing (reply / escalate)
+                        # without structured progress.
                         streak = update_stagnation(state)
-                        if stagnation_hit(streak, cfg.stagnation_streak_cap):
+                        if decision.action != "stop" and stagnation_hit(streak, cfg.stagnation_streak_cap):
                             state.status = "stopped"
                             state.exit_reason = (
                                 f"stagnation: no structured progress for {streak} "
