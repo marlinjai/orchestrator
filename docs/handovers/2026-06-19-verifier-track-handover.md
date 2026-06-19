@@ -14,6 +14,16 @@ projects: [orchestrator]
 
 # Handover: verifier track (continue from brick 2)
 
+> **STATUS UPDATE 2026-06-19 (later in the day): bricks 3 and 4 are now DONE and
+> COMMITTED, plus an end-to-end dogfood capstone.** Commits on
+> `feat/wave-0-reliability-core`: 261a626 (bricks 1+2), 80841cb (brick 3 MCP
+> ceiling), c094152 (brick 4 worktree isolation), 982f544 (dogfood capstone).
+> 361 tests green, ruff clean. The "two confirmed next bricks" below (§3) are
+> complete. The remaining work is GATED ON MARLIN (the real `/opt/verifier-vault`
+> setup + which repo, his trust-root) and the recommended-deferred brick 5
+> (work-offline/sandbox). See memory `verifier-track-state`. The rest of this
+> doc is the original brick-2 resume point, kept for reference.
+
 Picking up an in-flight build. Read this, then continue. Do NOT redo brick 1 or
 brick 2 (they exist in the working tree). Another session produced them; this
 session and that one must not both touch the same files.
