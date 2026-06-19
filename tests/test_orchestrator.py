@@ -1,3 +1,4 @@
+import os
 import subprocess
 from contextlib import contextmanager
 from pathlib import Path
@@ -7,6 +8,7 @@ import pytest
 
 from orchestrator.orchestrator import OrchestratorConfig, run_orchestrator
 from orchestrator.proxy import ProxyDecision
+from orchestrator.repo_registry import RepoPolicy
 from orchestrator.state import IterationUsage, load_state
 from orchestrator.worktree import default_worktree_path, worktree_branch
 
@@ -128,6 +130,84 @@ async def test_orchestrator_halts_on_global_kill(cfg: OrchestratorConfig):
     assert state.status == "stopped"
     assert "global kill" in (state.exit_reason or "").lower()
     mock_turn.assert_not_called()
+
+
+# --- stakes-tier dispatch gate ---------------------------------------------
+# The gate refuses to START a run on a repo the operator registry marks at
+# stakes_tier >= 3 unless an operator authorization is present. The git/registry
+# resolution is covered in test_repo_registry; here we patch resolve_repo_policy
+# to drive the tier directly and assert the gate's refuse/allow behavior.
+
+
+def _tier_policy(tier: int | None) -> RepoPolicy:
+    return RepoPolicy(
+        remote="github.com/marlinjai/erp-suite",
+        stakes_tier=tier,
+        source="registry" if tier is not None else "default",
+    )
+
+
+async def test_stakes_gate_refuses_tier3_without_confirm(cfg: OrchestratorConfig):
+    with patch(
+        "orchestrator.orchestrator.resolve_repo_policy", return_value=_tier_policy(3)
+    ), patch("orchestrator.orchestrator._run_one_turn") as mock_turn:
+        await run_orchestrator(cfg)
+    state = load_state(cfg.state_dir / "state.json")
+    assert state.status == "stopped"
+    assert "stakes" in (state.exit_reason or "").lower()
+    assert state.stakes_tier == 3
+    mock_turn.assert_not_called()  # refused BEFORE any Worker turn / token spend
+
+
+async def test_stakes_gate_refuses_tier4_without_confirm(cfg: OrchestratorConfig):
+    with patch(
+        "orchestrator.orchestrator.resolve_repo_policy", return_value=_tier_policy(4)
+    ), patch("orchestrator.orchestrator._run_one_turn") as mock_turn:
+        await run_orchestrator(cfg)
+    state = load_state(cfg.state_dir / "state.json")
+    assert state.status == "stopped"
+    assert "stakes" in (state.exit_reason or "").lower()
+    mock_turn.assert_not_called()
+
+
+async def test_stakes_gate_allows_tier3_with_confirm_flag(cfg: OrchestratorConfig):
+    cfg.confirm_stakes = True
+    with patch(
+        "orchestrator.orchestrator.resolve_repo_policy", return_value=_tier_policy(3)
+    ), _mock_loop([_turn("done")], [_decision("stop", "", "done")]):
+        await run_orchestrator(cfg)
+    state = load_state(cfg.state_dir / "state.json")
+    assert state.status == "completed"
+    assert state.stakes_tier == 3
+
+
+async def test_stakes_gate_allows_tier3_with_env(cfg: OrchestratorConfig):
+    with patch.dict(os.environ, {"ORCHESTRATOR_CONFIRM_STAKES": "1"}), patch(
+        "orchestrator.orchestrator.resolve_repo_policy", return_value=_tier_policy(3)
+    ), _mock_loop([_turn("done")], [_decision("stop", "", "done")]):
+        await run_orchestrator(cfg)
+    state = load_state(cfg.state_dir / "state.json")
+    assert state.status == "completed"
+
+
+async def test_stakes_gate_ignores_tier2(cfg: OrchestratorConfig):
+    """Below the threshold the default-allow behavior is unchanged."""
+    with patch(
+        "orchestrator.orchestrator.resolve_repo_policy", return_value=_tier_policy(2)
+    ), _mock_loop([_turn("done")], [_decision("stop", "", "done")]):
+        await run_orchestrator(cfg)
+    state = load_state(cfg.state_dir / "state.json")
+    assert state.status == "completed"
+
+
+async def test_stakes_gate_noop_when_tier_unknown(cfg: OrchestratorConfig):
+    """An unregistered repo (stakes_tier None) is never gated."""
+    with patch(
+        "orchestrator.orchestrator.resolve_repo_policy", return_value=_tier_policy(None)
+    ), _mock_loop([_turn("done")], [_decision("stop", "", "done")]):
+        await run_orchestrator(cfg)
+    state = load_state(cfg.state_dir / "state.json")
+    assert state.status == "completed"
 
 
 async def test_orchestrator_halts_on_usage_cap(cfg: OrchestratorConfig):
@@ -312,6 +392,7 @@ async def test_repo_policy_resolved_onto_state(tmp_path: Path):
     repo = _repo_with_test(tmp_path)
     _git(["git", "remote", "add", "origin", "git@github.com:test/proj.git"], repo)
     cfg = _cfg_for_repo(tmp_path, repo)  # repos_config = tmp_path / "repos.toml"
+    cfg.confirm_stakes = True  # tier 3 repo: authorize the start (gate tested elsewhere)
     (tmp_path / "repos.toml").write_text(
         '[repos."github.com/test/proj"]\n'
         'held_out_verify = "true"\nstakes_tier = 3\n'
@@ -334,6 +415,7 @@ async def test_held_out_fail_escalates_after_intree_pass(tmp_path: Path):
     repo = _repo_with_test(tmp_path)
     _git(["git", "remote", "add", "origin", "git@github.com:test/proj.git"], repo)
     cfg = _cfg_for_repo(tmp_path, repo, verify="true")
+    cfg.confirm_stakes = True  # tier 4 repo: authorize the start (gate tested elsewhere)
     (tmp_path / "repos.toml").write_text(
         '[repos."github.com/test/proj"]\nheld_out_verify = "false"\nstakes_tier = 4\n'
     )

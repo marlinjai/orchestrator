@@ -33,6 +33,13 @@ from orchestrator.guardrails import bash_allowed
 # 3 external, 4 irreversible. Higher = more caution before acting on this repo.
 VALID_STAKES_TIERS: tuple[int, ...] = (1, 2, 3, 4)
 
+# At or above this tier the orchestrator REFUSES to start an autonomous run
+# unless the operator explicitly authorizes it (the --confirm-stakes flag /
+# ORCHESTRATOR_CONFIRM_STAKES env, both operator-owned). Tier 3 = external
+# effects, tier 4 = irreversible: "needs Marlin's go", now a real stop rather
+# than a recorded note. Below this tier the default-allow behavior is unchanged.
+STAKES_GATE_THRESHOLD: int = 3
+
 
 @dataclass
 class RepoPolicy:

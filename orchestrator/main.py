@@ -112,6 +112,19 @@ def start(
             "set it); it cannot weaken a registry-enforced held_out_verify."
         ),
     ),
+    confirm_stakes: bool = typer.Option(
+        False,
+        "--confirm-stakes",
+        help=(
+            "Operator authorization to start a run on a high-stakes repo "
+            "(registry stakes_tier >= 3: external effects / irreversible). "
+            "Without this the orchestrator REFUSES to start on such a repo. "
+            "Operator-only (a goal file can never set it); the "
+            "autonomous-orchestration skill forbids Claude from self-authorizing "
+            "it. Pass ONLY with Marlin's explicit go. ORCHESTRATOR_CONFIRM_STAKES=1 "
+            "is the env equivalent."
+        ),
+    ),
 ):
     """Start a new autonomous task."""
     if auth_mode not in ("subscription", "api_key"):
@@ -138,6 +151,7 @@ def start(
         orchestrator_home=_home(),
         worktree_isolation=worktree,
         held_out_override=(held_out or None),
+        confirm_stakes=confirm_stakes,
     )
     console.print(f"[bold green]starting task {tid}[/bold green]")
     console.print(f"  goal: {goal}")

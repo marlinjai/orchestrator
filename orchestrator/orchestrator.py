@@ -36,7 +36,7 @@ from orchestrator.notify import TERMINAL_STATUSES, notify
 from orchestrator.parse import parse_frontmatter
 from orchestrator.proxy import ProxyDecision, run_proxy_decision
 from orchestrator.reconcile import git_head, reconcile
-from orchestrator.repo_registry import resolve_repo_policy
+from orchestrator.repo_registry import STAKES_GATE_THRESHOLD, resolve_repo_policy
 from orchestrator.retry import (
     MAX_TRANSIENT_RETRIES,
     backoff_delay,
@@ -137,9 +137,26 @@ class OrchestratorConfig:
     # for one-off / dogfood runs without a repos.toml entry. It can ADD a held-out
     # to a repo that has none; it can never weaken a registry-enforced one.
     held_out_override: str | None = None
+    # Operator authorization to start a run on a high-stakes repo (resolved
+    # stakes_tier >= STAKES_GATE_THRESHOLD). Operator-owned: set by the
+    # --confirm-stakes flag or ORCHESTRATOR_CONFIRM_STAKES env. The goal file can
+    # never set it (it is not goal frontmatter). Default False = the orchestrator
+    # refuses to start on a tier-3+ repo, turning "needs Marlin's go" from a note
+    # into a real stop. The autonomous-orchestration skill instructs Claude to
+    # NEVER self-authorize this for tier 3+ and always surface to Marlin first.
+    confirm_stakes: bool = False
 
 
 console = Console()
+
+
+def _env_flag(name: str) -> bool:
+    """True when an operator-owned boolean env var is set to a truthy value.
+
+    Used for operator authorizations (e.g. ORCHESTRATOR_CONFIRM_STAKES) that must
+    never come from goal frontmatter. Accepts 1/true/yes/on (case-insensitive).
+    """
+    return os.environ.get(name, "").strip().lower() in ("1", "true", "yes", "on")
 
 
 def _resolve_auth_mode(cli_mode: AuthMode, frontmatter: dict) -> AuthMode:
@@ -508,6 +525,38 @@ async def run_orchestrator(cfg: OrchestratorConfig) -> None:
             f"source={policy.source} stakes_tier={policy.stakes_tier} "
             f"held_out_verify={held_out_source}[/dim]"
         )
+
+        # Stakes-tier dispatch gate. A repo the operator registry marks at
+        # tier >= STAKES_GATE_THRESHOLD (external effects / irreversible) must be
+        # explicitly authorized to START, turning "needs Marlin's go" from a
+        # recorded note into a real refusal. Authorization is operator-owned
+        # (--confirm-stakes / ORCHESTRATOR_CONFIRM_STAKES); the goal file cannot
+        # set it, and the autonomous-orchestration skill forbids Claude from
+        # self-authorizing it. Default-refuse is the safe failure mode: a new
+        # high-stakes repo blocks until a human says go. This composes with the
+        # always-on protections (merge/deploy stay Marlin's; irreversible_ops is
+        # hard-escalated in the Marlin Proxy and not relaxable by this flag).
+        confirm_stakes = cfg.confirm_stakes or _env_flag("ORCHESTRATOR_CONFIRM_STAKES")
+        if (
+            policy.stakes_tier is not None
+            and policy.stakes_tier >= STAKES_GATE_THRESHOLD
+            and not confirm_stakes
+        ):
+            state.status = "stopped"
+            state.exit_reason = (
+                f"stakes gate: repo is tier {policy.stakes_tier} "
+                f"(>= {STAKES_GATE_THRESHOLD}); start requires operator "
+                f"--confirm-stakes (or ORCHESTRATOR_CONFIRM_STAKES=1)"
+            )
+            save_state(state_path, state)
+            local_console.print(
+                f"[bold red]stakes gate:[/bold red] {policy.remote or 'this repo'} "
+                f"is tier {policy.stakes_tier} (>= {STAKES_GATE_THRESHOLD}). "
+                "Refusing to start an autonomous run without operator "
+                "authorization. Re-run with --confirm-stakes (or set "
+                "ORCHESTRATOR_CONFIRM_STAKES=1) ONLY with Marlin's explicit go."
+            )
+            return
 
         # Worktree isolation (opt-in): run this attempt in its own git worktree so
         # a bad attempt is throwaway and the operator's checkout is untouched. A

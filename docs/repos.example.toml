@@ -17,6 +17,10 @@
 #                        Must not hit the bash denylist.
 #   stakes_tier          1 read-only, 2 reversible, 3 external, 4 irreversible.
 #                        Higher = more caution before acting on this repo.
+#                        tier >= 3 is a DISPATCH GATE: the orchestrator refuses
+#                        to start a run on such a repo unless the operator passes
+#                        --confirm-stakes (or ORCHESTRATOR_CONFIRM_STAKES=1).
+#                        The goal file can never authorize it.
 #   allowed_mcp_servers  Operator ceiling on which MCP servers a Worker on this
 #                        repo may use (by key from WORKER_MCP_REGISTRY).
 
