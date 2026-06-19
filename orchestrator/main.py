@@ -101,6 +101,17 @@ def start(
             "git repo; non-git falls back to in-place."
         ),
     ),
+    held_out: str = typer.Option(
+        "",
+        "--held-out",
+        help=(
+            "Operator-provided held-out verify command, run on a stop-candidate "
+            "after the in-tree verify passes (in-tree green + held-out red = "
+            "reward-hack fingerprint -> escalate). Use for one-off / dogfood runs "
+            "without a repos.toml entry. Operator-sourced (a goal file can never "
+            "set it); it cannot weaken a registry-enforced held_out_verify."
+        ),
+    ),
 ):
     """Start a new autonomous task."""
     if auth_mode not in ("subscription", "api_key"):
@@ -126,6 +137,7 @@ def start(
         daily_token_cap=_daily_token_cap(),
         orchestrator_home=_home(),
         worktree_isolation=worktree,
+        held_out_override=(held_out or None),
     )
     console.print(f"[bold green]starting task {tid}[/bold green]")
     console.print(f"  goal: {goal}")

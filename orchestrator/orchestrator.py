@@ -14,6 +14,7 @@ from rich.console import Console
 from orchestrator.config import MarlinProxyConfig, apply_task_overrides, load_config
 from orchestrator.guardrails import (
     DEFAULT_API_KEY_COST_CAP_USD,
+    bash_allowed,
     cost_cap_hit,
     cumulative_tokens,
     estimate_cost_usd,
@@ -131,6 +132,11 @@ class OrchestratorConfig:
     # worktree so a bad attempt is throwaway and the real checkout is untouched.
     # Default off = run in place (the historical behavior).
     worktree_isolation: bool = False
+    # Operator-provided ad-hoc held-out command (the --held-out flag). Same trust
+    # as the registry (operator-sourced, the goal file still cannot set it), but
+    # for one-off / dogfood runs without a repos.toml entry. It can ADD a held-out
+    # to a repo that has none; it can never weaken a registry-enforced one.
+    held_out_override: str | None = None
 
 
 console = Console()
@@ -469,13 +475,38 @@ async def run_orchestrator(cfg: OrchestratorConfig) -> None:
             local_console.print(f"[bold red]repo registry error:[/bold red] {e}")
             return
         state.repo_remote = policy.remote
-        state.held_out_verify = policy.held_out_verify
+        # Held-out command resolution. The registry (keyed by the real remote)
+        # ENFORCES one per repo and is never weakened by anything passed at
+        # dispatch. When the repo has no registry held-out, an operator may supply
+        # an ad-hoc one via --held-out (operator-sourced, same trust: a goal file
+        # still cannot set it). A denylisted ad-hoc command fails the run loud.
+        if policy.held_out_verify:
+            state.held_out_verify = policy.held_out_verify
+            held_out_source = "registry"
+            if cfg.held_out_override:
+                local_console.print(
+                    "[yellow]--held-out ignored: this repo has an enforced "
+                    "registry held_out_verify[/yellow]"
+                )
+        elif cfg.held_out_override:
+            allowed, reason = bash_allowed(cfg.held_out_override)
+            if not allowed:
+                state.status = "failed"
+                state.exit_reason = f"--held-out refused by denylist: {reason}"
+                save_state(state_path, state)
+                local_console.print(f"[bold red]{state.exit_reason}[/bold red]")
+                return
+            state.held_out_verify = cfg.held_out_override
+            held_out_source = "cli"
+        else:
+            state.held_out_verify = None
+            held_out_source = "none"
         state.stakes_tier = policy.stakes_tier
         save_state(state_path, state)
         local_console.print(
             f"[dim]repo policy: remote={policy.remote or '(none)'} "
             f"source={policy.source} stakes_tier={policy.stakes_tier} "
-            f"held_out_verify={'set' if policy.held_out_verify else 'none'}[/dim]"
+            f"held_out_verify={held_out_source}[/dim]"
         )
 
         # Worktree isolation (opt-in): run this attempt in its own git worktree so

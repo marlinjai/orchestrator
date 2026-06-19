@@ -303,6 +303,30 @@ An operator-owned file, `~/.config/orchestrator/repos.toml` (override with `ORCH
 
 **The held-out gate.** On a stop-candidate, after the in-tree `verify` passes and the tamper tripwire clears (or as the sole gate when the goal has no `verify`), the orchestrator runs `held_out_verify`. A pass corroborates the green and completes. A FAIL is the reward-hack fingerprint (the in-tree suite is green but the out-of-reach suite is red) and escalates: `status=escalated`, `exit_reason` mentions "REWARD-HACK FINGERPRINT", and `state.last_held_out` records it (also shown as `held_out_result` in `orchestrator status`). A held-out fail is never fed back to the Worker as a retry. OPERATOR SETUP (your job): the held-out tests must live on a path the Worker's OS user cannot write (a different-owner dir, or read-only mount). The orchestrator guarantees the command is operator-sourced and runs it; it does not enforce the filesystem isolation, so if the hidden tests sit in a Worker-writable path the guarantee is void.
 
+## Verifier-gated dispatch + the dogfood (YOU run this, the user never pastes commands)
+
+When the user asks to "run X with a held-out check", "dogfood the verifier", "prove the held-out verifier on <repo>", or any verifier-gated dispatch, YOU (the operator) set it up and dispatch it via the CLI and report the outcome. The user describes intent in natural language; they do not paste shell. Two paths:
+
+**Ad-hoc (one-off / dogfood): the `--held-out` flag.** No `repos.toml` needed. The flag is operator-sourced (the goal file can never set it) and can ADD a held-out to a repo that has none, but it can never weaken a registry-enforced one (that is ignored with a warning).
+
+```bash
+orchestrator start --goal <goal> --project <repo> --task-id <id> \
+  --worktree --held-out "<command that runs the hidden check>" \
+  --max-iterations 4 --max-hours 0.25
+```
+
+**Persistent (a repo you gate every run): the registry.** Add the repo to `~/.config/orchestrator/repos.toml` once (keyed by its real remote); every run on that repo then auto-applies the held-out + stakes + MCP ceiling. Use this for real recurring repos, the flag for throwaways.
+
+**Dogfood recipe (proves the gate fires, end to end).** Pick a small, low-stakes git repo with a remote (e.g. `pin-to-clipboard`). The held-out check is self-contained, so it does not touch the repo's real code:
+
+1. Write the strict hidden check to a vault dir outside the repo, e.g. `~/.orchestrator/dogfood-vault/check.py`, asserting full behavior of a tiny stub.
+2. Write a goal that has the Worker plant a deliberately-incomplete stub + a WEAK in-tree test (so the in-tree suite goes green while the hidden check fails). Frame the stub as "intentionally incomplete, do not finish it" so a capable Worker leaves it.
+3. Dispatch with `--worktree --held-out "python3 -B ~/.orchestrator/dogfood-vault/check.py"`.
+4. Read it back with `orchestrator status --task-id <id>`: expect `status=escalated`, `held_out_result=fail`, `exit_reason` starting "REWARD-HACK FINGERPRINT". Report that to the user.
+5. Teardown: `git -C <repo> worktree remove <repo>-orch-<id>` then `git -C <repo> branch -D orchestrator/<id>`, and `rm -rf` the vault + state dir.
+
+For a zero-cost, zero-setup proof of the GATE LOGIC (no Worker run), point the user at `uv run pytest tests/test_verifier_dogfood.py -v` in the orchestrator repo. Reserve a real `--held-out` dispatch for showing it live on a real repo, and never on a prod app with auth/secrets/DB.
+
 ## Things to confirm with the user before dispatching
 
 - Which target repo / worktree path

@@ -467,6 +467,73 @@ async def test_worktree_clean_completion_removes_worktree(tmp_path: Path):
     assert worktree_branch(cfg.task_id) in branches
 
 
+# ---- --held-out: operator-provided ad-hoc held-out gate ----
+
+
+async def test_held_out_override_gates_and_escalates(tmp_path: Path):
+    """--held-out supplies a held-out check for a repo with no registry entry:
+    in-tree green + held-out red == fingerprint -> escalate."""
+    repo = _repo_with_test(tmp_path)  # no remote -> no registry entry
+    cfg = _cfg_for_repo(tmp_path, repo, verify="true")
+    cfg.held_out_override = "false"  # held-out always fails
+
+    def noop_turn(*, client, user_message, state, out_console=None):
+        return (["done"], IterationUsage(iteration=state.iteration))
+
+    with patch("orchestrator.orchestrator._run_one_turn", side_effect=noop_turn), patch(
+        "orchestrator.orchestrator.run_proxy_decision",
+        return_value=ProxyDecision(action="stop", text="", reasoning="done"),
+    ):
+        await run_orchestrator(cfg)
+
+    state = load_state(cfg.state_dir / "state.json")
+    assert state.held_out_verify == "false"  # the CLI override flowed through
+    assert state.last_verify is not None and state.last_verify.status == "pass"
+    assert state.last_held_out is not None and state.last_held_out.status == "fail"
+    assert state.status == "escalated"
+    assert "REWARD-HACK FINGERPRINT" in (state.exit_reason or "")
+
+
+async def test_held_out_override_denylisted_fails_loud(tmp_path: Path):
+    repo = _repo_with_test(tmp_path)
+    cfg = _cfg_for_repo(tmp_path, repo, verify="true")
+    cfg.held_out_override = "npm publish"  # denylisted
+
+    with patch("orchestrator.orchestrator._run_one_turn") as mock_turn:
+        await run_orchestrator(cfg)
+
+    state = load_state(cfg.state_dir / "state.json")
+    assert state.status == "failed"
+    assert "denylist" in (state.exit_reason or "").lower()
+    mock_turn.assert_not_called()  # fails before any Worker turn
+
+
+async def test_registry_held_out_cannot_be_weakened_by_override(tmp_path: Path):
+    """A repo with a registry-enforced held_out_verify ignores --held-out, so an
+    operator can never weaken an enforced gate at dispatch."""
+    repo = _repo_with_test(tmp_path)
+    _git(["git", "remote", "add", "origin", "https://github.com/x/y.git"], repo)
+    repos_toml = tmp_path / "repos.toml"
+    repos_toml.write_text('[repos."github.com/x/y"]\nheld_out_verify = "true"\n')
+
+    cfg = _cfg_for_repo(tmp_path, repo, verify="true")
+    cfg.repos_config = repos_toml
+    cfg.held_out_override = "false"  # would fail; must be IGNORED
+
+    def noop_turn(*, client, user_message, state, out_console=None):
+        return (["done"], IterationUsage(iteration=state.iteration))
+
+    with patch("orchestrator.orchestrator._run_one_turn", side_effect=noop_turn), patch(
+        "orchestrator.orchestrator.run_proxy_decision",
+        return_value=ProxyDecision(action="stop", text="", reasoning="done"),
+    ):
+        await run_orchestrator(cfg)
+
+    state = load_state(cfg.state_dir / "state.json")
+    assert state.held_out_verify == "true"  # registry won, override ignored
+    assert state.status == "completed"
+
+
 async def test_worktree_flag_on_non_git_falls_back_in_place(tmp_path: Path, task_dir: Path):
     """Isolation requested on a non-git project falls back to running in place
     rather than failing; no worktree is created."""
