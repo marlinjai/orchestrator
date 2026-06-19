@@ -69,6 +69,7 @@ from orchestrator.worker import (
     apply_env_contract,
     build_worker_options,
     load_worker_extras,
+    resolve_effective_mcp_servers,
     run_worker_turn,
 )
 
@@ -496,12 +497,30 @@ async def run_orchestrator(cfg: OrchestratorConfig) -> None:
                 f"[dim]worker extras: mcp_servers={worker_extras.mcp_server_keys} "
                 f"allowed_tools={worker_extras.allowed_tools}[/dim]"
             )
+        # Enforce the per-repo MCP-server ceiling (operator-owned, un-fakeable).
+        # Audit what the ceiling did to run.log; a goal can never enable a server
+        # the operator did not allow for this repo (defaults always survive).
+        if policy.allowed_mcp_servers is not None:
+            _, dropped_servers = resolve_effective_mcp_servers(
+                worker_extras.mcp_server_keys, policy.allowed_mcp_servers
+            )
+            local_console.print(
+                f"[dim]mcp ceiling (repo policy): allowed={policy.allowed_mcp_servers} "
+                f"| goal requested={worker_extras.mcp_server_keys or '[]'}"
+                + (
+                    f" | DROPPED (not in ceiling): {dropped_servers}"
+                    if dropped_servers
+                    else " | all within ceiling"
+                )
+                + "[/dim]"
+            )
         options = build_worker_options(
             state_path=state_path,
             project_dir=cfg.project_dir,
             denied_bash=[],
             extras=worker_extras,
             auth_mode=auth_mode,
+            allowed_mcp_servers=policy.allowed_mcp_servers,
         )
 
         next_message = initial_message
