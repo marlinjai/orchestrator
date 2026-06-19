@@ -249,6 +249,23 @@ marlin_proxy_categories:
 
 Malformed persona output, a bad/missing choice, or a per-decision timeout all resolve to `escalate`, never a silent auto-approve. A missing persona file forces `mode=off`. `irreversible_ops` (prod deploys, secret rotation, DNS, destructive migrations) is hard-wired to escalate and cannot be relaxed by config or per-task frontmatter.
 
+## Per-role executors (Wave 2 seam)
+
+Each ROLE (`worker`, `recon`, `planner`) resolves to an executor profile (model + `auth_mode` + optional `cost_ceiling_usd`) via `resolve_executor(role)`. **The default for every role is Claude (`claude-opus-4-8`, subscription).** With no `[executors.*]` config the orchestrator is the current single-model setup, byte-for-byte. Override a single role in the operator config (operator-owned, same trust as the Marlin Proxy config; never goal frontmatter, never a per-repo registry field):
+
+```toml
+[executors.recon]
+model_id = "mercury"     # Inception Mercury, read-only recon ONLY
+auth_mode = "api_key"
+cost_ceiling_usd = 0.50  # optional, advisory
+```
+
+Rules:
+- **Defaults are Claude.** A role you do not pin stays on Claude. A malformed `[executors.*]` table fails the run loud.
+- **Non-Anthropic keys go through the proxy.** The Mercury/Inception key is injected SERVER-SIDE on the ai-host secrets proxy (a raw-forward that returns the completion verbatim, not the redacting `/execute` path). The orchestrator process and the transcript never see the key. If the proxy/key is unavailable, recon FAILS LOUD and falls back to Claude recon, never silently skipping.
+- **Only `recon` (read-only) can be non-Claude in this slice.** The Worker (code-writing) and BOTH Proxies stay on Claude: their integrity is the trust model. **Code-writing via a non-Claude model is NOT enabled here** (it needs a measured `time_to_verified_result` win and best-of-N; a later wave). `state.last_recon` logs which executor served recon + wall-clock for that comparison (logged only, never a gate input).
+- **Ships dormant.** Nothing changes until an operator config explicitly points `recon` at Mercury.
+
 ## Authentication (critical)
 
 **The Worker uses the user's Claude Code login subscription by default**, not API billing. The orchestrator strips `ANTHROPIC_API_KEY` from its own env before spawning the SDK subprocess (see `orchestrator/worker.py::_scrub_anthropic_api_key`).

@@ -86,6 +86,20 @@ class IterationUsage(BaseModel):
     proxy_ms: int = 0
 
 
+class ReconRecord(BaseModel):
+    """The `time_to_verified_result` hook for the per-role executor seam: which
+    executor served the read-only recon role (`mercury` or `claude`), the model
+    id, and the wall-clock, so a later run can compare a Mercury-recon run
+    against a Claude-recon baseline. LOGGED telemetry only, NEVER a gate input
+    (consistent with Wave 0: self-report/confidence is recorded, never gated)."""
+
+    executor: str
+    model_id: str
+    elapsed_ms: int
+    ok: bool = True
+    ran_at: datetime = Field(default_factory=lambda: datetime.now(timezone.utc))
+
+
 class AutonomyStats(BaseModel):
     # consecutive marlin-proxy auto-decisions since the last escalation
     decisions_between_escalations: int = 0
@@ -125,6 +139,10 @@ class State(BaseModel):
     verify_attempts: int = 0
     last_verify: VerifyRecord | None = None
     last_held_out: HeldOutRecord | None = None
+    # `time_to_verified_result` telemetry for the per-role executor seam: which
+    # executor (mercury/claude) served the read-only recon role and how long it
+    # took. Logged only, NEVER a gate input (see executor.py / ReconRecord).
+    last_recon: ReconRecord | None = None
     stagnation_streak: int = 0
     last_progress_key: str | None = None
     transient_retries: int = 0

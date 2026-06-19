@@ -12,6 +12,7 @@ from claude_agent_sdk import ClaudeSDKClient
 from rich.console import Console
 
 from orchestrator.config import MarlinProxyConfig, apply_task_overrides, load_config
+from orchestrator.executor import ReconFindings, record_recon
 from orchestrator.guardrails import (
     DEFAULT_API_KEY_COST_CAP_USD,
     bash_allowed,
@@ -281,6 +282,87 @@ def _load_marlin(cfg: OrchestratorConfig, goal_text: str) -> tuple[MarlinProxyCo
         mp_config.mode = "off"
         return mp_config, ""
     return mp_config, persona_path.read_text().strip()
+
+
+async def _claude_recon(question: str) -> str:
+    """Claude recon fallback: a single read-only Claude turn that answers a
+    reconnaissance question with no tools and no repo access. This keeps the
+    recon role on Claude (the default and the fallback when Mercury is
+    unavailable). Mirrors the Decision Proxy's own model.
+    """
+    from claude_agent_sdk import ClaudeAgentOptions, query
+
+    options = ClaudeAgentOptions(
+        system_prompt=(
+            "You are a read-only reconnaissance assistant. Answer the question "
+            "concisely with concrete findings. You have no tools and cannot "
+            "modify any system."
+        ),
+        setting_sources=[],
+        allowed_tools=[],
+    )
+    chunks: list[str] = []
+    async for msg in query(prompt=question, options=options):
+        text = extract_text(msg)
+        if text:
+            chunks.append(text)
+    return "".join(chunks)
+
+
+async def run_recon(
+    question: str,
+    *,
+    state: State | None = None,
+    config_path: Path | None = None,
+    transport=None,
+) -> ReconFindings:
+    """Run a read-only reconnaissance question through the per-role executor seam.
+
+    This is the ONE real call site of the Wave-2 per-role routing seam. It
+    resolves the ``recon`` role (Claude by default), and ONLY when an operator
+    config points it at Mercury does the non-Claude path run, with the Inception
+    key injected server-side. A Mercury failure falls back to Claude recon (never
+    a silent skip). The Worker and BOTH Proxies stay on Claude -- recon is the
+    only non-Claude surface this slice enables, asserted in tests.
+
+    Records the ``time_to_verified_result`` telemetry on ``state.last_recon``
+    (logged only, never a gate input).
+    """
+    # Lazy import so the SDK-backed Claude fallback wires through the orchestrator
+    # without executor.py importing the SDK.
+    from orchestrator.executor import resolve_executor as _resolve, run_mercury_recon
+    from orchestrator.executor import MercuryUnavailable
+
+    profile = _resolve("recon", config_path=config_path)
+
+    if profile.is_mercury:
+        try:
+            findings = run_mercury_recon(question, profile=profile, transport=transport)
+            logger.info(
+                "recon served by mercury (%s) in %dms", profile.model_id, findings.elapsed_ms
+            )
+            if state is not None:
+                record_recon(state, findings)
+            return findings
+        except MercuryUnavailable as e:
+            logger.warning(
+                "mercury recon unavailable (%s); falling back to Claude recon", e
+            )
+
+    start = time.monotonic()
+    answer = await _claude_recon(question)
+    elapsed_ms = int((time.monotonic() - start) * 1000)
+    findings = ReconFindings(
+        question=question,
+        findings=answer,
+        executor="claude",
+        model_id=profile.model_id if profile.is_claude else "claude-opus-4-8",
+        elapsed_ms=elapsed_ms,
+        ok=bool(answer.strip()),
+    )
+    if state is not None:
+        record_recon(state, findings)
+    return findings
 
 
 def _record_marlin_decision(
