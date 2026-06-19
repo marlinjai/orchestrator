@@ -4,6 +4,9 @@ Living tracker for orchestrator work. Read top to bottom: shipped at the top, in
 
 ## Shipped
 
+### Generated TypeScript state contract (2026-06-20)
+- **`types/state.d.ts` codegen** (`scripts/gen_state_dts.py`): a self-contained pure-Python emitter walks `State.model_json_schema()` and emits a typed `.d.ts` (one `export interface` per model, named `export type` unions for the four `Literal` aliases, `?` for optional/nullable fields, ISO datetime as `string`, arrays as `T[]`). No node toolchain, no new dependency. A drift test (`tests/test_state_dts.py`) regenerates into memory and byte-diffs the committed file, so `uv run pytest` fails the moment the model changes without a regenerate (verified: a temp field on `State` reddens the test). The future Kanban board reads state.json against this contract and can never silently drift from the source of truth.
+
 ### Wave 0 reliability core + held-out verifier track (2026-06-19)
 - **Wave 0 reliability core** (`7da7b6a`): the reliability spine the rest of the verifier sits on. 304 tests green at landing; full exit gate passes (`tests/test_wave0_exit_gate.py`).
 - **Operator repo registry + held-out gate** (`repo_registry.py`, `held_out.py`): an operator-owned `~/.config/orchestrator/repos.toml` keyed by the project's REAL git remote (un-fakeable by the goal file) carries `held_out_verify`, `stakes_tier`, `allowed_mcp_servers`. On a stop-candidate, after the in-tree verify passes and the tamper tripwire clears, the held-out command (a test set outside the Worker's reach) runs: in-tree green + held-out red = the reward-hack fingerprint, escalates and is never retried.
