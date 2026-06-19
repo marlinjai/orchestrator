@@ -90,6 +90,17 @@ def start(
         "--marlin-persona",
         help="Path to the Marlin Proxy persona (used when marlin_proxy mode != off)",
     ),
+    worktree: bool = typer.Option(
+        False,
+        "--worktree",
+        help=(
+            "Run the Worker in its own git worktree (isolated attempt branch "
+            "orchestrator/<task-id>) instead of editing --project in place. "
+            "Commits land on the branch; a clean worktree is auto-removed at the "
+            "end, an escalated/failed one is retained for inspection. Requires a "
+            "git repo; non-git falls back to in-place."
+        ),
+    ),
 ):
     """Start a new autonomous task."""
     if auth_mode not in ("subscription", "api_key"):
@@ -114,6 +125,7 @@ def start(
         max_tokens=(max_tokens if max_tokens > 0 else None),
         daily_token_cap=_daily_token_cap(),
         orchestrator_home=_home(),
+        worktree_isolation=worktree,
     )
     console.print(f"[bold green]starting task {tid}[/bold green]")
     console.print(f"  goal: {goal}")

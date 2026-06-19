@@ -8,6 +8,7 @@ import pytest
 from orchestrator.orchestrator import OrchestratorConfig, run_orchestrator
 from orchestrator.proxy import ProxyDecision
 from orchestrator.state import IterationUsage, load_state
+from orchestrator.worktree import default_worktree_path, worktree_branch
 
 
 def _turn(text: str, iteration: int = 1, input_tokens: int = 0):
@@ -399,3 +400,89 @@ async def test_clean_pass_in_git_repo_completes(tmp_path: Path):
     state = load_state(cfg.state_dir / "state.json")
     assert state.status == "completed"
     assert state.tamper_paths == []
+
+
+# ---- brick 4: worktree-per-attempt isolation ----
+
+
+async def test_worktree_isolation_runs_in_worktree_original_untouched(tmp_path: Path):
+    """With isolation on, the Worker edits the worktree, every gate follows the
+    worktree (tamper fires there), and the original checkout is never touched."""
+    repo = _repo_with_test(tmp_path)
+    cfg = _cfg_for_repo(tmp_path, repo)
+    cfg.worktree_isolation = True
+    wt = default_worktree_path(repo, cfg.task_id)
+
+    def adversary_turn(*, client, user_message, state, out_console=None):
+        # The Worker guts the test IN THE WORKTREE (its cwd), not the original.
+        (wt / "tests" / "test_a.py").write_text("def test_a():\n    assert 1 == 1\n")
+        return (["all green"], IterationUsage(iteration=state.iteration))
+
+    with patch("orchestrator.orchestrator._run_one_turn", side_effect=adversary_turn), patch(
+        "orchestrator.orchestrator.run_proxy_decision",
+        return_value=ProxyDecision(action="stop", text="", reasoning="done"),
+    ):
+        await run_orchestrator(cfg)
+
+    state = load_state(cfg.state_dir / "state.json")
+    # the tamper scan ran against the worktree (proves work_dir threading)
+    assert state.status == "escalated"
+    assert state.tamper_paths == ["tests/test_a.py"]
+    # ISOLATION: the original checkout's test file is intact (3 asserts)
+    original = (repo / "tests" / "test_a.py").read_text()
+    assert original.count("assert") == 3
+    # an escalated run retains its worktree for inspection
+    assert wt.exists()
+
+
+async def test_worktree_clean_completion_removes_worktree(tmp_path: Path):
+    """A clean completion auto-removes the worktree dir; the work is preserved on
+    the attempt branch in the original repo."""
+    repo = _repo_with_test(tmp_path)
+    cfg = _cfg_for_repo(tmp_path, repo)
+    cfg.worktree_isolation = True
+    wt = default_worktree_path(repo, cfg.task_id)
+
+    def good_turn(*, client, user_message, state, out_console=None):
+        (wt / "feature.py").write_text("x = 1\n")
+        _git(["git", "add", "-A"], wt)
+        _git(["git", "commit", "-q", "-m", "feat: add feature"], wt)
+        return (["shipped"], IterationUsage(iteration=state.iteration))
+
+    with patch("orchestrator.orchestrator._run_one_turn", side_effect=good_turn), patch(
+        "orchestrator.orchestrator.run_proxy_decision",
+        return_value=ProxyDecision(action="stop", text="", reasoning="done"),
+    ):
+        await run_orchestrator(cfg)
+
+    state = load_state(cfg.state_dir / "state.json")
+    assert state.status == "completed"
+    # clean worktree is removed...
+    assert not wt.exists()
+    # ...but the attempt branch (with the commit) survives in the original repo
+    branches = subprocess.run(
+        ["git", "branch", "--list", worktree_branch(cfg.task_id)],
+        cwd=repo, capture_output=True, text=True, check=True,
+    ).stdout
+    assert worktree_branch(cfg.task_id) in branches
+
+
+async def test_worktree_flag_on_non_git_falls_back_in_place(tmp_path: Path, task_dir: Path):
+    """Isolation requested on a non-git project falls back to running in place
+    rather than failing; no worktree is created."""
+    cfg = OrchestratorConfig(
+        task_id="nogit",
+        goal_file=task_dir / "goals" / "g.md",
+        persona_file=task_dir / "personas" / "p.md",
+        project_dir=task_dir,  # not a git repo
+        state_dir=task_dir / ".orchestrator" / "nogit",
+        max_iterations=2,
+        max_seconds=60,
+        orchestrator_home=task_dir / ".orchestrator",
+        worktree_isolation=True,
+    )
+    with _mock_loop([_turn("done")], [_decision("stop", text_out="", reasoning="done")]):
+        await run_orchestrator(cfg)
+    state = load_state(cfg.state_dir / "state.json")
+    assert state.status == "completed"
+    assert not default_worktree_path(task_dir, "nogit").exists()

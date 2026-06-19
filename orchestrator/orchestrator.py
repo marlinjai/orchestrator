@@ -64,6 +64,13 @@ from orchestrator.usage_guard import (
     tokens_in_window,
 )
 from orchestrator.verify import decide_after_verify, load_verify_config, run_verify
+from orchestrator.worktree import (
+    add_worktree,
+    default_worktree_path,
+    is_git_repo,
+    remove_worktree,
+    worktree_branch,
+)
 from orchestrator.worker import (
     AuthMode,
     apply_env_contract,
@@ -120,6 +127,10 @@ class OrchestratorConfig:
     # Operator-owned repo registry path. None = the default/env-resolved location
     # (see repo_registry._registry_path). Set explicitly in tests for isolation.
     repos_config: Path | None = None
+    # Opt-in worktree-per-attempt isolation: run the Worker in its own git
+    # worktree so a bad attempt is throwaway and the real checkout is untouched.
+    # Default off = run in place (the historical behavior).
+    worktree_isolation: bool = False
 
 
 console = Console()
@@ -311,6 +322,7 @@ async def _execute_handover(
     state: State,
     state_path: Path,
     cfg: OrchestratorConfig,
+    work_dir: Path,
     persona: str,
     mp_config: MarlinProxyConfig,
     local_console: Console,
@@ -350,10 +362,10 @@ async def _execute_handover(
             + handover_usage.cache_creation_tokens
         ),
     )
-    reconcile(state, cfg.project_dir)
+    reconcile(state, work_dir)
     save_state(state_path, state)
 
-    doc_path = cfg.project_dir / "HANDOVER.md"
+    doc_path = work_dir / "HANDOVER.md"
 
     if not is_handover_complete(worker_output) or not doc_path.exists():
         state.status = "escalated"
@@ -371,7 +383,7 @@ async def _execute_handover(
         )
         return None
 
-    discrepancies = verify_handover_doc(doc_path.read_text(), state, cfg.project_dir)
+    discrepancies = verify_handover_doc(doc_path.read_text(), state, work_dir)
     if discrepancies:
         local_console.print(
             f"[yellow]handover: {len(discrepancies)} git discrepancy(s) noted in seed[/yellow]"
@@ -414,12 +426,13 @@ async def run_orchestrator(cfg: OrchestratorConfig) -> None:
     started_at = time.time()
     kill_switch = cfg.state_dir / "STOP"
 
-    # Snapshot project HEAD before the Worker runs so reconciliation can detect
-    # any commits the Worker makes but doesn't self-report. None if the project
-    # isn't a git repo (reconciliation becomes a no-op).
-    if state.baseline_ref is None:
-        state.baseline_ref = git_head(cfg.project_dir)
-        save_state(state_path, state)
+    # Active tree all tree-touching ops key off (baseline, reconcile, verify,
+    # tamper, held-out, Worker cwd). Defaults to the project; becomes a dedicated
+    # worktree when isolation is on. Initialized here so the finally-block cleanup
+    # is safe even if setup raises before the worktree is created.
+    work_dir = cfg.project_dir
+    worktree_active = False
+    worktree_path: Path | None = None
 
     log_file = None
     if cfg.log_path is not None:
@@ -464,6 +477,45 @@ async def run_orchestrator(cfg: OrchestratorConfig) -> None:
             f"source={policy.source} stakes_tier={policy.stakes_tier} "
             f"held_out_verify={'set' if policy.held_out_verify else 'none'}[/dim]"
         )
+
+        # Worktree isolation (opt-in): run this attempt in its own git worktree so
+        # a bad attempt is throwaway and the operator's checkout is untouched. A
+        # non-git project cannot have worktrees, so it falls back to in-place with
+        # a warning; a genuine git failure fails the run LOUD rather than silently
+        # editing the real tree the operator asked to isolate.
+        if cfg.worktree_isolation:
+            if not is_git_repo(cfg.project_dir):
+                local_console.print(
+                    "[yellow]worktree isolation requested but project is not a git "
+                    "repo; running in place[/yellow]"
+                )
+            else:
+                wt_path = default_worktree_path(cfg.project_dir, cfg.task_id)
+                branch = worktree_branch(cfg.task_id)
+                try:
+                    add_worktree(cfg.project_dir, wt_path, branch)
+                except (RuntimeError, OSError) as e:
+                    state.status = "failed"
+                    state.exit_reason = f"worktree setup failed: {e}"
+                    save_state(state_path, state)
+                    local_console.print(
+                        f"[bold red]worktree setup failed:[/bold red] {e}"
+                    )
+                    return
+                work_dir = wt_path
+                worktree_active = True
+                worktree_path = wt_path
+                local_console.print(
+                    f"[dim]worktree: isolated attempt in {wt_path} on branch {branch}[/dim]"
+                )
+
+        # Snapshot the active tree's HEAD so reconciliation can detect commits the
+        # Worker makes but does not self-report. None if not a git repo
+        # (reconciliation becomes a no-op). Computed AFTER worktree setup so the
+        # baseline is the worktree's, never the original's.
+        if state.baseline_ref is None:
+            state.baseline_ref = git_head(work_dir)
+            save_state(state_path, state)
 
         if verify_config.command:
             local_console.print(
@@ -516,7 +568,7 @@ async def run_orchestrator(cfg: OrchestratorConfig) -> None:
             )
         options = build_worker_options(
             state_path=state_path,
-            project_dir=cfg.project_dir,
+            project_dir=work_dir,
             denied_bash=[],
             extras=worker_extras,
             auth_mode=auth_mode,
@@ -572,7 +624,7 @@ async def run_orchestrator(cfg: OrchestratorConfig) -> None:
                         # then reconcile against git and append usage. Persist once.
                         state = load_state(state_path)
                         state.usage.append(usage)
-                        commits_added, files_added = reconcile(state, cfg.project_dir)
+                        commits_added, files_added = reconcile(state, work_dir)
                         if commits_added or files_added:
                             local_console.print(
                                 f"[dim]reconciled: +{commits_added} commits, +{files_added} files[/dim]"
@@ -726,7 +778,7 @@ async def run_orchestrator(cfg: OrchestratorConfig) -> None:
                                 )
                                 outcome = await run_verify(
                                     verify_config.command,
-                                    cfg.project_dir,
+                                    work_dir,
                                     verify_config.timeout_s,
                                 )
                                 state.last_verify = VerifyRecord(
@@ -769,7 +821,7 @@ async def run_orchestrator(cfg: OrchestratorConfig) -> None:
                                 # dropped assertion count downgrades to escalate
                                 # (path-touched alone is a log signal only).
                                 tamper = scan_tamper(
-                                    cfg.project_dir,
+                                    work_dir,
                                     state.baseline_ref,
                                     [f.path for f in state.files_touched],
                                 )
@@ -806,7 +858,7 @@ async def run_orchestrator(cfg: OrchestratorConfig) -> None:
                                 )
                                 ho_outcome = await run_verify(
                                     state.held_out_verify,
-                                    cfg.project_dir,
+                                    work_dir,
                                     verify_config.timeout_s,
                                 )
                                 state.last_held_out = HeldOutRecord(
@@ -848,6 +900,7 @@ async def run_orchestrator(cfg: OrchestratorConfig) -> None:
                                 state=state,
                                 state_path=state_path,
                                 cfg=cfg,
+                                work_dir=work_dir,
                                 persona=persona,
                                 mp_config=mp_config,
                                 local_console=local_console,
@@ -953,6 +1006,32 @@ async def run_orchestrator(cfg: OrchestratorConfig) -> None:
             # Normal exit (stop, escalate, deferred) - do not start another leg.
             break
     finally:
+        # Worktree teardown (never loses work): committed work lives on the
+        # attempt branch and survives removal; `git worktree remove` refuses on a
+        # dirty/untracked tree and we never --force. A run that needs human eyes
+        # (escalated/failed) keeps its worktree so the live tree is inspectable.
+        if worktree_active and worktree_path is not None:
+            try:
+                branch = worktree_branch(cfg.task_id)
+                if state.status in ("escalated", "failed"):
+                    local_console.print(
+                        f"[yellow]worktree retained for inspection: {worktree_path} "
+                        f"(status={state.status}); work is on branch {branch}[/yellow]"
+                    )
+                else:
+                    removed, msg = remove_worktree(cfg.project_dir, worktree_path)
+                    if removed:
+                        local_console.print(
+                            f"[dim]worktree removed; work preserved on branch {branch}[/dim]"
+                        )
+                    else:
+                        local_console.print(
+                            f"[yellow]worktree retained at {worktree_path} "
+                            f"(not clean: {msg}); reconcile manually, never force-remove[/yellow]"
+                        )
+            except Exception:
+                pass
+
         # Ping on terminal state so detached runs do not finish silently. This is
         # the human-facing notify (macOS banner + optional webhook); the
         # complementary "wake the dispatching session" path is the harness-tracked

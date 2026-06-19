@@ -66,6 +66,7 @@ If `orchestrator` is not found at all, run the one-time install above first. The
    git worktree add -b orchestrator/<task-id> ../<repo>-orch-<task-id> main
    cd ../<repo>-orch-<task-id> && <install command if any>  # e.g. pnpm install
    ```
+   Alternative (in-process isolation): pass `--worktree` and point `--project` at the repo itself. The orchestrator then creates and manages its own worktree on branch `orchestrator/<task-id>`, threads it through every gate, and cleans it up at the end (clean = removed with the work preserved on the branch; escalated/failed/dirty = retained for inspection, never `--force`). Use the manual worktree above OR `--worktree`, never both (they would nest). The manual pattern is still preferred for parallel batches where you install once per checkout.
 
 3. **Launch.** Two modes; pick by whether you want the dispatching session woken on completion:
 
