@@ -1,8 +1,10 @@
+import asyncio
 import io
 import logging
+import os
 import sys
 import time
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
 from typing import get_args
 
@@ -13,9 +15,11 @@ from orchestrator.config import MarlinProxyConfig, apply_task_overrides, load_co
 from orchestrator.guardrails import (
     DEFAULT_API_KEY_COST_CAP_USD,
     cost_cap_hit,
+    cumulative_tokens,
     estimate_cost_usd,
     iteration_cap_hit,
     kill_switch_active,
+    usage_cap_hit,
     wall_clock_cap_hit,
 )
 from orchestrator.handover import (
@@ -30,8 +34,25 @@ from orchestrator.notify import TERMINAL_STATUSES, notify
 from orchestrator.parse import parse_frontmatter
 from orchestrator.proxy import ProxyDecision, run_proxy_decision
 from orchestrator.reconcile import git_head, reconcile
+from orchestrator.retry import (
+    MAX_TRANSIENT_RETRIES,
+    backoff_delay,
+    is_transient_sdk_error,
+)
+from orchestrator.stagnation import (
+    DEFAULT_STAGNATION_STREAK_CAP,
+    stagnation_hit,
+    update_stagnation,
+)
 from orchestrator.state import Handover, IterationUsage, State, VerifyRecord, load_state, save_state
+from orchestrator.tamper import scan_tamper
 from orchestrator.transcript import AssistantTurn, extract_model, extract_text, extract_usage
+from orchestrator.usage_guard import (
+    daily_cap_hit,
+    global_kill_active,
+    record_usage,
+    tokens_in_window,
+)
 from orchestrator.verify import decide_after_verify, load_verify_config, run_verify
 from orchestrator.worker import (
     AuthMode,
@@ -72,6 +93,19 @@ class OrchestratorConfig:
     marlin_persona_file: Path | None = None
     auth_mode: AuthMode = "subscription"
     max_cost_usd: float | None = None
+    stagnation_streak_cap: int = DEFAULT_STAGNATION_STREAK_CAP
+    # Per-run cumulative token ceiling (rate-limit runaway guard). None = off.
+    max_tokens: int | None = None
+    # Fleet-wide rolling 24h token budget across ALL runs on this home. None =
+    # off. Operator-owned (env), never relaxable per task.
+    daily_token_cap: int | None = None
+    # Shared orchestrator home: holds the global STOP file + the usage ledger
+    # that the daily cap sums over. Defaults to the env-resolved real home.
+    orchestrator_home: Path = field(
+        default_factory=lambda: Path(
+            os.environ.get("ORCHESTRATOR_HOME", str(Path.home() / ".orchestrator"))
+        )
+    )
 
 
 console = Console()
@@ -149,11 +183,16 @@ async def _run_one_turn(
     *,
     client: ClaudeSDKClient,
     user_message: str,
-    persona: str,
     state: State,
-    transcript_window: int,
     out_console: Console | None = None,
-) -> tuple[list[str], ProxyDecision, IterationUsage]:
+) -> tuple[list[str], IterationUsage]:
+    """Run one Worker turn and return its text chunks + token usage.
+
+    The Decision Proxy is intentionally NOT called here: the caller reloads and
+    reconciles state against git first, then asks the Proxy, so the Proxy judges
+    on machine ground truth rather than the Worker's (possibly incomplete)
+    self-report.
+    """
     out = out_console or console
     chunks: list[str] = []
     usage = IterationUsage(iteration=state.iteration)
@@ -174,15 +213,7 @@ async def _run_one_turn(
             if m:
                 usage.model = m
     usage.worker_ms = int((time.monotonic() - worker_start) * 1000)
-    recent = [AssistantTurn(text=t) for t in chunks if t.strip()][-transcript_window:]
-    proxy_start = time.monotonic()
-    decision = await run_proxy_decision(
-        persona=persona,
-        state=state,
-        recent_turns=recent,
-    )
-    usage.proxy_ms = int((time.monotonic() - proxy_start) * 1000)
-    return chunks, decision, usage
+    return chunks, usage
 
 
 def _load_marlin(cfg: OrchestratorConfig, goal_text: str) -> tuple[MarlinProxyConfig, str]:
@@ -280,12 +311,10 @@ async def _execute_handover(
     state.iteration += 1
     save_state(state_path, state)
 
-    handover_chunks, _, handover_usage = await _run_one_turn(
+    handover_chunks, handover_usage = await _run_one_turn(
         client=client,
         user_message=handover_prompt,
-        persona=persona,
         state=state,
-        transcript_window=cfg.transcript_window,
         out_console=local_console,
     )
     worker_output = "".join(handover_chunks)
@@ -293,6 +322,20 @@ async def _execute_handover(
     # Reload + reconcile before checking the doc
     state = load_state(state_path)
     state.usage.append(handover_usage)
+    # Count the handover turn's tokens toward the fleet-wide daily budget too,
+    # so the global cap stays honest across multi-leg runs (the per-run cap
+    # already sees it via state.usage).
+    record_usage(
+        cfg.orchestrator_home,
+        task_id=cfg.task_id,
+        iteration=state.iteration,
+        tokens=(
+            handover_usage.input_tokens
+            + handover_usage.output_tokens
+            + handover_usage.cache_read_tokens
+            + handover_usage.cache_creation_tokens
+        ),
+    )
     reconcile(state, cfg.project_dir)
     save_state(state_path, state)
 
@@ -336,6 +379,11 @@ async def _execute_handover(
         f"[bold yellow]handover:[/bold yellow] HANDOVER.md verified "
         f"(leg {len(state.handovers)}, {len(discrepancies)} discrepancies)"
     )
+    # Fresh leg starts with a clean progress baseline so stagnation does not
+    # carry across a successful handover (which is itself evidence of progress).
+    state.stagnation_streak = 0
+    state.last_progress_key = None
+    save_state(state_path, state)
     return seed_fresh_session_message(doc_path, state, discrepancies)
 
 
@@ -374,6 +422,12 @@ async def run_orchestrator(cfg: OrchestratorConfig) -> None:
             state.exit_reason = "kill switch active before start"
             save_state(state_path, state)
             local_console.print("[red]kill switch active. exiting.[/red]")
+            return
+        if global_kill_active(cfg.orchestrator_home):
+            state.status = "stopped"
+            state.exit_reason = "global kill switch active before start"
+            save_state(state_path, state)
+            local_console.print("[red]global kill switch active. exiting.[/red]")
             return
 
         if verify_config.command:
@@ -417,7 +471,9 @@ async def run_orchestrator(cfg: OrchestratorConfig) -> None:
         )
 
         next_message = initial_message
-        for _leg in range(_MAX_HANDOVER_LEGS):
+        leg = 0
+        transient_retries = 0
+        while leg < _MAX_HANDOVER_LEGS:
             try:
                 async with ClaudeSDKClient(options=options) as client:
                     while True:
@@ -439,20 +495,25 @@ async def run_orchestrator(cfg: OrchestratorConfig) -> None:
                             save_state(state_path, state)
                             local_console.print("[red]kill switch activated. exiting.[/red]")
                             return
+                        if global_kill_active(cfg.orchestrator_home):
+                            state.status = "stopped"
+                            state.exit_reason = "global kill switch activated (fleet-wide STOP)"
+                            save_state(state_path, state)
+                            local_console.print(
+                                "[red]global kill switch active. exiting.[/red]"
+                            )
+                            return
 
                         state.iteration += 1
                         save_state(state_path, state)
                         local_console.print(f"\n[bold cyan]=== iteration {state.iteration} ===[/bold cyan]")
 
-                        chunks, decision, usage = await _run_one_turn(
+                        chunks, usage = await _run_one_turn(
                             client=client,
                             user_message=next_message,
-                            persona=persona,
                             state=state,
-                            transcript_window=cfg.transcript_window,
                             out_console=local_console,
                         )
-                        local_console.print(f"\n[bold magenta]proxy:[/bold magenta] {decision.action} ({decision.reasoning})")
 
                         # Reload state (Worker may have appended via update_state),
                         # then reconcile against git and append usage. Persist once.
@@ -463,6 +524,24 @@ async def run_orchestrator(cfg: OrchestratorConfig) -> None:
                             local_console.print(
                                 f"[dim]reconciled: +{commits_added} commits, +{files_added} files[/dim]"
                             )
+
+                        # Ask the Decision Proxy AFTER reconcile so it judges on
+                        # machine ground truth (git + verify), never the Worker's
+                        # self-report alone (the confirmed production failure: the
+                        # Proxy saw commits:[] while the branch had commits). The
+                        # recent turns go in as clearly fenced UNTRUSTED data so a
+                        # Worker cannot inject a decision into the judge.
+                        recent = [
+                            AssistantTurn(text=t) for t in chunks if t.strip()
+                        ][-cfg.transcript_window:]
+                        proxy_start = time.monotonic()
+                        decision = await run_proxy_decision(
+                            persona=persona,
+                            state=state,
+                            recent_turns=recent,
+                        )
+                        usage.proxy_ms = int((time.monotonic() - proxy_start) * 1000)
+                        local_console.print(f"\n[bold magenta]proxy:[/bold magenta] {decision.action} ({decision.reasoning})")
 
                         # Cost guard: record the running estimate every iteration
                         # (so subscription runs stay cost-aware), and stop before
@@ -481,6 +560,68 @@ async def run_orchestrator(cfg: OrchestratorConfig) -> None:
                             )
                             save_state(state_path, state)
                             local_console.print(f"[yellow]{state.exit_reason}[/yellow]")
+                            return
+
+                        # Usage guards (rate-limit runaway, not dollars: tokens
+                        # are what the Anthropic quota meters even when billing is
+                        # flat). Record this iteration's tokens to the shared
+                        # fleet ledger, then enforce the per-run ceiling and the
+                        # fleet-wide rolling daily budget. Both default off; the
+                        # daily budget is operator-owned and un-promptable.
+                        iter_tokens = (
+                            usage.input_tokens
+                            + usage.output_tokens
+                            + usage.cache_read_tokens
+                            + usage.cache_creation_tokens
+                        )
+                        record_usage(
+                            cfg.orchestrator_home,
+                            task_id=cfg.task_id,
+                            iteration=state.iteration,
+                            tokens=iter_tokens,
+                        )
+                        run_tokens = cumulative_tokens(state.usage)
+                        if usage_cap_hit(total_tokens=run_tokens, max_tokens=cfg.max_tokens):
+                            state.status = "stopped"
+                            state.exit_reason = (
+                                f"usage cap reached ({run_tokens:,} tokens "
+                                f">= {cfg.max_tokens:,})"
+                            )
+                            save_state(state_path, state)
+                            local_console.print(f"[yellow]{state.exit_reason}[/yellow]")
+                            return
+                        if cfg.daily_token_cap:
+                            tokens_today = tokens_in_window(cfg.orchestrator_home)
+                            if daily_cap_hit(
+                                tokens_today=tokens_today, daily_cap=cfg.daily_token_cap
+                            ):
+                                state.status = "stopped"
+                                state.exit_reason = (
+                                    f"global daily token cap reached "
+                                    f"({tokens_today:,} >= {cfg.daily_token_cap:,} "
+                                    "in the last 24h across all runs)"
+                                )
+                                save_state(state_path, state)
+                                local_console.print(f"[yellow]{state.exit_reason}[/yellow]")
+                                return
+
+                        # Stagnation brake: a Worker can burn the iteration cap
+                        # thrashing on a failing verify or looping in
+                        # clarification without advancing. Trip on a cheap,
+                        # hard-to-game no-progress streak and hard-stop. The
+                        # terminal notify in `finally` is the cheap ping; we do
+                        # NOT route a stuck Worker through a fresh Marlin-Proxy
+                        # turn it could influence (re-deciding per iteration
+                        # would amplify rate-limit and spend).
+                        streak = update_stagnation(state)
+                        if stagnation_hit(streak, cfg.stagnation_streak_cap):
+                            state.status = "stopped"
+                            state.exit_reason = (
+                                f"stagnation: no structured progress for {streak} "
+                                f"consecutive iterations (cap {cfg.stagnation_streak_cap})"
+                            )
+                            save_state(state_path, state)
+                            local_console.print(f"[bold red]{state.exit_reason}[/bold red]")
                             return
 
                         # Proactive handover check: override a "reply" decision
@@ -542,6 +683,35 @@ async def run_orchestrator(cfg: OrchestratorConfig) -> None:
                             state.verify_attempts = gate.attempts
 
                             if gate.action == "complete":
+                                # Cheap tamper tripwire: a green build is only
+                                # trustworthy if the tests were not gutted to get
+                                # it. Scan the changed test files vs baseline; a
+                                # deleted test or a dropped assertion count
+                                # downgrades the pass to escalate (path-touched
+                                # alone is a log signal, never a gate fail).
+                                tamper = scan_tamper(
+                                    cfg.project_dir,
+                                    state.baseline_ref,
+                                    [f.path for f in state.files_touched],
+                                )
+                                if tamper.log_paths:
+                                    local_console.print(
+                                        f"[dim]tamper: {len(tamper.log_paths)} test file(s) "
+                                        f"edited (log only): {', '.join(tamper.log_paths)}[/dim]"
+                                    )
+                                if tamper.tripped:
+                                    state.tamper_paths = tamper.strong_paths
+                                    state.status = "escalated"
+                                    state.exit_reason = (
+                                        "verify passed but tamper tripwire fired "
+                                        "(possible reward hack): " + "; ".join(tamper.details)
+                                    )
+                                    save_state(state_path, state)
+                                    local_console.print(
+                                        f"[bold red]verify PASS but TAMPER:[/bold red] "
+                                        f"{state.exit_reason}"
+                                    )
+                                    return
                                 state.status = "completed"
                                 state.exit_reason = (
                                     decision.reasoning or "proxy stopped; verify passed"
@@ -648,12 +818,33 @@ async def run_orchestrator(cfg: OrchestratorConfig) -> None:
                         next_message = decision.text or "Continue."
             except _HandoverSignal as hs:
                 next_message = hs.seed
+                leg += 1
+                transient_retries = 0
                 leg_count = len(state.handovers)
                 local_console.print(
                     f"[bold yellow]handover:[/bold yellow] starting fresh leg {leg_count + 1}"
                 )
                 continue
             except Exception as e:
+                # Transient upstream blip (529 Overloaded, rate-limit, dropped
+                # connection): back off and retry the SAME leg instead of failing
+                # the whole run. A real error (bad config, auth, a bug) still
+                # fails fast. Without this, any multi-hour run during an Anthropic
+                # load event dies and needs a manual relaunch. Transient retries
+                # do not consume a handover leg.
+                if is_transient_sdk_error(e) and transient_retries < MAX_TRANSIENT_RETRIES:
+                    transient_retries += 1
+                    state = load_state(state_path)
+                    state.transient_retries += 1
+                    save_state(state_path, state)
+                    delay = backoff_delay(transient_retries)
+                    local_console.print(
+                        f"[yellow]transient SDK error "
+                        f"(retry {transient_retries}/{MAX_TRANSIENT_RETRIES} "
+                        f"after {delay:.0f}s): {type(e).__name__}: {e}[/yellow]"
+                    )
+                    await asyncio.sleep(delay)
+                    continue
                 state = load_state(state_path)
                 state.status = "failed"
                 state.exit_reason = f"sdk error: {type(e).__name__}: {e}"

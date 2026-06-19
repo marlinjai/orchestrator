@@ -53,6 +53,13 @@ def build_update_state_handler(
                     }
             elif kind == "open_thread":
                 state.open_threads.append(args["thread"])
+            elif kind == "assumption":
+                state.assumptions_made.append(args["assumption"])
+            elif kind == "plan_contradiction":
+                state.plan_contradictions.append(args["contradiction"])
+            elif kind == "confidence":
+                # Logged only, never a gate input (see State.confidence).
+                state.confidence = float(args["confidence"])
             else:
                 return {
                     "content": [
@@ -84,6 +91,9 @@ def build_state_mcp_server(state_path: Path):
                         "commit",
                         "step_completed",
                         "open_thread",
+                        "assumption",
+                        "plan_contradiction",
+                        "confidence",
                     ],
                 },
                 "turn": {"type": "integer"},
@@ -96,6 +106,9 @@ def build_state_mcp_server(state_path: Path):
                 "message": {"type": "string"},
                 "step_id": {"type": "integer"},
                 "thread": {"type": "string"},
+                "assumption": {"type": "string"},
+                "contradiction": {"type": "string"},
+                "confidence": {"type": "number"},
             },
             "required": ["kind"],
         },

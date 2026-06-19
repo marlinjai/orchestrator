@@ -260,11 +260,16 @@ This means:
 ## State directory layout
 
 ```
-~/.orchestrator/tasks/<task-id>/
-  state.json    # pydantic-validated, atomically written
-  run.log       # tee'd Worker stdout/stderr
-  STOP          # touch to halt at next iteration boundary
+~/.orchestrator/
+  GLOBAL_STOP            # touch to halt EVERY run (fleet-wide panic button)
+  usage-ledger.jsonl     # shared per-iteration token ledger (daily-cap source)
+  tasks/<task-id>/
+    state.json    # pydantic-validated, atomically written
+    run.log       # tee'd Worker stdout/stderr
+    STOP          # touch to halt THIS run at next iteration boundary
 ```
+
+`STOP` halts one run; `GLOBAL_STOP` halts all of them at their next iteration boundary (use it to stop a whole parallel batch at once). Both are operator-owned and un-promptable: a goal file cannot relax them.
 
 Key state.json fields (v0.3+):
 - `status`: running | completed | escalated | stopped | failed
@@ -275,7 +280,19 @@ Key state.json fields (v0.3+):
 - `usage[]`: per-iteration `input_tokens`, `output_tokens`, `cache_read_tokens`, `cache_creation_tokens`, `model`, `worker_ms`, `proxy_ms`
 - `handovers[]`: each entry has `at_turn`, `reason`, and `doc` (path to HANDOVER.md). Populated when context crosses `context_handover_tokens` and the Worker produces a git-verified checkpoint. A non-empty list means the run survived multiple session legs.
 - `autonomy_stats`: Marlin Proxy counters: `auto_approved`, `auto_deferred`, `escalated`, `decisions_between_escalations`, `max_decisions_between_escalations`, `autonomous_runtime_ms`
+- `tamper_paths[]`: test files the verify-gate tamper tripwire flagged as weakened (deleted or assertion-count dropped vs `baseline_ref`). A non-empty list on an `escalated` run means a green build came from gutting tests, not from real work. Review before doing anything else.
+- `assumptions_made[]`, `plan_contradictions[]`, `confidence`: logged-only escalation context the Worker self-reports. `confidence` is recorded for review but is NEVER a gate input (we gate on reversibility, never on agent self-confidence).
 - `exit_reason`: terminal explanation string
+
+## Runaway + tamper guards (Wave 0 reliability core)
+
+- **Iteration / wall-clock caps**: `--max-iterations` / `--max-hours`, the original backstops.
+- **Per-run token cap**: `--max-tokens N` stops the run when cumulative tokens (input + output + cache) cross `N`. Default off. The rate-limit-aware runaway guard now that billing is flat (the dollar cap, `--max-cost-usd`, stays present but defaults off in subscription mode).
+- **Fleet-wide daily token cap**: the `ORCHESTRATOR_DAILY_TOKEN_CAP` env var sets a rolling 24h ceiling summed across ALL runs (via `usage-ledger.jsonl`). Operator-owned, un-promptable. Default off.
+- **Stagnation brake**: trips when there is no structured progress (plan-step / decision / verify movement, never git churn) for N consecutive iterations. Hard-stops with a notify; does not spend a fresh Proxy call.
+- **Tamper tripwire**: before the verify gate blesses a pass as `completed`, it scans changed test files vs `baseline_ref`. A deleted test or a dropped assertion count downgrades the pass to `escalate` and records `tamper_paths`. Editing tests (count same or higher) is a log signal only. This is the cheap tripwire, not the full held-out verifier (a later wave).
+
+`orchestrator status` surfaces `usage_total`, `global_today` (rolling 24h vs cap), any `tamper_paths`, and `confidence`.
 
 ## Things to confirm with the user before dispatching
 
@@ -289,7 +306,8 @@ Key state.json fields (v0.3+):
 
 - `commits[*].decided_by` shows `system` entries → Worker isn't calling `update_state(kind="commit")` reliably. Functional, but state is one-sided. Worth noting in v2 retro.
 - `usage` shows monotonically growing input_tokens with no cache_read → caching broken, will blow rate limits on multi-iteration runs.
-- `iteration` climbing without commits/files growth → stagnation streak. Will eventually escalate (Theme 4 detection lands in a later slice).
+- `iteration` climbing without plan-step / decision / verify movement → the stagnation brake will hard-stop the run (`exit_reason` mentions "stagnation"). If you see this, the goal is likely under-specified or the Worker is looping on a failing verify.
+- `exit_reason` mentions "tamper tripwire" → a verify pass was downgraded to escalate because tests were deleted or weakened. Check `tamper_paths` and review the diff before trusting any green build.
 - `exit_reason` containing "Credit balance is too low" → `ANTHROPIC_API_KEY` leaked into orchestrator env despite the scrub (or the scrub regressed). Check `worker.py`.
 
 ## Where the source lives

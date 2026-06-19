@@ -125,3 +125,25 @@ def cost_cap_hit(*, estimate_usd: float, max_usd: float | None) -> bool:
     if max_usd is None or max_usd <= 0:
         return False
     return estimate_usd >= max_usd
+
+
+def cumulative_tokens(usage: list[IterationUsage]) -> int:
+    """Total tokens processed across the run (input + output + both cache legs).
+
+    This, not dollars, is the rate-limit-relevant figure: every token flows
+    through the Anthropic quota regardless of how it is billed. On the flat
+    subscription the dollar cap is notional, so the per-run runaway guard is
+    denominated in tokens instead.
+    """
+    return sum(
+        u.input_tokens + u.output_tokens + u.cache_read_tokens + u.cache_creation_tokens
+        for u in usage
+    )
+
+
+def usage_cap_hit(*, total_tokens: int, max_tokens: int | None) -> bool:
+    """True when a positive token ceiling is set and cumulative usage meets or
+    exceeds it. None or non-positive means "no cap" (returns False)."""
+    if max_tokens is None or max_tokens <= 0:
+        return False
+    return total_tokens >= max_tokens

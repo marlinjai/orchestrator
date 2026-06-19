@@ -8,6 +8,7 @@ from orchestrator.state import (
     IterationUsage,
     PlanStep,
     State,
+    ground_truth_summary,
     load_state,
     save_state,
 )
@@ -128,3 +129,25 @@ def test_commit_entry_and_file_touched_defaults():
     assert c.message == ""
     f = FileTouched(path="a/b.py")
     assert f.decided_by == "proxy"
+
+
+def test_state_new_logged_fields_default_empty():
+    s = State(task_id="t", goal="g")
+    assert s.tamper_paths == []
+    assert s.assumptions_made == []
+    assert s.plan_contradictions == []
+    assert s.confidence is None
+
+
+def test_ground_truth_summary_reports_no_tamper_by_default():
+    s = State(task_id="t", goal="g")
+    summary = ground_truth_summary(s)
+    assert "tamper tripwire: 0 test file(s) weakened vs baseline (none)" in summary
+
+
+def test_ground_truth_summary_surfaces_tamper_paths():
+    s = State(task_id="t", goal="g", tamper_paths=["tests/test_a.py", "tests/test_b.py"])
+    summary = ground_truth_summary(s)
+    assert "tamper tripwire: 2 test file(s) weakened" in summary
+    assert "tests/test_a.py" in summary
+    assert "tests/test_b.py" in summary

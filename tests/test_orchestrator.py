@@ -1,3 +1,5 @@
+import subprocess
+from contextlib import contextmanager
 from pathlib import Path
 from unittest.mock import patch
 
@@ -8,13 +10,26 @@ from orchestrator.proxy import ProxyDecision
 from orchestrator.state import IterationUsage, load_state
 
 
-def _turn(text: str, action: str, iteration: int = 1, reasoning: str = "r", text_out: str = "go"):
-    """Build the (chunks, decision, usage) 3-tuple _run_one_turn now returns."""
-    return (
-        [text],
-        ProxyDecision(action=action, text=text_out, reasoning=reasoning),
-        IterationUsage(iteration=iteration),
-    )
+def _turn(text: str, iteration: int = 1, input_tokens: int = 0):
+    """The (chunks, usage) 2-tuple _run_one_turn now returns (worker turn only;
+    the Decision Proxy is a separate, post-reconcile call in the loop)."""
+    return ([text], IterationUsage(iteration=iteration, input_tokens=input_tokens))
+
+
+def _decision(action: str, text_out: str = "go", reasoning: str = "r"):
+    return ProxyDecision(action=action, text=text_out, reasoning=reasoning)
+
+
+@contextmanager
+def _mock_loop(turns, decisions):
+    """Patch the Worker turn and the Decision Proxy with aligned side-effects
+    (one turn + one decision per iteration)."""
+    with patch("orchestrator.orchestrator._run_one_turn") as mock_turn, patch(
+        "orchestrator.orchestrator.run_proxy_decision"
+    ) as mock_proxy:
+        mock_turn.side_effect = turns
+        mock_proxy.side_effect = decisions
+        yield mock_turn, mock_proxy
 
 
 @pytest.fixture
@@ -36,12 +51,14 @@ def cfg(task_dir: Path) -> OrchestratorConfig:
         state_dir=task_dir / ".orchestrator" / "test-task",
         max_iterations=3,
         max_seconds=60,
+        # Keep the fleet-wide STOP file + usage ledger inside the tmp tree so a
+        # test never reads or writes the real ~/.orchestrator.
+        orchestrator_home=task_dir / ".orchestrator",
     )
 
 
 async def test_orchestrator_writes_initial_state(cfg: OrchestratorConfig):
-    with patch("orchestrator.orchestrator._run_one_turn") as mock_turn:
-        mock_turn.side_effect = [_turn("worker said done", "stop", text_out="", reasoning="done")]
+    with _mock_loop([_turn("worker said done")], [_decision("stop", text_out="", reasoning="done")]):
         await run_orchestrator(cfg)
     state = load_state(cfg.state_dir / "state.json")
     assert state.task_id == "test-task"
@@ -50,12 +67,10 @@ async def test_orchestrator_writes_initial_state(cfg: OrchestratorConfig):
 
 
 async def test_orchestrator_iterates_until_proxy_stops(cfg: OrchestratorConfig):
-    with patch("orchestrator.orchestrator._run_one_turn") as mock_turn:
-        mock_turn.side_effect = [
-            _turn("t1", "reply", iteration=1, text_out="continue"),
-            _turn("t2", "reply", iteration=2, text_out="continue"),
-            _turn("t3", "stop", iteration=3, text_out="", reasoning="done"),
-        ]
+    with _mock_loop(
+        [_turn("t1", 1), _turn("t2", 2), _turn("t3", 3)],
+        [_decision("reply", "continue"), _decision("reply", "continue"), _decision("stop", "", "done")],
+    ):
         await run_orchestrator(cfg)
     state = load_state(cfg.state_dir / "state.json")
     assert state.iteration == 3
@@ -65,11 +80,10 @@ async def test_orchestrator_iterates_until_proxy_stops(cfg: OrchestratorConfig):
 
 async def test_orchestrator_halts_on_iteration_cap(cfg: OrchestratorConfig):
     cfg.max_iterations = 2
-    with patch("orchestrator.orchestrator._run_one_turn") as mock_turn:
-        mock_turn.side_effect = [
-            _turn("t1", "reply", iteration=1),
-            _turn("t2", "reply", iteration=2),
-        ]
+    with _mock_loop(
+        [_turn("t1", 1), _turn("t2", 2)],
+        [_decision("reply"), _decision("reply")],
+    ):
         await run_orchestrator(cfg)
     state = load_state(cfg.state_dir / "state.json")
     assert state.status == "stopped"
@@ -87,9 +101,37 @@ async def test_orchestrator_halts_on_kill_switch(cfg: OrchestratorConfig):
     mock_turn.assert_not_called()
 
 
-async def test_orchestrator_halts_on_escalate(cfg: OrchestratorConfig):
+async def test_orchestrator_halts_on_global_kill(cfg: OrchestratorConfig):
+    cfg.orchestrator_home.mkdir(parents=True, exist_ok=True)
+    (cfg.orchestrator_home / "GLOBAL_STOP").touch()
     with patch("orchestrator.orchestrator._run_one_turn") as mock_turn:
-        mock_turn.side_effect = [_turn("t1", "escalate", text_out="need human", reasoning="money")]
+        await run_orchestrator(cfg)
+    state = load_state(cfg.state_dir / "state.json")
+    assert state.status == "stopped"
+    assert "global kill" in (state.exit_reason or "").lower()
+    mock_turn.assert_not_called()
+
+
+async def test_orchestrator_halts_on_usage_cap(cfg: OrchestratorConfig):
+    cfg.max_tokens = 50
+    with _mock_loop([_turn("t1", 1, input_tokens=100)], [_decision("reply")]):
+        await run_orchestrator(cfg)
+    state = load_state(cfg.state_dir / "state.json")
+    assert state.status == "stopped"
+    assert "usage cap" in (state.exit_reason or "").lower()
+
+
+async def test_orchestrator_halts_on_daily_token_cap(cfg: OrchestratorConfig):
+    cfg.daily_token_cap = 50
+    with _mock_loop([_turn("t1", 1, input_tokens=100)], [_decision("reply")]):
+        await run_orchestrator(cfg)
+    state = load_state(cfg.state_dir / "state.json")
+    assert state.status == "stopped"
+    assert "daily token cap" in (state.exit_reason or "").lower()
+
+
+async def test_orchestrator_halts_on_escalate(cfg: OrchestratorConfig):
+    with _mock_loop([_turn("t1")], [_decision("escalate", "need human", "money")]):
         await run_orchestrator(cfg)
     state = load_state(cfg.state_dir / "state.json")
     assert state.status == "escalated"
@@ -107,9 +149,9 @@ async def test_orchestrator_writes_to_log_file(task_dir: Path):
         max_iterations=2,
         max_seconds=60,
         log_path=log_path,
+        orchestrator_home=task_dir / ".orchestrator",
     )
-    with patch("orchestrator.orchestrator._run_one_turn") as mock_turn:
-        mock_turn.side_effect = [_turn("worker output", "stop", text_out="", reasoning="done")]
+    with _mock_loop([_turn("worker output")], [_decision("stop", text_out="", reasoning="done")]):
         await run_orchestrator(cfg)
     assert log_path.exists()
     contents = log_path.read_text()
@@ -130,13 +172,12 @@ async def test_orchestrator_marks_failed_on_sdk_error(cfg: OrchestratorConfig):
     assert "auth blew up" in (state.exit_reason or "")
 
 
-# ---- verify gate (real subprocess; _run_one_turn mocked) ----
+# ---- verify gate (real subprocess; Worker turn + Proxy mocked) ----
 
 
 async def test_verify_gate_pass_completes(cfg: OrchestratorConfig):
     cfg.goal_file.write_text('---\nverify: "true"\n---\ndo the thing')
-    with patch("orchestrator.orchestrator._run_one_turn") as mock_turn:
-        mock_turn.side_effect = [_turn("done", "stop", text_out="", reasoning="done")]
+    with _mock_loop([_turn("done")], [_decision("stop", text_out="", reasoning="done")]):
         await run_orchestrator(cfg)
     state = load_state(cfg.state_dir / "state.json")
     assert state.status == "completed"
@@ -146,11 +187,10 @@ async def test_verify_gate_pass_completes(cfg: OrchestratorConfig):
 
 async def test_verify_gate_failure_escalates_at_cap(cfg: OrchestratorConfig):
     cfg.goal_file.write_text('---\nverify: "exit 1"\n---\ndo the thing')
-    with patch("orchestrator.orchestrator._run_one_turn") as mock_turn:
-        mock_turn.side_effect = [
-            _turn("done", "stop", iteration=1, text_out="", reasoning="done"),
-            _turn("done", "stop", iteration=2, text_out="", reasoning="done"),
-        ]
+    with _mock_loop(
+        [_turn("done", 1), _turn("done", 2)],
+        [_decision("stop", "", "done"), _decision("stop", "", "done")],
+    ):
         await run_orchestrator(cfg)
     state = load_state(cfg.state_dir / "state.json")
     assert state.status == "escalated"
@@ -163,11 +203,10 @@ async def test_verify_gate_retries_then_completes(cfg: OrchestratorConfig):
     cfg.goal_file.write_text(
         '---\nverify: "test -f vok || { touch vok; exit 1; }"\n---\ndo the thing'
     )
-    with patch("orchestrator.orchestrator._run_one_turn") as mock_turn:
-        mock_turn.side_effect = [
-            _turn("done", "stop", iteration=1, text_out="", reasoning="done"),
-            _turn("done", "stop", iteration=2, text_out="", reasoning="done"),
-        ]
+    with _mock_loop(
+        [_turn("done", 1), _turn("done", 2)],
+        [_decision("stop", "", "done"), _decision("stop", "", "done")],
+    ):
         await run_orchestrator(cfg)
     state = load_state(cfg.state_dir / "state.json")
     assert state.status == "completed"
@@ -176,9 +215,92 @@ async def test_verify_gate_retries_then_completes(cfg: OrchestratorConfig):
 
 async def test_verify_gate_misconfigured_escalates(cfg: OrchestratorConfig):
     cfg.goal_file.write_text('---\nverify: "gh pr merge 1"\n---\ndo the thing')
-    with patch("orchestrator.orchestrator._run_one_turn") as mock_turn:
-        mock_turn.side_effect = [_turn("done", "stop", text_out="", reasoning="done")]
+    with _mock_loop([_turn("done")], [_decision("stop", text_out="", reasoning="done")]):
         await run_orchestrator(cfg)
     state = load_state(cfg.state_dir / "state.json")
     assert state.status == "escalated"
     assert state.last_verify is not None and state.last_verify.status == "misconfigured"
+
+
+# ---- tamper tripwire (real git repo; Worker turn weakens tests as a side effect) ----
+
+
+def _git(cmd: list[str], cwd: Path) -> None:
+    subprocess.run(cmd, cwd=cwd, check=True, capture_output=True)
+
+
+def _repo_with_test(root: Path) -> Path:
+    repo = root / "repo"
+    (repo / "tests").mkdir(parents=True)
+    _git(["git", "init", "-q"], repo)
+    _git(["git", "config", "user.email", "t@example.com"], repo)
+    _git(["git", "config", "user.name", "T"], repo)
+    _git(["git", "config", "commit.gpgsign", "false"], repo)
+    (repo / "tests" / "test_a.py").write_text(
+        "def test_a():\n    assert 1 == 1\n    assert 2 == 2\n    assert 3 == 3\n"
+    )
+    _git(["git", "add", "-A"], repo)
+    _git(["git", "commit", "-q", "-m", "seed"], repo)
+    return repo
+
+
+def _cfg_for_repo(root: Path, repo: Path) -> OrchestratorConfig:
+    (root / "goals").mkdir(exist_ok=True)
+    (root / "personas").mkdir(exist_ok=True)
+    goal = root / "goals" / "g.md"
+    goal.write_text('---\nverify: "true"\n---\ndo the thing')
+    (root / "personas" / "p.md").write_text("p")
+    return OrchestratorConfig(
+        task_id="tamper-task",
+        goal_file=goal,
+        persona_file=root / "personas" / "p.md",
+        project_dir=repo,
+        state_dir=root / ".orchestrator" / "tamper-task",
+        max_iterations=2,
+        max_seconds=60,
+        orchestrator_home=root / ".orchestrator",
+    )
+
+
+async def test_tamper_trip_escalates_on_weakened_tests(tmp_path: Path):
+    repo = _repo_with_test(tmp_path)
+    cfg = _cfg_for_repo(tmp_path, repo)
+
+    def fake_turn(*, client, user_message, state, out_console=None):
+        # The "Worker" guts the test to make a red suite green, then claims done.
+        (repo / "tests" / "test_a.py").write_text("def test_a():\n    assert 1 == 1\n")
+        return (["did the thing"], IterationUsage(iteration=state.iteration))
+
+    with patch("orchestrator.orchestrator._run_one_turn", side_effect=fake_turn), patch(
+        "orchestrator.orchestrator.run_proxy_decision",
+        return_value=ProxyDecision(action="stop", text="", reasoning="done"),
+    ):
+        await run_orchestrator(cfg)
+
+    state = load_state(cfg.state_dir / "state.json")
+    assert state.status == "escalated"
+    assert state.tamper_paths == ["tests/test_a.py"]
+    assert "tamper" in (state.exit_reason or "").lower()
+    # verify itself passed: the trip is purely the tamper downgrade.
+    assert state.last_verify is not None and state.last_verify.status == "pass"
+
+
+async def test_clean_pass_in_git_repo_completes(tmp_path: Path):
+    """A verify pass with the tests left intact must NOT trip the tripwire."""
+    repo = _repo_with_test(tmp_path)
+    cfg = _cfg_for_repo(tmp_path, repo)
+
+    def fake_turn(*, client, user_message, state, out_console=None):
+        # Touches a non-test file only; tests untouched.
+        (repo / "feature.py").write_text("x = 1\n")
+        return (["did the thing"], IterationUsage(iteration=state.iteration))
+
+    with patch("orchestrator.orchestrator._run_one_turn", side_effect=fake_turn), patch(
+        "orchestrator.orchestrator.run_proxy_decision",
+        return_value=ProxyDecision(action="stop", text="", reasoning="done"),
+    ):
+        await run_orchestrator(cfg)
+
+    state = load_state(cfg.state_dir / "state.json")
+    assert state.status == "completed"
+    assert state.tamper_paths == []
