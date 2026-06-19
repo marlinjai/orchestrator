@@ -62,6 +62,7 @@ def _cfg(root: Path, project: Path, *, verify: str | None, max_iterations: int =
         max_iterations=max_iterations,
         max_seconds=120,
         orchestrator_home=root / ".orchestrator",
+        repos_config=root / "repos.toml",
     )
 
 

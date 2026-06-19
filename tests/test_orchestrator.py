@@ -54,6 +54,8 @@ def cfg(task_dir: Path) -> OrchestratorConfig:
         # Keep the fleet-wide STOP file + usage ledger inside the tmp tree so a
         # test never reads or writes the real ~/.orchestrator.
         orchestrator_home=task_dir / ".orchestrator",
+        # Absent path: never read the dev machine's real repos.toml.
+        repos_config=task_dir / "repos.toml",
     )
 
 
@@ -150,6 +152,7 @@ async def test_orchestrator_writes_to_log_file(task_dir: Path):
         max_seconds=60,
         log_path=log_path,
         orchestrator_home=task_dir / ".orchestrator",
+        repos_config=task_dir / "repos.toml",
     )
     with _mock_loop([_turn("worker output")], [_decision("stop", text_out="", reasoning="done")]):
         await run_orchestrator(cfg)
@@ -244,11 +247,14 @@ def _repo_with_test(root: Path) -> Path:
     return repo
 
 
-def _cfg_for_repo(root: Path, repo: Path) -> OrchestratorConfig:
+def _cfg_for_repo(root: Path, repo: Path, verify: str | None = "true") -> OrchestratorConfig:
     (root / "goals").mkdir(exist_ok=True)
     (root / "personas").mkdir(exist_ok=True)
     goal = root / "goals" / "g.md"
-    goal.write_text('---\nverify: "true"\n---\ndo the thing')
+    if verify is None:
+        goal.write_text("do the thing")
+    else:
+        goal.write_text(f'---\nverify: "{verify}"\n---\ndo the thing')
     (root / "personas" / "p.md").write_text("p")
     return OrchestratorConfig(
         task_id="tamper-task",
@@ -259,6 +265,7 @@ def _cfg_for_repo(root: Path, repo: Path) -> OrchestratorConfig:
         max_iterations=2,
         max_seconds=60,
         orchestrator_home=root / ".orchestrator",
+        repos_config=root / "repos.toml",
     )
 
 
@@ -283,6 +290,94 @@ async def test_tamper_trip_escalates_on_weakened_tests(tmp_path: Path):
     assert "tamper" in (state.exit_reason or "").lower()
     # verify itself passed: the trip is purely the tamper downgrade.
     assert state.last_verify is not None and state.last_verify.status == "pass"
+
+
+async def test_repo_policy_resolved_onto_state(tmp_path: Path):
+    repo = _repo_with_test(tmp_path)
+    _git(["git", "remote", "add", "origin", "git@github.com:test/proj.git"], repo)
+    cfg = _cfg_for_repo(tmp_path, repo)  # repos_config = tmp_path / "repos.toml"
+    (tmp_path / "repos.toml").write_text(
+        '[repos."github.com/test/proj"]\n'
+        'held_out_verify = "true"\nstakes_tier = 3\n'
+    )
+
+    with _mock_loop([_turn("done")], [_decision("stop", text_out="", reasoning="done")]):
+        await run_orchestrator(cfg)
+
+    state = load_state(cfg.state_dir / "state.json")
+    assert state.repo_remote == "github.com/test/proj"
+    assert state.stakes_tier == 3
+    assert state.held_out_verify == "true"
+    # held-out gate ran and passed, so the run completes
+    assert state.status == "completed"
+    assert state.last_held_out is not None and state.last_held_out.status == "pass"
+
+
+async def test_held_out_fail_escalates_after_intree_pass(tmp_path: Path):
+    """In-tree verify green but the held-out (out-of-reach) suite red = caught."""
+    repo = _repo_with_test(tmp_path)
+    _git(["git", "remote", "add", "origin", "git@github.com:test/proj.git"], repo)
+    cfg = _cfg_for_repo(tmp_path, repo, verify="true")
+    (tmp_path / "repos.toml").write_text(
+        '[repos."github.com/test/proj"]\nheld_out_verify = "false"\nstakes_tier = 4\n'
+    )
+
+    with _mock_loop([_turn("done")], [_decision("stop", text_out="", reasoning="done")]):
+        await run_orchestrator(cfg)
+
+    state = load_state(cfg.state_dir / "state.json")
+    assert state.status == "escalated"
+    assert state.last_verify is not None and state.last_verify.status == "pass"
+    assert state.last_held_out is not None and state.last_held_out.status == "fail"
+    assert "reward-hack" in (state.exit_reason or "").lower()
+
+
+async def test_held_out_as_sole_gate_completes(tmp_path: Path):
+    """No in-tree verify, but a held-out command is configured: it runs anyway."""
+    repo = _repo_with_test(tmp_path)
+    _git(["git", "remote", "add", "origin", "git@github.com:test/proj.git"], repo)
+    cfg = _cfg_for_repo(tmp_path, repo, verify=None)
+    (tmp_path / "repos.toml").write_text(
+        '[repos."github.com/test/proj"]\nheld_out_verify = "true"\n'
+    )
+
+    with _mock_loop([_turn("done")], [_decision("stop", text_out="", reasoning="done")]):
+        await run_orchestrator(cfg)
+
+    state = load_state(cfg.state_dir / "state.json")
+    assert state.status == "completed"
+    assert state.last_verify is None  # no in-tree verify ran
+    assert state.last_held_out is not None and state.last_held_out.status == "pass"
+
+
+async def test_held_out_as_sole_gate_fail_escalates(tmp_path: Path):
+    repo = _repo_with_test(tmp_path)
+    _git(["git", "remote", "add", "origin", "git@github.com:test/proj.git"], repo)
+    cfg = _cfg_for_repo(tmp_path, repo, verify=None)
+    (tmp_path / "repos.toml").write_text(
+        '[repos."github.com/test/proj"]\nheld_out_verify = "false"\n'
+    )
+
+    with _mock_loop([_turn("done")], [_decision("stop", text_out="", reasoning="done")]):
+        await run_orchestrator(cfg)
+
+    state = load_state(cfg.state_dir / "state.json")
+    assert state.status == "escalated"
+    assert state.last_held_out is not None and state.last_held_out.status == "fail"
+    assert "not trustworthy" in (state.exit_reason or "").lower()
+
+
+async def test_malformed_registry_fails_run(tmp_path: Path):
+    repo = _repo_with_test(tmp_path)
+    cfg = _cfg_for_repo(tmp_path, repo)
+    (tmp_path / "repos.toml").write_text('[repos."github.com/a/b"]\nstakes_tier = 99\n')
+
+    with _mock_loop([_turn("done")], [_decision("stop", text_out="", reasoning="done")]):
+        await run_orchestrator(cfg)
+
+    state = load_state(cfg.state_dir / "state.json")
+    assert state.status == "failed"
+    assert "repo registry error" in (state.exit_reason or "")
 
 
 async def test_clean_pass_in_git_repo_completes(tmp_path: Path):

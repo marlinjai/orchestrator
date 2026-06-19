@@ -161,6 +161,19 @@ def status(task_id: str = typer.Option(..., "--task-id")):
     )
     table.add_row("decisions", str(len(state.decisions)))
     table.add_row("baseline_ref", (state.baseline_ref or "")[:12])
+    table.add_row("repo_remote", state.repo_remote or "(no git remote)")
+    if state.stakes_tier is not None:
+        table.add_row("stakes_tier", str(state.stakes_tier))
+    table.add_row(
+        "held_out_verify",
+        "configured" if state.held_out_verify else "not configured",
+    )
+    if state.last_held_out is not None:
+        ho = state.last_held_out
+        table.add_row(
+            "held_out_result",
+            f"{ho.status} (exit {ho.exit_code}) @ iter {ho.iteration}",
+        )
     if state.usage:
         in_tok = sum(u.input_tokens for u in state.usage)
         out_tok = sum(u.output_tokens for u in state.usage)

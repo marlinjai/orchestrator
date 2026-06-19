@@ -275,6 +275,8 @@ Key state.json fields (v0.3+):
 - `status`: running | completed | escalated | stopped | failed
 - `iteration`, `max_iterations`
 - `baseline_ref`: git HEAD of project at orchestrator start
+- `repo_remote`, `held_out_verify`, `stakes_tier`: operator-owned repo policy resolved at run start from the project's REAL git remote (see "Repo registry" below). Machine-provenance, never goal-file-authored.
+- `last_held_out`: result of the most recent held-out gate run (`status` pass/fail/misconfigured, `exit_code`, `iteration`). A `fail` with the in-tree verify green is the reward-hack fingerprint.
 - `commits[]`: each entry has `sha`, `message`, `decided_by` (proxy = Worker self-reported via update_state; system = orchestrator detected via git reconcile)
 - `files_touched[]`: same provenance model
 - `usage[]`: per-iteration `input_tokens`, `output_tokens`, `cache_read_tokens`, `cache_creation_tokens`, `model`, `worker_ms`, `proxy_ms`
@@ -293,6 +295,12 @@ Key state.json fields (v0.3+):
 - **Tamper tripwire**: before the verify gate blesses a pass as `completed`, it scans changed test files vs `baseline_ref`. A deleted test or a dropped assertion count downgrades the pass to `escalate` and records `tamper_paths`. Editing tests (count same or higher) is a log signal only. This is the cheap tripwire, not the full held-out verifier (a later wave).
 
 `orchestrator status` surfaces `usage_total`, `global_today` (rolling 24h vs cap), any `tamper_paths`, and `confidence`.
+
+## Repo registry (trust anchor)
+
+An operator-owned file, `~/.config/orchestrator/repos.toml` (override with `ORCHESTRATOR_REPOS_CONFIG`; copy `docs/repos.example.toml`), declares per-repo policy keyed by the project's REAL git remote (normalized `host/owner/repo`, so a goal file cannot point the lookup at a softer entry). Fields: `held_out_verify` (command that runs a hidden test set kept outside the Worker's reach), `stakes_tier` (1 read-only .. 4 irreversible), `allowed_mcp_servers`. It lives outside every repo a Worker touches, so a Worker can never edit it; a goal file can at most BE in a registered repo. A repo with no entry runs with no held-out verify and unknown stakes (existing behavior). A malformed registry fails the run loud (`exit_reason` = "repo registry error"). The orchestrator resolves the policy at run start, stores `repo_remote` / `held_out_verify` / `stakes_tier` on state, and surfaces them in `orchestrator status`.
+
+**The held-out gate.** On a stop-candidate, after the in-tree `verify` passes and the tamper tripwire clears (or as the sole gate when the goal has no `verify`), the orchestrator runs `held_out_verify`. A pass corroborates the green and completes. A FAIL is the reward-hack fingerprint (the in-tree suite is green but the out-of-reach suite is red) and escalates: `status=escalated`, `exit_reason` mentions "REWARD-HACK FINGERPRINT", and `state.last_held_out` records it (also shown as `held_out_result` in `orchestrator status`). A held-out fail is never fed back to the Worker as a retry. OPERATOR SETUP (your job): the held-out tests must live on a path the Worker's OS user cannot write (a different-owner dir, or read-only mount). The orchestrator guarantees the command is operator-sourced and runs it; it does not enforce the filesystem isolation, so if the hidden tests sit in a Worker-writable path the guarantee is void.
 
 ## Things to confirm with the user before dispatching
 

@@ -28,12 +28,14 @@ from orchestrator.handover import (
     seed_fresh_session_message,
     verify_handover_doc,
 )
+from orchestrator.held_out import decide_after_held_out
 from orchestrator.ledger import LedgerEntry, append_decision, append_note, now_iso
 from orchestrator.marlin_proxy import MarlinDecision, run_marlin_decision
 from orchestrator.notify import TERMINAL_STATUSES, notify
 from orchestrator.parse import parse_frontmatter
 from orchestrator.proxy import ProxyDecision, run_proxy_decision
 from orchestrator.reconcile import git_head, reconcile
+from orchestrator.repo_registry import resolve_repo_policy
 from orchestrator.retry import (
     MAX_TRANSIENT_RETRIES,
     backoff_delay,
@@ -44,7 +46,15 @@ from orchestrator.stagnation import (
     stagnation_hit,
     update_stagnation,
 )
-from orchestrator.state import Handover, IterationUsage, State, VerifyRecord, load_state, save_state
+from orchestrator.state import (
+    Handover,
+    HeldOutRecord,
+    IterationUsage,
+    State,
+    VerifyRecord,
+    load_state,
+    save_state,
+)
 from orchestrator.tamper import scan_tamper
 from orchestrator.transcript import AssistantTurn, extract_model, extract_text, extract_usage
 from orchestrator.usage_guard import (
@@ -106,6 +116,9 @@ class OrchestratorConfig:
             os.environ.get("ORCHESTRATOR_HOME", str(Path.home() / ".orchestrator"))
         )
     )
+    # Operator-owned repo registry path. None = the default/env-resolved location
+    # (see repo_registry._registry_path). Set explicitly in tests for isolation.
+    repos_config: Path | None = None
 
 
 console = Console()
@@ -430,6 +443,27 @@ async def run_orchestrator(cfg: OrchestratorConfig) -> None:
             local_console.print("[red]global kill switch active. exiting.[/red]")
             return
 
+        # Operator-owned repo policy, resolved from the project's real git remote
+        # (un-fakeable by the goal file). A malformed registry fails the run loud
+        # rather than silently dropping a security field.
+        try:
+            policy = resolve_repo_policy(cfg.project_dir, cfg.repos_config)
+        except ValueError as e:
+            state.status = "failed"
+            state.exit_reason = f"repo registry error: {e}"
+            save_state(state_path, state)
+            local_console.print(f"[bold red]repo registry error:[/bold red] {e}")
+            return
+        state.repo_remote = policy.remote
+        state.held_out_verify = policy.held_out_verify
+        state.stakes_tier = policy.stakes_tier
+        save_state(state_path, state)
+        local_console.print(
+            f"[dim]repo policy: remote={policy.remote or '(none)'} "
+            f"source={policy.source} stakes_tier={policy.stakes_tier} "
+            f"held_out_verify={'set' if policy.held_out_verify else 'none'}[/dim]"
+        )
+
         if verify_config.command:
             local_console.print(
                 f"[dim]verify gate: {verify_config.command} "
@@ -648,7 +682,10 @@ async def run_orchestrator(cfg: OrchestratorConfig) -> None:
                         save_state(state_path, state)
 
                         if decision.action == "stop":
-                            if verify_config.command is None:
+                            # No gate at all: neither an in-tree verify command
+                            # nor a held-out command for this repo. Complete with
+                            # a logged warning (no build verification).
+                            if verify_config.command is None and not state.held_out_verify:
                                 state.status = "completed"
                                 state.exit_reason = (
                                     decision.reasoning or "proxy stopped (no verify gate)"
@@ -656,39 +693,62 @@ async def run_orchestrator(cfg: OrchestratorConfig) -> None:
                                 save_state(state_path, state)
                                 local_console.print(
                                     "[yellow]completed WITHOUT verify gate "
-                                    "(no `verify` command in goal frontmatter)[/yellow]"
+                                    "(no `verify` command and no held-out verifier)[/yellow]"
                                 )
                                 return
 
-                            local_console.print(
-                                "[bold]verify:[/bold] running gate before accepting completion"
-                            )
-                            outcome = await run_verify(
-                                verify_config.command,
-                                cfg.project_dir,
-                                verify_config.timeout_s,
-                            )
-                            state.last_verify = VerifyRecord(
-                                iteration=state.iteration,
-                                command=outcome.command,
-                                status=outcome.status,
-                                exit_code=outcome.exit_code,
-                                tail=outcome.tail,
-                            )
-                            gate = decide_after_verify(
-                                outcome=outcome,
-                                prior_attempts=state.verify_attempts,
-                                fix_cap=verify_config.fix_cap,
-                            )
-                            state.verify_attempts = gate.attempts
+                            # In-tree verify gate: the goal's own command. A
+                            # failure feeds the Worker (evaluator-optimizer) up to
+                            # fix_cap then escalates; a pass falls through to the
+                            # tamper tripwire and then the held-out gate.
+                            if verify_config.command is not None:
+                                local_console.print(
+                                    "[bold]verify:[/bold] running gate before accepting completion"
+                                )
+                                outcome = await run_verify(
+                                    verify_config.command,
+                                    cfg.project_dir,
+                                    verify_config.timeout_s,
+                                )
+                                state.last_verify = VerifyRecord(
+                                    iteration=state.iteration,
+                                    command=outcome.command,
+                                    status=outcome.status,
+                                    exit_code=outcome.exit_code,
+                                    tail=outcome.tail,
+                                )
+                                gate = decide_after_verify(
+                                    outcome=outcome,
+                                    prior_attempts=state.verify_attempts,
+                                    fix_cap=verify_config.fix_cap,
+                                )
+                                state.verify_attempts = gate.attempts
 
-                            if gate.action == "complete":
-                                # Cheap tamper tripwire: a green build is only
-                                # trustworthy if the tests were not gutted to get
-                                # it. Scan the changed test files vs baseline; a
-                                # deleted test or a dropped assertion count
-                                # downgrades the pass to escalate (path-touched
-                                # alone is a log signal, never a gate fail).
+                                if gate.action == "escalate":
+                                    state.status = "escalated"
+                                    state.exit_reason = gate.exit_reason
+                                    save_state(state_path, state)
+                                    local_console.print(
+                                        f"[bold red]verify: ESCALATE[/bold red] {gate.exit_reason}"
+                                    )
+                                    return
+
+                                if gate.action == "retry":
+                                    # evaluator-optimizer: feed the failure back to
+                                    # the Worker; the Proxy re-decides next turn.
+                                    save_state(state_path, state)
+                                    local_console.print(
+                                        f"[yellow]verify: FAIL[/yellow] attempt "
+                                        f"{state.verify_attempts}/{verify_config.fix_cap}; "
+                                        "feeding failure back to the Worker"
+                                    )
+                                    next_message = gate.next_message
+                                    continue
+
+                                # gate.action == "complete": cheap tamper tripwire
+                                # before we trust the green. A deleted test or a
+                                # dropped assertion count downgrades to escalate
+                                # (path-touched alone is a log signal only).
                                 tamper = scan_tamper(
                                     cfg.project_dir,
                                     state.baseline_ref,
@@ -712,35 +772,55 @@ async def run_orchestrator(cfg: OrchestratorConfig) -> None:
                                         f"{state.exit_reason}"
                                     )
                                     return
-                                state.status = "completed"
-                                state.exit_reason = (
-                                    decision.reasoning or "proxy stopped; verify passed"
-                                )
-                                save_state(state_path, state)
-                                local_console.print(
-                                    "[bold green]verify: PASS[/bold green] -> completed"
-                                )
-                                return
+                                local_console.print("[bold green]verify: PASS[/bold green]")
 
-                            if gate.action == "escalate":
-                                state.status = "escalated"
-                                state.exit_reason = gate.exit_reason
-                                save_state(state_path, state)
+                            # Held-out gate (trust boundary): an operator-sourced
+                            # test set on a path the Worker cannot write, resolved
+                            # from the repo registry. Runs after the in-tree verify
+                            # passed (or as the sole gate when there is none). A
+                            # FAIL is the reward-hack fingerprint (visible green,
+                            # hidden red) and escalates, never a Worker retry.
+                            if state.held_out_verify:
                                 local_console.print(
-                                    f"[bold red]verify: ESCALATE[/bold red] {gate.exit_reason}"
+                                    "[bold]held-out:[/bold] running the operator's "
+                                    "out-of-reach test set"
                                 )
-                                return
+                                ho_outcome = await run_verify(
+                                    state.held_out_verify,
+                                    cfg.project_dir,
+                                    verify_config.timeout_s,
+                                )
+                                state.last_held_out = HeldOutRecord(
+                                    iteration=state.iteration,
+                                    command=ho_outcome.command,
+                                    status=ho_outcome.status,
+                                    exit_code=ho_outcome.exit_code,
+                                    tail=ho_outcome.tail,
+                                )
+                                ho = decide_after_held_out(
+                                    ho_outcome,
+                                    intree_verified=verify_config.command is not None,
+                                )
+                                if ho.action == "escalate":
+                                    state.status = "escalated"
+                                    state.exit_reason = ho.exit_reason
+                                    save_state(state_path, state)
+                                    local_console.print(
+                                        f"[bold red]held-out: ESCALATE[/bold red] {ho.exit_reason}"
+                                    )
+                                    return
+                                local_console.print(
+                                    "[bold green]held-out: PASS[/bold green] "
+                                    "(green corroborated by out-of-reach tests)"
+                                )
 
-                            # retry: feed the failure back to the Worker
-                            # (evaluator-optimizer); the Proxy re-decides next turn.
-                            save_state(state_path, state)
-                            local_console.print(
-                                f"[yellow]verify: FAIL[/yellow] attempt "
-                                f"{state.verify_attempts}/{verify_config.fix_cap}; "
-                                "feeding failure back to the Worker"
+                            state.status = "completed"
+                            state.exit_reason = (
+                                decision.reasoning or "proxy stopped; verify passed"
                             )
-                            next_message = gate.next_message
-                            continue
+                            save_state(state_path, state)
+                            local_console.print("[bold green]completed[/bold green]")
+                            return
 
                         if decision.action == "handover":
                             seed = await _execute_handover(
