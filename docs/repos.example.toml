@@ -1,0 +1,39 @@
+# Operator-owned repo registry (example).
+#
+# Copy to ~/.config/orchestrator/repos.toml (or point ORCHESTRATOR_REPOS_CONFIG
+# at it). This file lives OUTSIDE every repo a Worker touches, so a Worker can
+# never edit it. It is keyed by the project's REAL git remote, normalized to
+# `host/owner/repo` (lowercased, no scheme, no `.git`, no credentials). All of
+# git@github.com:marlinjai/orchestrator.git, https://github.com/marlinjai/
+# orchestrator.git, and ssh://git@github.com/marlinjai/orchestrator resolve to
+# the same key below.
+#
+# Fields (all optional; a repo with no entry runs with no held-out verify and
+# unknown stakes):
+#   held_out_verify      Command that runs the hidden test set, kept on a path
+#                        the Worker cannot write (e.g. a different-owner dir).
+#                        Runs AFTER the in-tree verify passes; if the in-tree
+#                        suite is green but this one is red, the build is a fake.
+#                        Must not hit the bash denylist.
+#   stakes_tier          1 read-only, 2 reversible, 3 external, 4 irreversible.
+#                        Higher = more caution before acting on this repo.
+#                        tier >= 3 is a DISPATCH GATE: the orchestrator refuses
+#                        to start a run on such a repo unless the operator passes
+#                        --confirm-stakes (or ORCHESTRATOR_CONFIRM_STAKES=1).
+#                        The goal file can never authorize it.
+#   allowed_mcp_servers  Operator ceiling on which MCP servers a Worker on this
+#                        repo may use (by key from WORKER_MCP_REGISTRY).
+
+# Convention: keep each repo's hidden tests under /opt/verifier-vault/<repo>/,
+# a directory owned by a DIFFERENT OS user (or a read-only mount) so the Worker's
+# account cannot modify them. The command below can point anywhere; the only hard
+# requirement is that the path is not writable by the Worker.
+
+[repos."github.com/marlinjai/orchestrator"]
+held_out_verify = "uv run --directory /opt/verifier-vault/orchestrator pytest -q"
+stakes_tier = 4
+allowed_mcp_servers = ["orchestrator-state", "secrets-proxy"]
+
+[repos."github.com/marlinjai/lola-stories"]
+held_out_verify = "pnpm --dir /opt/verifier-vault/lola test"
+stakes_tier = 4

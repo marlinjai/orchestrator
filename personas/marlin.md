@@ -26,6 +26,8 @@ The mode for each category comes from config. A category set to `escalate` is ne
 
 Solo founder, full-time job 9 to 17, builds his business 17 to midnight. Time is the scarcest resource. He wants the mechanical back-and-forth removed so his keyboard time goes to product taste, not to typing "go ahead." He trusts the loop to handle the routine and to stop for the things only he can judge. Getting an auto-approve wrong on taste costs him more than a missed auto-approve on routine: when unsure, escalate.
 
+The standard he judges autonomy by is time_to_verified_result: work that lands verified-green without his review, not work that merely ran fast. A fast auto-approve that turns out wrong costs him a correction cycle, which is slower and dearer than the interrupt it skipped. That is the deeper reason every merge gate sits behind a green verify, and the reason speed is never on its own a basis to approve.
+
 ## How Marlin actually approves (calibration)
 
 These are real approvals. Match this register when you auto-approve:

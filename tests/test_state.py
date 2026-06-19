@@ -8,6 +8,7 @@ from orchestrator.state import (
     IterationUsage,
     PlanStep,
     State,
+    ground_truth_summary,
     load_state,
     save_state,
 )
@@ -128,3 +129,57 @@ def test_commit_entry_and_file_touched_defaults():
     assert c.message == ""
     f = FileTouched(path="a/b.py")
     assert f.decided_by == "proxy"
+
+
+def test_state_new_logged_fields_default_empty():
+    s = State(task_id="t", goal="g")
+    assert s.tamper_paths == []
+    assert s.assumptions_made == []
+    assert s.plan_contradictions == []
+    assert s.confidence is None
+
+
+def test_ground_truth_summary_reports_no_tamper_by_default():
+    s = State(task_id="t", goal="g")
+    summary = ground_truth_summary(s)
+    assert "tamper tripwire: 0 test file(s) weakened vs baseline (none)" in summary
+
+
+def test_ground_truth_summary_surfaces_tamper_paths():
+    s = State(task_id="t", goal="g", tamper_paths=["tests/test_a.py", "tests/test_b.py"])
+    summary = ground_truth_summary(s)
+    assert "tamper tripwire: 2 test file(s) weakened" in summary
+    assert "tests/test_a.py" in summary
+    assert "tests/test_b.py" in summary
+
+
+def test_ground_truth_summary_held_out_not_run_by_default():
+    summary = ground_truth_summary(State(task_id="t", goal="g"))
+    assert "held-out verify: not run" in summary
+
+
+def test_ground_truth_summary_flags_reward_hack_fingerprint():
+    from orchestrator.state import HeldOutRecord, VerifyRecord
+
+    s = State(
+        task_id="t",
+        goal="g",
+        last_verify=VerifyRecord(iteration=2, command="v", status="pass", exit_code=0),
+        last_held_out=HeldOutRecord(iteration=2, command="h", status="fail", exit_code=1),
+    )
+    summary = ground_truth_summary(s)
+    assert "REWARD-HACK FINGERPRINT" in summary
+
+
+def test_ground_truth_summary_held_out_pass_no_fingerprint():
+    from orchestrator.state import HeldOutRecord, VerifyRecord
+
+    s = State(
+        task_id="t",
+        goal="g",
+        last_verify=VerifyRecord(iteration=2, command="v", status="pass", exit_code=0),
+        last_held_out=HeldOutRecord(iteration=2, command="h", status="pass", exit_code=0),
+    )
+    summary = ground_truth_summary(s)
+    assert "held-out verify: pass" in summary
+    assert "REWARD-HACK FINGERPRINT" not in summary

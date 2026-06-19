@@ -9,6 +9,7 @@ from orchestrator.worker import (
     apply_env_contract,
     build_worker_options,
     load_worker_extras,
+    resolve_effective_mcp_servers,
 )
 
 
@@ -271,3 +272,93 @@ def test_unknown_server_name_handled_safely(tmp_path: Path):
     assert "coolify" not in options.mcp_servers
     assert "totally-made-up" not in options.mcp_servers
     assert set(options.mcp_servers) == {"orchestrator-state", "secrets-proxy"}
+
+
+# --- brick 3: per-repo MCP-server ceiling (allowed_mcp_servers) --------------
+
+
+def test_resolve_effective_mcp_servers_none_ceiling_passes_through():
+    allowed, dropped = resolve_effective_mcp_servers(["context7", "x"], None)
+    assert allowed == ["context7", "x"]
+    assert dropped == []
+
+
+def test_resolve_effective_mcp_servers_drops_out_of_ceiling():
+    allowed, dropped = resolve_effective_mcp_servers(["context7", "x"], ["context7"])
+    assert allowed == ["context7"]
+    assert dropped == ["x"]
+
+
+def test_resolve_effective_mcp_servers_empty_ceiling_drops_all_extras():
+    allowed, dropped = resolve_effective_mcp_servers(["context7"], [])
+    assert allowed == []
+    assert dropped == ["context7"]
+
+
+def test_resolve_effective_mcp_servers_defaults_never_dropped():
+    """Naming a default server is always allowed even if the ceiling omits it:
+    defaults are added unconditionally and can never be removed by the ceiling."""
+    allowed, dropped = resolve_effective_mcp_servers(
+        ["orchestrator-state", "secrets-proxy", "context7"], ["context7"]
+    )
+    assert "orchestrator-state" in allowed
+    assert "secrets-proxy" in allowed
+    assert dropped == []
+
+
+def test_ceiling_allows_in_ceiling_server(tmp_path: Path):
+    extras = WorkerExtras(mcp_server_keys=["context7"])
+    options = build_worker_options(
+        state_path=tmp_path / "s.json",
+        project_dir=tmp_path,
+        denied_bash=[],
+        extras=extras,
+        allowed_mcp_servers=["context7"],
+    )
+    assert "context7" in options.mcp_servers
+    for tool in WORKER_MCP_REGISTRY["context7"].tools:
+        assert tool in options.allowed_tools
+
+
+def test_ceiling_drops_out_of_ceiling_server(tmp_path: Path):
+    """A goal cannot enable a server the operator did not allow for this repo."""
+    extras = WorkerExtras(mcp_server_keys=["context7"])
+    options = build_worker_options(
+        state_path=tmp_path / "s.json",
+        project_dir=tmp_path,
+        denied_bash=[],
+        extras=extras,
+        allowed_mcp_servers=["some-other-server"],  # ceiling that excludes context7
+    )
+    assert "context7" not in options.mcp_servers
+    # registry-implied tools for the dropped server are not unioned in
+    for tool in WORKER_MCP_REGISTRY["context7"].tools:
+        assert tool not in options.allowed_tools
+    # defaults always survive the ceiling
+    assert set(options.mcp_servers) == {"orchestrator-state", "secrets-proxy"}
+
+
+def test_empty_ceiling_drops_all_extras_keeps_defaults(tmp_path: Path):
+    extras = WorkerExtras(mcp_server_keys=["context7"])
+    options = build_worker_options(
+        state_path=tmp_path / "s.json",
+        project_dir=tmp_path,
+        denied_bash=[],
+        extras=extras,
+        allowed_mcp_servers=[],  # operator allows no extra servers on this repo
+    )
+    assert set(options.mcp_servers) == {"orchestrator-state", "secrets-proxy"}
+
+
+def test_none_ceiling_is_unchanged_behavior(tmp_path: Path):
+    """allowed_mcp_servers=None (repo not in the registry) keeps pre-ceiling
+    behavior: a registered goal server is enabled as before."""
+    extras = WorkerExtras(mcp_server_keys=["context7"])
+    options = build_worker_options(
+        state_path=tmp_path / "s.json",
+        project_dir=tmp_path,
+        denied_bash=[],
+        extras=extras,
+        allowed_mcp_servers=None,
+    )
+    assert "context7" in options.mcp_servers

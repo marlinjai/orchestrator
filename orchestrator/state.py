@@ -59,6 +59,22 @@ class VerifyRecord(BaseModel):
     ran_at: datetime = Field(default_factory=lambda: datetime.now(timezone.utc))
 
 
+class HeldOutRecord(BaseModel):
+    """Result of the most recent held-out verify-gate run (see held_out.py).
+
+    The held-out gate runs an operator-sourced test set the Worker could not
+    reach, AFTER the in-tree verify passes. A `fail` here is the reward-hack
+    fingerprint: the visible green was not earned.
+    """
+
+    iteration: int
+    command: str
+    status: VerifyStatus
+    exit_code: int | None = None
+    tail: str = ""
+    ran_at: datetime = Field(default_factory=lambda: datetime.now(timezone.utc))
+
+
 class IterationUsage(BaseModel):
     iteration: int
     input_tokens: int = 0
@@ -100,10 +116,77 @@ class State(BaseModel):
     estimated_cost_usd: float = 0.0
     autonomy_stats: AutonomyStats = Field(default_factory=AutonomyStats)
     baseline_ref: str | None = None
+    # Operator-owned repo policy, resolved at run start from the real git remote
+    # (see repo_registry.py). These come from outside any repo the Worker can
+    # touch, so they are machine-provenance, never goal-file-authored.
+    repo_remote: str | None = None
+    held_out_verify: str | None = None
+    stakes_tier: int | None = None
     verify_attempts: int = 0
     last_verify: VerifyRecord | None = None
+    last_held_out: HeldOutRecord | None = None
+    stagnation_streak: int = 0
+    last_progress_key: str | None = None
+    transient_retries: int = 0
+    # Test files the verify-gate tamper tripwire flagged as weakened (deleted or
+    # assertion-count dropped vs baseline_ref). Surfaced as ground truth so a
+    # green build that came from gutting the tests cannot be blessed as done.
+    tamper_paths: list[str] = []
+    # LOGGED-ONLY escalation context. These enrich the human / Marlin-Proxy
+    # escalation packet; `confidence` is recorded for review but is NEVER a gate
+    # input (we gate on reversibility / stakes, never on agent self-confidence:
+    # RLHF overconfidence means a claimed 0.9 is ~0.75 real).
+    assumptions_made: list[str] = []
+    plan_contradictions: list[str] = []
+    confidence: float | None = None
     status: TaskStatus = "running"
     exit_reason: str | None = None
+
+
+def ground_truth_summary(state: State) -> str:
+    """Machine-computed facts a Worker cannot fabricate, for the proxies' GROUND
+    TRUTH sections: git reconcile counts (with how many commits / files the Worker
+    did NOT self-report), the latest verify-gate result, and the stagnation streak.
+    """
+    sys_commits = sum(1 for c in state.commits if c.decided_by == "system")
+    sys_files = sum(1 for f in state.files_touched if f.decided_by == "system")
+    verify = state.last_verify
+    if verify is None:
+        verify_line = "verify gate: not yet run"
+    else:
+        verify_line = (
+            f"verify gate: {verify.status} (exit {verify.exit_code}) at iteration "
+            f"{verify.iteration}; tail: {verify.tail[-300:]!r}"
+        )
+    held = state.last_held_out
+    if held is None:
+        held_line = "held-out verify: not run"
+    elif held.status == "fail" and verify is not None and verify.status == "pass":
+        held_line = (
+            f"held-out verify: FAIL (exit {held.exit_code}) at iteration {held.iteration} "
+            "-- REWARD-HACK FINGERPRINT: in-tree verify passed but the out-of-reach "
+            "tests did not"
+        )
+    else:
+        held_line = (
+            f"held-out verify: {held.status} (exit {held.exit_code}) at iteration "
+            f"{held.iteration}"
+        )
+    tamper = state.tamper_paths
+    tamper_line = (
+        f"- tamper tripwire: {len(tamper)} test file(s) weakened vs baseline"
+        + (f" ({', '.join(tamper)})" if tamper else " (none)")
+    )
+    return (
+        f"- commits on branch (reconciled from git): {len(state.commits)} "
+        f"({sys_commits} the Worker did NOT self-report)\n"
+        f"- files changed (reconciled from git): {len(state.files_touched)} "
+        f"({sys_files} not self-reported)\n"
+        f"- {verify_line}\n"
+        f"- {held_line}\n"
+        f"- stagnation streak: {state.stagnation_streak}\n"
+        f"{tamper_line}"
+    )
 
 
 def load_state(path: Path) -> State:

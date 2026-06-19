@@ -267,6 +267,38 @@ def _resolve_extra_servers(
     return servers, tools
 
 
+def resolve_effective_mcp_servers(
+    requested: list[str], ceiling: list[str] | None
+) -> tuple[list[str], list[str]]:
+    """Apply the operator's per-repo MCP-server ceiling to a goal's requested keys.
+
+    The registry's ``allowed_mcp_servers`` (keyed by the project's real git
+    remote, which a goal file cannot fake) is an operator CEILING: a goal can
+    only enable a server the operator allowed for that repo. Returns
+    ``(allowed, dropped)`` where ``dropped`` are the requested keys the ceiling
+    forbids.
+
+    Two invariants:
+    - Safe defaults are never subject to the ceiling. Naming one is always
+      allowed (it is added unconditionally elsewhere and can never be removed),
+      so a default key never appears in ``dropped``.
+    - A ``None`` ceiling means "no per-repo ceiling": every requested key passes
+      through (the pre-brick-3 behavior), so repos with no registry entry are
+      unaffected.
+    """
+    if ceiling is None:
+        return list(requested), []
+    ceiling_set = set(ceiling)
+    allowed: list[str] = []
+    dropped: list[str] = []
+    for key in requested:
+        if key in DEFAULT_MCP_SERVER_KEYS or key in ceiling_set:
+            allowed.append(key)
+        else:
+            dropped.append(key)
+    return allowed, dropped
+
+
 def build_worker_options(
     *,
     state_path: Path,
@@ -274,6 +306,7 @@ def build_worker_options(
     denied_bash: list[str],
     extras: WorkerExtras | None = None,
     auth_mode: AuthMode = "subscription",
+    allowed_mcp_servers: list[str] | None = None,
 ) -> ClaudeAgentOptions:
     apply_env_contract(auth_mode)
     state_server = build_state_mcp_server(state_path)
@@ -302,7 +335,22 @@ def build_worker_options(
     allowed_tools: list[str] = list(DEFAULT_ALLOWED_TOOLS)
 
     if extras is not None:
-        extra_servers, extra_server_tools = _resolve_extra_servers(extras.mcp_server_keys)
+        # Operator ceiling FIRST: a goal can only enable servers the repo policy
+        # allows (un-fakeable, keyed by the real git remote). Out-of-ceiling keys
+        # are dropped before they ever reach the registry resolver. This governs
+        # SERVERS; a goal-declared `mcp__<server>__*` tool for a server the
+        # ceiling dropped is inert (the server is never configured) and harmless.
+        allowed_keys, dropped_by_ceiling = resolve_effective_mcp_servers(
+            extras.mcp_server_keys, allowed_mcp_servers
+        )
+        for key in dropped_by_ceiling:
+            logger.warning(
+                "goal requested MCP server %r not permitted by the repo policy "
+                "ceiling %s; dropping",
+                key,
+                sorted(allowed_mcp_servers or []),
+            )
+        extra_servers, extra_server_tools = _resolve_extra_servers(allowed_keys)
         # Defaults win: never let a goal-resolved server clobber a default key.
         for key, cfg in extra_servers.items():
             mcp_servers.setdefault(key, cfg)
@@ -313,6 +361,10 @@ def build_worker_options(
             if tool not in seen:
                 allowed_tools.append(tool)
                 seen.add(tool)
+
+    # Effective server set, for the audit trail (the orchestrator also prints
+    # this to run.log; logging here covers direct/library callers).
+    logger.info("worker mcp servers (effective): %s", sorted(mcp_servers))
 
     return ClaudeAgentOptions(
         system_prompt=WORKER_SYSTEM_PROMPT,

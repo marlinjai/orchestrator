@@ -64,6 +64,37 @@ async def test_update_state_advances_step(state_path: Path):
     assert state.plan[0].status == "completed"
 
 
+async def test_update_state_records_assumption(state_path: Path):
+    handler = build_update_state_handler(state_path)
+    await handler({"kind": "assumption", "assumption": "the API returns ISO dates"})
+    state = load_state(state_path)
+    assert state.assumptions_made == ["the API returns ISO dates"]
+
+
+async def test_update_state_records_plan_contradiction(state_path: Path):
+    handler = build_update_state_handler(state_path)
+    await handler(
+        {"kind": "plan_contradiction", "contradiction": "goal says SQLite, repo uses Postgres"}
+    )
+    state = load_state(state_path)
+    assert state.plan_contradictions == ["goal says SQLite, repo uses Postgres"]
+
+
+async def test_update_state_records_confidence(state_path: Path):
+    handler = build_update_state_handler(state_path)
+    await handler({"kind": "confidence", "confidence": 0.7})
+    state = load_state(state_path)
+    assert state.confidence == 0.7
+
+
+async def test_update_state_confidence_bad_value_errors(state_path: Path):
+    handler = build_update_state_handler(state_path)
+    result = await handler({"kind": "confidence", "confidence": "high"})
+    assert "error" in result["content"][0]["text"].lower()
+    # state must be untouched on a bad write
+    assert load_state(state_path).confidence is None
+
+
 async def test_update_state_unknown_kind_returns_error(state_path: Path):
     handler = build_update_state_handler(state_path)
     result = await handler({"kind": "nonsense"})

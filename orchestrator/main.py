@@ -8,9 +8,11 @@ from rich.console import Console
 from rich.table import Table
 
 from orchestrator.config import load_config
+from orchestrator.guardrails import cumulative_tokens
 from orchestrator.ledger import agreement_by_category, read_entries
 from orchestrator.orchestrator import OrchestratorConfig, run_orchestrator
 from orchestrator.state import load_state
+from orchestrator.usage_guard import global_kill_active, tokens_in_window
 
 
 app = typer.Typer(help="Autonomous Claude Code orchestrator")
@@ -25,6 +27,22 @@ def _home() -> Path:
 
 def _task_dir(task_id: str) -> Path:
     return _home() / "tasks" / task_id
+
+
+def _daily_token_cap() -> int | None:
+    """Fleet-wide rolling 24h token budget from ORCHESTRATOR_DAILY_TOKEN_CAP.
+
+    Operator-owned and un-promptable (env, not goal frontmatter), so no task can
+    relax it. Returns None (off) when unset, zero, or malformed.
+    """
+    raw = os.environ.get("ORCHESTRATOR_DAILY_TOKEN_CAP")
+    if not raw:
+        return None
+    try:
+        value = int(raw)
+    except ValueError:
+        return None
+    return value if value > 0 else None
 
 
 @app.command()
@@ -57,10 +75,55 @@ def start(
             "$20; subscription is uncapped)."
         ),
     ),
+    max_tokens: int = typer.Option(
+        0,
+        "--max-tokens",
+        help=(
+            "Per-run cumulative token ceiling (rate-limit runaway guard, counts "
+            "input + output + cache). The run stops when crossed. 0 = off. The "
+            "fleet-wide daily ceiling is set with the ORCHESTRATOR_DAILY_TOKEN_CAP "
+            "env var (un-promptable, applies across all runs)."
+        ),
+    ),
     marlin_persona: Path = typer.Option(
         Path(__file__).parent.parent / "personas" / "marlin.md",
         "--marlin-persona",
         help="Path to the Marlin Proxy persona (used when marlin_proxy mode != off)",
+    ),
+    worktree: bool = typer.Option(
+        False,
+        "--worktree",
+        help=(
+            "Run the Worker in its own git worktree (isolated attempt branch "
+            "orchestrator/<task-id>) instead of editing --project in place. "
+            "Commits land on the branch; a clean worktree is auto-removed at the "
+            "end, an escalated/failed one is retained for inspection. Requires a "
+            "git repo; non-git falls back to in-place."
+        ),
+    ),
+    held_out: str = typer.Option(
+        "",
+        "--held-out",
+        help=(
+            "Operator-provided held-out verify command, run on a stop-candidate "
+            "after the in-tree verify passes (in-tree green + held-out red = "
+            "reward-hack fingerprint -> escalate). Use for one-off / dogfood runs "
+            "without a repos.toml entry. Operator-sourced (a goal file can never "
+            "set it); it cannot weaken a registry-enforced held_out_verify."
+        ),
+    ),
+    confirm_stakes: bool = typer.Option(
+        False,
+        "--confirm-stakes",
+        help=(
+            "Operator authorization to start a run on a high-stakes repo "
+            "(registry stakes_tier >= 3: external effects / irreversible). "
+            "Without this the orchestrator REFUSES to start on such a repo. "
+            "Operator-only (a goal file can never set it); the "
+            "autonomous-orchestration skill forbids Claude from self-authorizing "
+            "it. Pass ONLY with Marlin's explicit go. ORCHESTRATOR_CONFIRM_STAKES=1 "
+            "is the env equivalent."
+        ),
     ),
 ):
     """Start a new autonomous task."""
@@ -83,6 +146,12 @@ def start(
         marlin_persona_file=marlin_persona,
         auth_mode=auth_mode,  # type: ignore[arg-type]
         max_cost_usd=(max_cost_usd if max_cost_usd > 0 else None),
+        max_tokens=(max_tokens if max_tokens > 0 else None),
+        daily_token_cap=_daily_token_cap(),
+        orchestrator_home=_home(),
+        worktree_isolation=worktree,
+        held_out_override=(held_out or None),
+        confirm_stakes=confirm_stakes,
     )
     console.print(f"[bold green]starting task {tid}[/bold green]")
     console.print(f"  goal: {goal}")
@@ -130,6 +199,19 @@ def status(task_id: str = typer.Option(..., "--task-id")):
     )
     table.add_row("decisions", str(len(state.decisions)))
     table.add_row("baseline_ref", (state.baseline_ref or "")[:12])
+    table.add_row("repo_remote", state.repo_remote or "(no git remote)")
+    if state.stakes_tier is not None:
+        table.add_row("stakes_tier", str(state.stakes_tier))
+    table.add_row(
+        "held_out_verify",
+        "configured" if state.held_out_verify else "not configured",
+    )
+    if state.last_held_out is not None:
+        ho = state.last_held_out
+        table.add_row(
+            "held_out_result",
+            f"{ho.status} (exit {ho.exit_code}) @ iter {ho.iteration}",
+        )
     if state.usage:
         in_tok = sum(u.input_tokens for u in state.usage)
         out_tok = sum(u.output_tokens for u in state.usage)
@@ -141,8 +223,30 @@ def status(task_id: str = typer.Option(..., "--task-id")):
             "tokens",
             f"in={in_tok} out={out_tok} cache_r={cache_r} cache_c={cache_c}",
         )
+        table.add_row(
+            "usage_total",
+            f"{cumulative_tokens(state.usage):,} tokens (rate-limit figure)",
+        )
         table.add_row("wall_ms", f"worker={worker_ms} proxy={proxy_ms}")
         table.add_row("est_cost_usd", f"${state.estimated_cost_usd:.2f}")
+
+    # Fleet-wide usage + kill state (shared across all runs on this home).
+    home = _home()
+    daily_cap = _daily_token_cap()
+    today = tokens_in_window(home)
+    cap_label = f"{daily_cap:,}" if daily_cap else "none"
+    table.add_row("global_today", f"{today:,} tokens / cap {cap_label} (rolling 24h)")
+    if global_kill_active(home):
+        table.add_row("global_kill", "ACTIVE (fleet-wide STOP file present)")
+
+    if state.tamper_paths:
+        table.add_row("tamper_paths", ", ".join(state.tamper_paths))
+    if state.assumptions_made:
+        table.add_row("assumptions", str(len(state.assumptions_made)))
+    if state.plan_contradictions:
+        table.add_row("plan_contradictions", str(len(state.plan_contradictions)))
+    if state.confidence is not None:
+        table.add_row("confidence", f"{state.confidence:.2f} (logged only, not a gate)")
     a = state.autonomy_stats
     if a.auto_approved or a.auto_deferred or a.escalated:
         table.add_row(

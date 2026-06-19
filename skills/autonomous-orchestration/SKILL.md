@@ -66,6 +66,7 @@ If `orchestrator` is not found at all, run the one-time install above first. The
    git worktree add -b orchestrator/<task-id> ../<repo>-orch-<task-id> main
    cd ../<repo>-orch-<task-id> && <install command if any>  # e.g. pnpm install
    ```
+   Alternative (in-process isolation): pass `--worktree` and point `--project` at the repo itself. The orchestrator then creates and manages its own worktree on branch `orchestrator/<task-id>`, threads it through every gate, and cleans it up at the end (clean = removed with the work preserved on the branch; escalated/failed/dirty = retained for inspection, never `--force`). Use the manual worktree above OR `--worktree`, never both (they would nest). The manual pattern is still preferred for parallel batches where you install once per checkout.
 
 3. **Launch.** Two modes; pick by whether you want the dispatching session woken on completion:
 
@@ -260,22 +261,75 @@ This means:
 ## State directory layout
 
 ```
-~/.orchestrator/tasks/<task-id>/
-  state.json    # pydantic-validated, atomically written
-  run.log       # tee'd Worker stdout/stderr
-  STOP          # touch to halt at next iteration boundary
+~/.orchestrator/
+  GLOBAL_STOP            # touch to halt EVERY run (fleet-wide panic button)
+  usage-ledger.jsonl     # shared per-iteration token ledger (daily-cap source)
+  tasks/<task-id>/
+    state.json    # pydantic-validated, atomically written
+    run.log       # tee'd Worker stdout/stderr
+    STOP          # touch to halt THIS run at next iteration boundary
 ```
+
+`STOP` halts one run; `GLOBAL_STOP` halts all of them at their next iteration boundary (use it to stop a whole parallel batch at once). Both are operator-owned and un-promptable: a goal file cannot relax them.
 
 Key state.json fields (v0.3+):
 - `status`: running | completed | escalated | stopped | failed
 - `iteration`, `max_iterations`
 - `baseline_ref`: git HEAD of project at orchestrator start
+- `repo_remote`, `held_out_verify`, `stakes_tier`: operator-owned repo policy resolved at run start from the project's REAL git remote (see "Repo registry" below). Machine-provenance, never goal-file-authored. `stakes_tier >= 3` is a real dispatch gate (refuses to start without operator `--confirm-stakes`), not just a recorded value.
+- `last_held_out`: result of the most recent held-out gate run (`status` pass/fail/misconfigured, `exit_code`, `iteration`). A `fail` with the in-tree verify green is the reward-hack fingerprint.
 - `commits[]`: each entry has `sha`, `message`, `decided_by` (proxy = Worker self-reported via update_state; system = orchestrator detected via git reconcile)
 - `files_touched[]`: same provenance model
 - `usage[]`: per-iteration `input_tokens`, `output_tokens`, `cache_read_tokens`, `cache_creation_tokens`, `model`, `worker_ms`, `proxy_ms`
 - `handovers[]`: each entry has `at_turn`, `reason`, and `doc` (path to HANDOVER.md). Populated when context crosses `context_handover_tokens` and the Worker produces a git-verified checkpoint. A non-empty list means the run survived multiple session legs.
 - `autonomy_stats`: Marlin Proxy counters: `auto_approved`, `auto_deferred`, `escalated`, `decisions_between_escalations`, `max_decisions_between_escalations`, `autonomous_runtime_ms`
+- `tamper_paths[]`: test files the verify-gate tamper tripwire flagged as weakened (deleted or assertion-count dropped vs `baseline_ref`). A non-empty list on an `escalated` run means a green build came from gutting tests, not from real work. Review before doing anything else.
+- `assumptions_made[]`, `plan_contradictions[]`, `confidence`: logged-only escalation context the Worker self-reports. `confidence` is recorded for review but is NEVER a gate input (we gate on reversibility, never on agent self-confidence).
 - `exit_reason`: terminal explanation string
+
+## Runaway + tamper guards (Wave 0 reliability core)
+
+- **Iteration / wall-clock caps**: `--max-iterations` / `--max-hours`, the original backstops.
+- **Per-run token cap**: `--max-tokens N` stops the run when cumulative tokens (input + output + cache) cross `N`. Default off. The rate-limit-aware runaway guard now that billing is flat (the dollar cap, `--max-cost-usd`, stays present but defaults off in subscription mode).
+- **Fleet-wide daily token cap**: the `ORCHESTRATOR_DAILY_TOKEN_CAP` env var sets a rolling 24h ceiling summed across ALL runs (via `usage-ledger.jsonl`). Operator-owned, un-promptable. Default off.
+- **Stagnation brake**: trips when there is no structured progress (plan-step / decision / verify movement, never git churn) for N consecutive iterations. Hard-stops with a notify; does not spend a fresh Proxy call.
+- **Tamper tripwire**: before the verify gate blesses a pass as `completed`, it scans changed test files vs `baseline_ref`. A deleted test or a dropped assertion count downgrades the pass to `escalate` and records `tamper_paths`. Editing tests (count same or higher) is a log signal only. This is the cheap tripwire, not the full held-out verifier (a later wave).
+
+`orchestrator status` surfaces `usage_total`, `global_today` (rolling 24h vs cap), any `tamper_paths`, and `confidence`.
+
+## Repo registry (trust anchor)
+
+An operator-owned file, `~/.config/orchestrator/repos.toml` (override with `ORCHESTRATOR_REPOS_CONFIG`; copy `docs/repos.example.toml`), declares per-repo policy keyed by the project's REAL git remote (normalized `host/owner/repo`, so a goal file cannot point the lookup at a softer entry). Fields: `held_out_verify` (command that runs a hidden test set kept outside the Worker's reach), `stakes_tier` (1 read-only .. 4 irreversible), `allowed_mcp_servers`. It lives outside every repo a Worker touches, so a Worker can never edit it; a goal file can at most BE in a registered repo. `allowed_mcp_servers`, when set, is an enforced per-repo CEILING on the Worker's MCP servers: the effective servers are the safe defaults plus only those goal-requested servers the ceiling permits (defaults always survive; absent/`None` = no restriction). What the ceiling dropped is logged to run.log. A repo with no entry runs with no held-out verify and unknown stakes (existing behavior). A malformed registry fails the run loud (`exit_reason` = "repo registry error"). The orchestrator resolves the policy at run start, stores `repo_remote` / `held_out_verify` / `stakes_tier` on state, and surfaces them in `orchestrator status`.
+
+**The held-out gate.** On a stop-candidate, after the in-tree `verify` passes and the tamper tripwire clears (or as the sole gate when the goal has no `verify`), the orchestrator runs `held_out_verify`. A pass corroborates the green and completes. A FAIL is the reward-hack fingerprint (the in-tree suite is green but the out-of-reach suite is red) and escalates: `status=escalated`, `exit_reason` mentions "REWARD-HACK FINGERPRINT", and `state.last_held_out` records it (also shown as `held_out_result` in `orchestrator status`). A held-out fail is never fed back to the Worker as a retry. OPERATOR SETUP (your job): the held-out tests must live on a path the Worker's OS user cannot write (a different-owner dir, or read-only mount). The orchestrator guarantees the command is operator-sourced and runs it; it does not enforce the filesystem isolation, so if the hidden tests sit in a Worker-writable path the guarantee is void.
+
+**The stakes gate (dispatch refusal).** `stakes_tier` is not just recorded, it gates dispatch. When the resolved policy puts a repo at `stakes_tier >= 3` (external effects / irreversible), the orchestrator REFUSES to start: it writes `status=stopped`, `exit_reason` "stakes gate: repo is tier N ...", and no Worker turn runs (zero token spend). Starting such a run requires an operator authorization that the goal file can never set: the `--confirm-stakes` flag, or `ORCHESTRATOR_CONFIRM_STAKES=1`. Default-refuse is the safe failure mode: a newly-registered high-stakes repo blocks until a human says go. This composes with the always-on protections (merge-to-main and deploy stay Marlin's; `irreversible_ops` is hard-escalated in the Marlin Proxy and `--confirm-stakes` does NOT relax it).
+
+> HARD RULE FOR CLAUDE-AS-OPERATOR: NEVER pass `--confirm-stakes` (or set `ORCHESTRATOR_CONFIRM_STAKES`) on your own judgment for a tier-3+ repo. If a dispatch is refused by the stakes gate, STOP and surface it to Marlin with the repo, the tier, and what the run would do, and dispatch only after he explicitly says go. Authorizing a tier-3+ start is Marlin's decision, never yours. Tier-1/2 repos are unaffected and need no authorization.
+
+## Verifier-gated dispatch + the dogfood (YOU run this, the user never pastes commands)
+
+When the user asks to "run X with a held-out check", "dogfood the verifier", "prove the held-out verifier on <repo>", or any verifier-gated dispatch, YOU (the operator) set it up and dispatch it via the CLI and report the outcome. The user describes intent in natural language; they do not paste shell. Two paths:
+
+**Ad-hoc (one-off / dogfood): the `--held-out` flag.** No `repos.toml` needed. The flag is operator-sourced (the goal file can never set it) and can ADD a held-out to a repo that has none, but it can never weaken a registry-enforced one (that is ignored with a warning).
+
+```bash
+orchestrator start --goal <goal> --project <repo> --task-id <id> \
+  --worktree --held-out "<command that runs the hidden check>" \
+  --max-iterations 4 --max-hours 0.25
+```
+
+**Persistent (a repo you gate every run): the registry.** Add the repo to `~/.config/orchestrator/repos.toml` once (keyed by its real remote); every run on that repo then auto-applies the held-out + stakes + MCP ceiling. Use this for real recurring repos, the flag for throwaways.
+
+**Dogfood recipe (proves the gate fires, end to end).** Pick a small, low-stakes git repo with a remote (e.g. `pin-to-clipboard`). The held-out check is self-contained, so it does not touch the repo's real code:
+
+1. Write the strict hidden check to a vault dir outside the repo, e.g. `~/.orchestrator/dogfood-vault/check.py`, asserting full behavior of a tiny stub.
+2. Write a goal that has the Worker plant a deliberately-incomplete stub + a WEAK in-tree test (so the in-tree suite goes green while the hidden check fails). Frame the stub as "intentionally incomplete, do not finish it" so a capable Worker leaves it.
+3. Dispatch with `--worktree --held-out "python3 -B ~/.orchestrator/dogfood-vault/check.py"`.
+4. Read it back with `orchestrator status --task-id <id>`: expect `status=escalated`, `held_out_result=fail`, `exit_reason` starting "REWARD-HACK FINGERPRINT". Report that to the user.
+5. Teardown: `git -C <repo> worktree remove <repo>-orch-<id>` then `git -C <repo> branch -D orchestrator/<id>`, and `rm -rf` the vault + state dir.
+
+For a zero-cost, zero-setup proof of the GATE LOGIC (no Worker run), point the user at `uv run pytest tests/test_verifier_dogfood.py -v` in the orchestrator repo. Reserve a real `--held-out` dispatch for showing it live on a real repo, and never on a prod app with auth/secrets/DB.
 
 ## Things to confirm with the user before dispatching
 
@@ -289,7 +343,8 @@ Key state.json fields (v0.3+):
 
 - `commits[*].decided_by` shows `system` entries → Worker isn't calling `update_state(kind="commit")` reliably. Functional, but state is one-sided. Worth noting in v2 retro.
 - `usage` shows monotonically growing input_tokens with no cache_read → caching broken, will blow rate limits on multi-iteration runs.
-- `iteration` climbing without commits/files growth → stagnation streak. Will eventually escalate (Theme 4 detection lands in a later slice).
+- `iteration` climbing without plan-step / decision / verify movement → the stagnation brake will hard-stop the run (`exit_reason` mentions "stagnation"). If you see this, the goal is likely under-specified or the Worker is looping on a failing verify.
+- `exit_reason` mentions "tamper tripwire" → a verify pass was downgraded to escalate because tests were deleted or weakened. Check `tamper_paths` and review the diff before trusting any green build.
 - `exit_reason` containing "Credit balance is too low" → `ANTHROPIC_API_KEY` leaked into orchestrator env despite the scrub (or the scrub regressed). Check `worker.py`.
 
 ## Where the source lives

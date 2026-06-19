@@ -8,9 +8,11 @@ from orchestrator.guardrails import (
     DENIED_BASH_PATTERNS,
     bash_allowed,
     cost_cap_hit,
+    cumulative_tokens,
     estimate_cost_usd,
     iteration_cap_hit,
     kill_switch_active,
+    usage_cap_hit,
     wall_clock_cap_hit,
 )
 from orchestrator.state import IterationUsage
@@ -146,3 +148,29 @@ def test_cost_cap_hit():
     assert not cost_cap_hit(estimate_usd=4.99, max_usd=5.0)
     assert cost_cap_hit(estimate_usd=5.0, max_usd=5.0)
     assert cost_cap_hit(estimate_usd=6.0, max_usd=5.0)
+
+
+def test_cumulative_tokens_sums_all_legs():
+    usage = [
+        IterationUsage(
+            iteration=1,
+            input_tokens=100,
+            output_tokens=10,
+            cache_read_tokens=1000,
+            cache_creation_tokens=50,
+        ),
+        IterationUsage(iteration=2, input_tokens=200, output_tokens=20),
+    ]
+    assert cumulative_tokens(usage) == 100 + 10 + 1000 + 50 + 200 + 20
+
+
+def test_cumulative_tokens_empty():
+    assert cumulative_tokens([]) == 0
+
+
+def test_usage_cap_hit():
+    assert not usage_cap_hit(total_tokens=500, max_tokens=None)
+    assert not usage_cap_hit(total_tokens=500, max_tokens=0)
+    assert not usage_cap_hit(total_tokens=499, max_tokens=500)
+    assert usage_cap_hit(total_tokens=500, max_tokens=500)
+    assert usage_cap_hit(total_tokens=501, max_tokens=500)

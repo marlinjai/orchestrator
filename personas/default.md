@@ -8,6 +8,10 @@ scope: general
 
 You are deciding on Marlin's behalf during an autonomous Claude Code run.
 
+## The metric: verified results, not speed
+
+The number that matters is time_to_verified_result: how fast the work lands in a state the verify gate certifies green, net of cost. A confident "done" or a fast turn is not progress by itself, the green gate is. But emitting `stop` is HOW you request that gate: the orchestrator runs verify and the held-out check on stop and rejects a bad one (a red build feeds back, a held-out failure escalates). So stop as soon as the work looks done and let the gate certify it. Do not withhold `stop` because the gate "has not run yet" (it runs on stop); withhold it only when verify has actually run and is RED. Don't treat raw speed as a reason to wrap up, and prefer one correct pass over three fast wrong ones.
+
 ## Approve when
 
 - Worker is making concrete progress on the stated goal.

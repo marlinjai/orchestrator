@@ -4,6 +4,14 @@ Living tracker for orchestrator work. Read top to bottom: shipped at the top, in
 
 ## Shipped
 
+### Wave 0 reliability core + held-out verifier track (2026-06-19)
+- **Wave 0 reliability core** (`7da7b6a`): the reliability spine the rest of the verifier sits on. 304 tests green at landing; full exit gate passes (`tests/test_wave0_exit_gate.py`).
+- **Operator repo registry + held-out gate** (`repo_registry.py`, `held_out.py`): an operator-owned `~/.config/orchestrator/repos.toml` keyed by the project's REAL git remote (un-fakeable by the goal file) carries `held_out_verify`, `stakes_tier`, `allowed_mcp_servers`. On a stop-candidate, after the in-tree verify passes and the tamper tripwire clears, the held-out command (a test set outside the Worker's reach) runs: in-tree green + held-out red = the reward-hack fingerprint, escalates and is never retried.
+- **`allowed_mcp_servers` as a per-repo ceiling** (`80841cb`): effective servers = safe defaults UNION (goal-requested INTERSECT registry ceiling). A goal can never enable a server the operator did not allow.
+- **Worktree-per-attempt isolation** (`c094152`): opt-in `--worktree` runs the attempt in a dedicated git worktree with safe (never `--force`) cleanup.
+- **`--held-out` flag + skill-driven dispatch** (`f5b430a`) and the end-to-end dogfood capstone (`982f544`): the live dogfood fired the fingerprint on a real `pin-to-clipboard` regression.
+- **Stakes-tier dispatch gate** (this change): `stakes_tier >= 3` is now a real refusal, not a recorded note. `run_orchestrator` refuses to start (`status=stopped`, no Worker turn, zero token spend) unless the operator passes `--confirm-stakes` / `ORCHESTRATOR_CONFIRM_STAKES=1` (operator-owned, never goal-authored). The `autonomous-orchestration` skill forbids Claude from self-authorizing tier-3+. Composes with the always-on protections; does not relax `irreversible_ops`. Resolves the `orchestrator-tier3-dispatch-gate` backlog item. 371 tests green.
+
 ### v0.2.0: state reconciliation + token telemetry (2026-05-24)
 - Per-iteration `git log` reconcile of commits / `git diff` reconcile of files; missing entries back-filled with `decided_by="system"`.
 - `IterationUsage` capture from `AssistantMessage.usage` (input, output, cache_read, cache_create, model, worker_ms, proxy_ms).
