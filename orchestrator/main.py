@@ -1,6 +1,7 @@
 import asyncio
 import os
 import uuid
+from datetime import datetime
 from pathlib import Path
 
 import typer
@@ -8,6 +9,7 @@ from rich.console import Console
 from rich.table import Table
 
 from orchestrator.config import load_config
+from orchestrator.events import filter_since, merge_events, project_events
 from orchestrator.guardrails import cumulative_tokens
 from orchestrator.ledger import agreement_by_category, read_entries
 from orchestrator.orchestrator import OrchestratorConfig, run_orchestrator
@@ -308,6 +310,75 @@ def logs(
         os.execvp("tail", ["tail", "-f", str(log_path)])
     else:
         console.print(log_path.read_text())
+
+
+@app.command()
+def events(
+    task_id: str = typer.Option(
+        "", "--task-id", help="Emit this single task's normalized event stream"
+    ),
+    all_tasks: bool = typer.Option(
+        False,
+        "--all",
+        help="Emit the merged, time-ordered stream across every task under this home",
+    ),
+    since: str = typer.Option(
+        "",
+        "--since",
+        help="With --all: keep only events at or after this ISO timestamp (e.g. "
+        "2026-06-25T00:00:00Z)",
+    ),
+):
+    """Emit a normalized event stream as JSONL on stdout (READ-ONLY projection).
+
+    Pure read: load state.json -> project_events -> print. Never writes, never
+    touches the control loop. Use --task-id for one task or --all for the merged
+    fleet stream (optionally filtered with --since).
+    """
+    if not task_id and not all_tasks:
+        console.print("[red]pass --task-id <id> or --all[/red]")
+        raise typer.Exit(1)
+    if task_id and all_tasks:
+        console.print("[red]use --task-id OR --all, not both[/red]")
+        raise typer.Exit(1)
+    if since and not all_tasks:
+        console.print("[red]--since is only valid with --all[/red]")
+        raise typer.Exit(1)
+
+    since_dt: datetime | None = None
+    if since:
+        try:
+            since_dt = datetime.fromisoformat(since.replace("Z", "+00:00"))
+        except ValueError:
+            console.print(f"[red]invalid --since timestamp {since!r}[/red]")
+            raise typer.Exit(1)
+
+    if task_id:
+        state_path = _task_dir(task_id) / "state.json"
+        if not state_path.exists():
+            console.print(f"[red]no state for task {task_id} at {state_path}[/red]")
+            raise typer.Exit(1)
+        for event in project_events(load_state(state_path)):
+            typer.echo(event.model_dump_json())
+        return
+
+    # --all: glob every task's state.json, project, merge, optionally filter.
+    tasks_root = _home() / "tasks"
+    collected = []
+    for state_file in sorted(tasks_root.glob("*/state.json")):
+        try:
+            state = load_state(state_file)
+        except (ValueError, FileNotFoundError) as exc:
+            # A single corrupt state.json must not corrupt the JSONL on stdout;
+            # warn on stderr and keep going.
+            typer.echo(f"skipping {state_file}: {exc}", err=True)
+            continue
+        collected.extend(project_events(state))
+    merged = merge_events(collected)
+    if since_dt is not None:
+        merged = filter_since(merged, since_dt)
+    for event in merged:
+        typer.echo(event.model_dump_json())
 
 
 @app.command("roadmap-next")

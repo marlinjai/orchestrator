@@ -13,6 +13,7 @@ from pathlib import Path
 REPO_ROOT = Path(__file__).resolve().parent.parent
 GENERATOR_PATH = REPO_ROOT / "scripts" / "gen_state_dts.py"
 COMMITTED_DTS = REPO_ROOT / "types" / "state.d.ts"
+COMMITTED_EVENTS_DTS = REPO_ROOT / "types" / "events.d.ts"
 
 
 def _load_generator():
@@ -118,4 +119,78 @@ def test_drift_is_detected_by_check(monkeypatch):
         )
 
     monkeypatch.setattr(gen, "generate", drifted_generate)
+    assert gen.main(["--check"]) == 1
+
+
+# --- events.d.ts contract (the L7 normalized event stream) -------------------
+
+
+def test_committed_events_dts_exists():
+    assert COMMITTED_EVENTS_DTS.exists(), (
+        f"{COMMITTED_EVENTS_DTS} is missing. "
+        "Run: uv run python scripts/gen_state_dts.py"
+    )
+
+
+def test_events_dts_matches_model():
+    """The committed events.d.ts must byte-match a fresh regenerate.
+
+    If this fails, the Pydantic Event model changed but types/events.d.ts was
+    not regenerated. Fix: run `uv run python scripts/gen_state_dts.py` and
+    commit the updated contract.
+    """
+    gen = _load_generator()
+    regenerated = gen.generate_events()
+    committed = COMMITTED_EVENTS_DTS.read_text()
+    assert regenerated == committed, (
+        "types/events.d.ts is out of sync with the Pydantic Event model.\n"
+        "Regenerate it with: uv run python scripts/gen_state_dts.py"
+    )
+
+
+def test_events_contract_covers_surface():
+    """The EventType alias, the Event interface, and every Event field appear."""
+    from orchestrator.events import EVENT_TYPES, Event
+
+    text = COMMITTED_EVENTS_DTS.read_text()
+    assert "export type EventType =" in text
+    assert "export interface Event {" in text
+    # Every EventType member is in the alias.
+    for member in EVENT_TYPES:
+        assert f'"{member}"' in text, f"missing EventType member {member}"
+    # Every Event field name appears in the emitted interface.
+    event_block = text.split("export interface Event {", 1)[1]
+    for field_name in Event.model_fields:
+        assert field_name in event_block, (
+            f"Event field {field_name!r} is not present in the emitted contract"
+        )
+    # The free-form `data` dict maps to a TS index signature, not `any`.
+    assert "data: { [key: string]: unknown };" in event_block
+
+
+def test_events_generator_writes_idempotently():
+    """Regenerating the events contract is a no-op (deterministic output)."""
+    gen = _load_generator()
+    assert gen.generate_events() == gen.generate_events()
+
+
+def test_events_drift_is_detected_by_check(monkeypatch):
+    """A simulated Event change makes --check fail (the events guard bites).
+
+    Monkeypatch the events generator to emit a phantom field, then assert
+    --check returns non-zero against the unchanged committed file. Proves the
+    guard would catch a real Event change that forgot to regenerate, without
+    mutating any file on disk.
+    """
+    gen = _load_generator()
+    real_generate_events = gen.generate_events
+
+    def drifted_generate_events():
+        return real_generate_events().replace(
+            "export interface Event {",
+            "export interface Event {\n  phantom_field?: string;",
+            1,
+        )
+
+    monkeypatch.setattr(gen, "generate_events", drifted_generate_events)
     assert gen.main(["--check"]) == 1
