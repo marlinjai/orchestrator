@@ -74,6 +74,14 @@ export interface PlanStep {
   status?: PlanStatus;
 }
 
+export interface ReconRecord {
+  executor: string;
+  model_id: string;
+  elapsed_ms: number;
+  ok?: boolean;
+  ran_at?: string;
+}
+
 export interface VerifyRecord {
   iteration: number;
   command: string;
@@ -106,6 +114,7 @@ export interface State {
   verify_attempts?: number;
   last_verify?: VerifyRecord | null;
   last_held_out?: HeldOutRecord | null;
+  last_recon?: ReconRecord | null;
   stagnation_streak?: number;
   last_progress_key?: string | null;
   transient_retries?: number;
