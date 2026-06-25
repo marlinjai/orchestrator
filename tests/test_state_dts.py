@@ -14,6 +14,7 @@ REPO_ROOT = Path(__file__).resolve().parent.parent
 GENERATOR_PATH = REPO_ROOT / "scripts" / "gen_state_dts.py"
 COMMITTED_DTS = REPO_ROOT / "types" / "state.d.ts"
 COMMITTED_EVENTS_DTS = REPO_ROOT / "types" / "events.d.ts"
+COMMITTED_COHORT_DTS = REPO_ROOT / "types" / "cohort.d.ts"
 
 
 def _load_generator():
@@ -193,4 +194,81 @@ def test_events_drift_is_detected_by_check(monkeypatch):
         )
 
     monkeypatch.setattr(gen, "generate_events", drifted_generate_events)
+    assert gen.main(["--check"]) == 1
+
+
+# --- cohort.d.ts contract (the L8 best-of-N cohort record) -------------------
+
+
+def test_committed_cohort_dts_exists():
+    assert COMMITTED_COHORT_DTS.exists(), (
+        f"{COMMITTED_COHORT_DTS} is missing. "
+        "Run: uv run python scripts/gen_state_dts.py"
+    )
+
+
+def test_cohort_dts_matches_model():
+    """The committed cohort.d.ts must byte-match a fresh regenerate.
+
+    If this fails, the Pydantic CohortResult / CohortAttempt models changed but
+    types/cohort.d.ts was not regenerated. Fix: run
+    `uv run python scripts/gen_state_dts.py` and commit the updated contract.
+    """
+    gen = _load_generator()
+    regenerated = gen.generate_cohort()
+    committed = COMMITTED_COHORT_DTS.read_text()
+    assert regenerated == committed, (
+        "types/cohort.d.ts is out of sync with the Pydantic CohortResult model.\n"
+        "Regenerate it with: uv run python scripts/gen_state_dts.py"
+    )
+
+
+def test_cohort_contract_covers_surface():
+    """The reused aliases, both interfaces, and every field appear in the contract."""
+    from orchestrator.best_of import CohortAttempt, CohortResult
+
+    text = COMMITTED_COHORT_DTS.read_text()
+    assert "export interface CohortAttempt {" in text
+    assert "export interface CohortResult {" in text
+    # The cohort record reuses the State Literal aliases, emitted locally so the
+    # file is a self-contained module.
+    assert "export type TaskStatus =" in text
+    assert "export type VerifyStatus =" in text
+    attempt_block = text.split("export interface CohortAttempt {", 1)[1]
+    for field_name in CohortAttempt.model_fields:
+        assert field_name in attempt_block, (
+            f"CohortAttempt field {field_name!r} is not present in the contract"
+        )
+    result_block = text.split("export interface CohortResult {", 1)[1]
+    for field_name in CohortResult.model_fields:
+        assert field_name in result_block, (
+            f"CohortResult field {field_name!r} is not present in the contract"
+        )
+
+
+def test_cohort_generator_writes_idempotently():
+    """Regenerating the cohort contract is a no-op (deterministic output)."""
+    gen = _load_generator()
+    assert gen.generate_cohort() == gen.generate_cohort()
+
+
+def test_cohort_drift_is_detected_by_check(monkeypatch):
+    """A simulated CohortResult change makes --check fail (the guard bites).
+
+    Monkeypatch the cohort generator to emit a phantom field, then assert
+    --check returns non-zero against the unchanged committed file. Proves the
+    guard would catch a real model change that forgot to regenerate, without
+    mutating any file on disk.
+    """
+    gen = _load_generator()
+    real_generate_cohort = gen.generate_cohort
+
+    def drifted_generate_cohort():
+        return real_generate_cohort().replace(
+            "export interface CohortResult {",
+            "export interface CohortResult {\n  phantom_field?: string;",
+            1,
+        )
+
+    monkeypatch.setattr(gen, "generate_cohort", drifted_generate_cohort)
     assert gen.main(["--check"]) == 1

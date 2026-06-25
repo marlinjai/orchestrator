@@ -127,6 +127,20 @@ def start(
             "is the env equivalent."
         ),
     ),
+    best_of: int = typer.Option(
+        1,
+        "--best-of",
+        help=(
+            "Run N independent attempts of the goal, each in its own worktree / "
+            "branch (orchestrator/<task-id>-attempt-<k>), then SELECT the winner "
+            "using the HELD-OUT verifier ONLY (never the Worker-visible in-tree "
+            "verify). 1 (default) = the normal single-attempt run, unchanged. "
+            "REQUIRES a held-out verifier (registry held_out_verify or --held-out): "
+            "with none, best-of-N refuses and runs zero attempts. Composes with "
+            "--held-out and the stakes gate (a tier-3+ repo still needs "
+            "--confirm-stakes); --worktree is implied per attempt."
+        ),
+    ),
 ):
     """Start a new autonomous task."""
     if auth_mode not in ("subscription", "api_key"):
@@ -159,7 +173,16 @@ def start(
     console.print(f"  goal: {goal}")
     console.print(f"  project: {project}")
     console.print(f"  state: {cfg.state_dir}")
-    asyncio.run(run_orchestrator(cfg))
+    # best_of >= 2 routes through the best-of-N orchestration layer (N isolated
+    # attempts, held-out-certified selection). best_of <= 1 is the unchanged
+    # single-attempt path, byte-for-byte the historical behavior.
+    if best_of > 1:
+        from orchestrator.best_of import run_best_of_n
+
+        console.print(f"  best-of: {best_of} attempts (held-out-certified selection)")
+        asyncio.run(run_best_of_n(cfg, best_of))
+    else:
+        asyncio.run(run_orchestrator(cfg))
 
 
 @app.command()
