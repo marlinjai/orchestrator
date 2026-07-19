@@ -13,11 +13,11 @@ marlin_proxy_categories:
 
 # Goal
 
-DO NOT DISPATCH until the spec's frontmatter reads `status: decided` — the
-spec explicitly requires Marlin's confirmation of the brand-vs-character
-reference precedence rule (decision #2 in the parent plan) before
-implementation, and `lumitra-studio-character-db-migration` (E0) has
-merged. Implement the leaf spec at
+DO NOT DISPATCH until the spec's frontmatter reads `status: decided` on
+the default branch (satisfied once plan PR `marlinjai/lumitra-studio#83`
+merges — decision #2 is resolved 2026-07-20: character refs fill
+`maxInputImages` first, brand refs take the remainder) AND
+`lumitra-studio-character-db-migration` (E0) has merged. Implement the leaf spec at
 `docs/specs/2026-07-19-character-injection.md` in full:
 `injectCharacterReferences.ts` (structural clone of
 `injectBrandReferences.ts`) plus a `characterSlug` option on

@@ -13,16 +13,17 @@ marlin_proxy_categories:
 
 # Goal
 
-DO NOT DISPATCH until the spec's frontmatter reads `status: decided` — this
-requires BOTH Marlin's confirmation of the `virtual-try-on` task name/shape
-(decision #3 in the parent plan) AND completion of the spec's "Step 0"
-prerequisite: a fresh live-schema research pass against fal's FASHN
-endpoint, written up at `docs/internal/research/fal-fashn-tryon.md`, since
-no existing research doc in this repo covers it. Do the Step 0 research
-first if it has not been done; do not write `fal.ts` code against a guessed
-schema.
+DO NOT DISPATCH until the spec's frontmatter reads `status: decided` on
+the default branch (satisfied once plan PR `marlinjai/lumitra-studio#83`
+merges — decision #3 is resolved 2026-07-20: the task is `virtual-try-on`
+with two named image inputs, garment + person). The spec's "Step 0"
+prerequisite remains a hard in-task gate: a fresh live-schema research pass
+against fal's FASHN endpoint, written up at
+`docs/internal/research/fal-fashn-tryon.md`, since no existing research doc
+in this repo covers it. Do the Step 0 research first; do not write `fal.ts`
+code against a guessed schema.
 
-Once both are satisfied: implement the leaf spec at
+Implement the leaf spec at
 `docs/specs/2026-07-19-fal-fashn-tryon.md` in full: a new `virtual-try-on`
 `ModelTask` (two named image inputs, garment + person, distinct from
 `image-edit`), a `fal/fashn-tryon-v1-6` catalog entry, a `fal.ts` adapter,

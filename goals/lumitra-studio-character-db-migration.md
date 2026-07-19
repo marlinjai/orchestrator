@@ -13,14 +13,13 @@ marlin_proxy_categories:
 
 # Goal
 
-DO NOT DISPATCH until `docs/specs/2026-07-19-character-db-migration.md`'s
-frontmatter reads `status: decided` (it currently reads `status: proposed`
-on the plan PR at `marlinjai/lumitra-studio#83`). The spec itself flags an
-open product decision (Character project-independence vs workspace scoping)
-that Marlin must resolve before this task can be dispatched safely — do not
-resolve it yourself and do not dispatch speculatively.
+DO NOT DISPATCH until the plan PR `marlinjai/lumitra-studio#83` has merged
+(so `docs/specs/2026-07-19-character-db-migration.md` reads
+`status: decided` on the default branch). The gating product decisions are
+resolved (2026-07-20): Character is a project-independent library and
+`Asset.characterId` is the only relation.
 
-Once decided: implement the leaf spec at
+Implement the leaf spec at
 `docs/specs/2026-07-19-character-db-migration.md` in full: add `Character`
 and `CharacterReference` Prisma models (structural clone of `Brand`/
 `BrandReference`), add `Asset.characterId`, a DB loader
@@ -53,9 +52,8 @@ additive migration generated with `--create-only` against a local throwaway
 DB, DB loader, repository, API routes, tests). Plus:
 
 - `pnpm test`, `pnpm lint`, typecheck pass.
-- Spec frontmatter flips `proposed` -> `decided` only if it was not already
-  flipped before dispatch (it should have been, per the DO NOT DISPATCH note
-  above; if you find it still `proposed` when you start, stop and escalate
+- Spec frontmatter already reads `decided`; if you find it still
+  `proposed` when you start, stop and escalate
   rather than proceeding).
 - Single commit, conventional message.
 
