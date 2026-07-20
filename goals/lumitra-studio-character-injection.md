@@ -3,6 +3,9 @@ task: lumitra-studio-character-injection
 spec: docs/specs/2026-07-19-character-injection.md
 shared_state: []
 depends_on: [lumitra-studio-character-db-migration]
+verify: pnpm db:generate && pnpm -r --filter './packages/*' build && pnpm test && npx tsc --noEmit && pnpm lint
+verify_fix_cap: 2
+verify_timeout_s: 1800
 marlin_proxy: shadow
 marlin_proxy_categories:
   scope_change: escalate
@@ -15,7 +18,7 @@ marlin_proxy_categories:
 
 DO NOT DISPATCH until the spec's frontmatter reads `status: decided` on
 the default branch (satisfied once plan PR `marlinjai/lumitra-studio#83`
-merges — decision #2 is resolved 2026-07-20: character refs fill
+merges. Decision #2 is resolved 2026-07-20: character refs fill
 `maxInputImages` first, brand refs take the remainder) AND
 `lumitra-studio-character-db-migration` (E0) has merged. Implement the leaf spec at
 `docs/specs/2026-07-19-character-injection.md` in full:
@@ -48,14 +51,15 @@ the schema widening, the `Asset.characterId` write-through in
 - `pnpm test`, `pnpm lint`, typecheck pass.
 - Single commit, conventional message.
 
-## Constraints
+## Constraints (hard, do not violate)
 
 - **Do NOT change brand-only behavior.** A request with `brandSlug` and no
   `characterSlug` must produce byte-identical output to today (regression
   test against existing brand injection tests as the oracle).
-- **Do NOT invent the precedence rule if it was not confirmed before
-  dispatch.** If you find the spec still `proposed` when you start, stop
-  and escalate rather than guessing.
+- **Do NOT substitute your own precedence rule.** It is decided
+  (character refs first, brand refs fill the remainder). Implement it as
+  the spec writes it and do not halt for sign-off on it. Any OTHER product
+  decision you hit is still a `product_decision` escalation.
 - Do NOT touch the 3D generation branch in `/api/generate/route.ts`.
 - Stay in this worktree. Do not push to any remote.
 - No em-dashes or en-dashes anywhere. Conventional commit.

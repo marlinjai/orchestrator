@@ -3,6 +3,9 @@ task: lumitra-studio-character-sheet-workflow
 spec: docs/specs/2026-07-19-character-sheet-workflow.md
 shared_state: []
 depends_on: [lumitra-studio-character-db-migration]
+verify: pnpm db:generate && pnpm -r --filter './packages/*' build && pnpm test && npx tsc --noEmit && pnpm lint
+verify_fix_cap: 2
+verify_timeout_s: 1800
 marlin_proxy: shadow
 marlin_proxy_categories:
   scope_change: escalate
@@ -19,7 +22,7 @@ spec at `docs/specs/2026-07-19-character-sheet-workflow.md` in full: a
 curated generation-workflow DAG definition (`character-sheet`) that turns
 one seed-face generation into a multi-view turnaround sheet, plus the
 human-approve gallery that promotes selected outputs into frozen
-`CharacterReference` rows. This is the roster-minting pipeline — the human
+`CharacterReference` rows. This is the roster-minting pipeline. The human
 approval step is a hard QC gate, not a suggestion.
 
 ## Read first
@@ -33,7 +36,7 @@ approval step is a hard QC gate, not a suggestion.
 - `packages/lumitra-core/src/providers/fal.ts`: the Nano Banana 2 edit
   endpoint's multi-reference input shape.
 - `src/components/workflows/EditableWorkflowCanvas.tsx` and
-  `NodeResultLightbox.tsx`: reuse these for the approve step, do not build a
+  `NodeResultLightbox.tsx`: reuse these for the approve step; do not build a
   new canvas component.
 - `src/lib/character/repository.ts` and the `/references/upload` route from
   E0.
@@ -47,12 +50,12 @@ tests). Plus:
 - `pnpm test`, `pnpm lint`, typecheck pass.
 - Single commit, conventional message.
 
-## Constraints
+## Constraints (hard, do not violate)
 
 - **Do NOT modify the workflow DAG engine**
   (`packages/lumitra-core/src/workflow/{types,resolve,plan,registry}.ts`).
   Pure consumer only. If the binding grammar cannot express what the spec
-  needs, that is a scope_change: escalate, do not patch the engine
+  needs, that is a scope_change: escalate; do not patch the engine
   unilaterally.
 - **Do NOT auto-promote workflow outputs into `CharacterReference` rows.**
   The human-approve click is mandatory.

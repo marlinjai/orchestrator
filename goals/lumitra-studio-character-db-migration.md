@@ -3,6 +3,9 @@ task: lumitra-studio-character-db-migration
 spec: docs/specs/2026-07-19-character-db-migration.md
 shared_state: [prisma, migrations]
 depends_on: []
+verify: pnpm db:generate && pnpm -r --filter './packages/*' build && pnpm test && npx tsc --noEmit && pnpm lint
+verify_fix_cap: 2
+verify_timeout_s: 1800
 marlin_proxy: shadow
 marlin_proxy_categories:
   scope_change: escalate
@@ -39,7 +42,7 @@ depends on (E1 and E2 in the parent plan).
 - `src/app/api/brands/route.ts` and its `[slug]` subroutes: the API route
   shapes to clone.
 - `src/lib/asset/sign.ts` and `src/lib/storage/*`: the existing Storage
-  Brain SDK/signing utility, reuse it, do not add a second storage client.
+  Brain SDK/signing utility. Reuse it; do not add a second storage client.
 - `docs/specs/2026-06-01-brand-db-migration.md`: the prior slice that did
   this exact shape of migration for brands.
 - The parent plan `docs/plans/2026-07-19-character-consistency-engine.md`
@@ -53,11 +56,10 @@ DB, DB loader, repository, API routes, tests). Plus:
 
 - `pnpm test`, `pnpm lint`, typecheck pass.
 - Spec frontmatter already reads `decided`; if you find it still
-  `proposed` when you start, stop and escalate
-  rather than proceeding).
+  `proposed` when you start, stop and escalate rather than proceeding.
 - Single commit, conventional message.
 
-## Constraints
+## Constraints (hard, do not violate)
 
 - **Do NOT apply the migration to any non-local database. Do NOT deploy.**
   `--create-only` against a local throwaway DB, then stop.

@@ -3,6 +3,9 @@ task: lumitra-studio-fal-fashn-tryon
 spec: docs/specs/2026-07-19-fal-fashn-tryon.md
 shared_state: [model-taxonomy]
 depends_on: []
+verify: pnpm db:generate && pnpm -r --filter './packages/*' build && pnpm test && npx tsc --noEmit && pnpm lint
+verify_fix_cap: 2
+verify_timeout_s: 1800
 marlin_proxy: shadow
 marlin_proxy_categories:
   scope_change: escalate
@@ -15,7 +18,7 @@ marlin_proxy_categories:
 
 DO NOT DISPATCH until the spec's frontmatter reads `status: decided` on
 the default branch (satisfied once plan PR `marlinjai/lumitra-studio#83`
-merges — decision #3 is resolved 2026-07-20: the task is `virtual-try-on`
+merges. Decision #3 is resolved 2026-07-20: the task is `virtual-try-on`
 with two named image inputs, garment + person). The spec's "Step 0"
 prerequisite remains a hard in-task gate: a fresh live-schema research pass
 against fal's FASHN endpoint, written up at
@@ -60,13 +63,13 @@ workflow proving the chain, tests). Plus:
 - `pnpm test`, `pnpm lint`, typecheck pass.
 - Single commit, conventional message.
 
-## Constraints
+## Constraints (hard, do not violate)
 
 - **Do NOT skip Step 0.** Writing `fal.ts` code against a guessed schema is
   exactly the mistake the fal-image-provider spec's own discipline exists
   to prevent.
 - **Do NOT make any live fal API call in tests** (or, ideally, at all
-  during Step 0's schema check — use fal's public docs/model page; escalate
+  during Step 0's schema check: use fal's public docs/model page; escalate
   if a paid verification call is genuinely unavoidable, do not spend
   unilaterally).
 - Do NOT remove or change the existing `image-edit` task or any other
@@ -82,5 +85,5 @@ workflow proving the chain, tests). Plus:
 ## Notes
 
 - Independent of E0-E2 at the code level and can start immediately, but
-  touches `models/types.ts` (a shared-edit surface) — do not run this
+  touches `models/types.ts` (a shared-edit surface). Do not run this
   concurrently with any other task-taxonomy-widening task.

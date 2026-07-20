@@ -3,6 +3,9 @@ task: lumitra-studio-character-video-handoff
 spec: docs/specs/2026-07-19-character-video-handoff.md
 shared_state: []
 depends_on: [lumitra-studio-character-injection]
+verify: pnpm db:generate && pnpm -r --filter './packages/*' build && pnpm test && npx tsc --noEmit && pnpm lint
+verify_fix_cap: 2
+verify_timeout_s: 1800
 marlin_proxy: shadow
 marlin_proxy_categories:
   scope_change: escalate
@@ -25,12 +28,12 @@ resulting video Asset URL into a composition manifest.
 
 ## Read first
 
-- The spec file in full, including the "Out of scope (E5b)" section — do
+- The spec file in full, including the "Out of scope (E5b)" section, do
   not build multi-reference video binding, it is explicitly deferred.
 - `packages/lumitra-core/src/models/catalog.ts`: confirm
   `fal/kling-v2-5-image-to-video` and `fal/seedance-pro-image-to-video`
   still exist and are wired (per the fal-multimodal-backbone plan's B1
-  phase, already done as of this spec's writing — the codebase moves,
+  phase, already done as of this spec's writing, the codebase moves,
   re-verify before assuming).
 - `src/lib/jobs/run-generation-job.ts`: the `kind === 'generate_video'`
   branch in `buildPlan`.
@@ -38,7 +41,7 @@ resulting video Asset URL into a composition manifest.
   transport, the completion path for video jobs (NOT synchronous like
   image generation).
 - `docs/plans/2026-06-07-lumitra-studio-composition-and-embed-architecture.md`:
-  the embed contract — an embed consumes a RESULT (baked asset URLs), never
+  the embed contract: an embed consumes a RESULT (baked asset URLs), never
   the pipeline. The HyperFrames manifest follows this exactly.
 
 ## Definition of done
@@ -53,7 +56,7 @@ tests. Plus:
 - `pnpm test`, `pnpm lint`, typecheck pass.
 - Single commit, conventional message.
 
-## Constraints
+## Constraints (hard, do not violate)
 
 - **Do NOT duplicate or re-implement anything in `fal.ts` /
   `run-generation-job.ts` for video** if step 1's verification finds the
@@ -72,6 +75,7 @@ tests. Plus:
 ## Notes
 
 - This is the cheapest task in the whole plan to ship since video
-  infrastructure already exists — mostly wiring plus one export scaffold.
+  infrastructure already exists; this is mostly wiring plus one export
+  scaffold.
   Consider dispatching it early/in parallel to build confidence before the
   heavier E3/E4 tasks land.

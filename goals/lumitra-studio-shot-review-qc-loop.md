@@ -3,6 +3,9 @@ task: lumitra-studio-shot-review-qc-loop
 spec: docs/specs/2026-07-19-shot-review-qc-loop.md
 shared_state: []
 depends_on: [lumitra-studio-character-injection, lumitra-studio-fal-fashn-tryon]
+verify: pnpm db:generate && pnpm -r --filter './packages/*' build && pnpm test && npx tsc --noEmit && pnpm lint
+verify_fix_cap: 2
+verify_timeout_s: 1800
 marlin_proxy: shadow
 marlin_proxy_categories:
   scope_change: escalate
@@ -15,7 +18,7 @@ marlin_proxy_categories:
 
 DO NOT DISPATCH until the spec's frontmatter reads `status: decided` AND
 both `lumitra-studio-character-injection` (E2) and `lumitra-studio-fal-
-fashn-tryon` (E3) have merged — there is nothing meaningful to rank against
+fashn-tryon` (E3) have merged, because there is nothing meaningful to rank against
 before either identity or garment-fidelity generation paths exist. Implement
 the leaf spec at `docs/specs/2026-07-19-shot-review-qc-loop.md` in full: an
 app-level review surface that generates N candidates per shot (using the
@@ -35,7 +38,7 @@ approve click.
   branch in `persistSyncResult`.
 - `packages/lumitra-core/src/workflow/{plan,resolve}.ts`: read in full to
   confirm there is genuinely no for-each/select node kind before building
-  around that constraint — verify, do not assume from the spec summary
+  around that constraint. Verify it; do not assume from the spec summary
   alone.
 - `src/components/workflows/NodeResultLightbox.tsx` and
   `EditableNodeCard.tsx`: reusable gallery/lightbox components.
@@ -49,7 +52,7 @@ UI, tests). Plus:
 - `pnpm test`, `pnpm lint`, typecheck pass.
 - Single commit, conventional message.
 
-## Constraints
+## Constraints (hard, do not violate)
 
 - **Do NOT extend the workflow DAG engine with a for-each or
   select-best-of-N node kind.** This is a deliberate scope boundary set in
