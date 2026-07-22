@@ -23,8 +23,10 @@ portrait plus mono key-value identity block (slug, refs, default model,
 shot count, created); right frozen-reference grid with category captions,
 the descriptor prompt as a read-only "locked at freeze" block, and the
 recent-shots lineage grid with approved Pills. Header: breadcrumb, status
-Pill, and ONE action ("Generate with {name}" linking to
-`/?character={slug}`). A shots read path may be added as
+Pill, and TWO actions per the amended spec: "Generate with {name}"
+(primary, linking to `/?character={slug}`) and "Animate a shot" (mounting
+the AnimateShotButton the shot-review slice built; the obligation
+transferred here when that slice landed first). A shots read path may be added as
 `GET /api/characters/[slug]/shots` mirroring existing GET patterns if none
 exists. Not-found and empty states are part of done.
 
@@ -67,5 +69,6 @@ The spec's "Definition of done" list, in full, plus:
 
 ## Notes
 
-- Do NOT add try-on or animate buttons; those tasks add their own entry
-  points when their targets exist (they carry the `character-dossier` tag).
+- Do NOT add a try-on button; that task adds its own entry point when its
+  target exists (it carries the `character-dossier` tag). The animate
+  button IS this task's job per the amended spec.
