@@ -2,6 +2,7 @@
 title: Hexagonal executor ports (ports-and-adapters seam for exchangeable models)
 status: draft
 date: 2026-07-24
+revised: 2026-07-24 (v2 after reading the Inception Labs docs + OpenAPI spec)
 owner: marlin
 supersedes: none
 related:
@@ -10,75 +11,85 @@ related:
   - ROADMAP.md (Wave 2 per-role executor seam)
 ---
 
-# Hexagonal Executor Ports
+# Hexagonal Executor Ports (v2)
 
-Make the orchestrator's execution layer a true ports-and-adapters (hexagonal) architecture: every role (worker, recon, planner) talks to a **port** (a small Python Protocol), and the concrete model/provider lives in an **adapter** behind it. Swapping Claude for Mercury (or anything else) becomes a config + adapter change, never a control-loop change.
+Make the orchestrator's execution layer a true ports-and-adapters (hexagonal) architecture: every role (worker, recon, planner) talks to a **port** (a small Python Protocol), and the concrete model/provider lives in an **adapter** behind it. Swapping Claude for Mercury 2 becomes a config + adapter change, never a control-loop change.
+
+## What changed in v2
+
+v1 assumed Mercury was a raw completion endpoint, which would have forced us to rebuild the whole agentic loop and argued for drawing the port at the model-call level. The Inception Labs OpenAPI spec disproves that assumption: **`mercury-2` chat completions support native tool calling** (`tools` + `tool_choice: auto|required|none`, OpenAI-compatible shape), structured outputs via `response_format`, `reasoning_effort` (`instant|low|medium|high`), streaming, 128K context. Mercury already runs inside third-party agentic coding harnesses (OpenCode, Roo Code, Kilo Code, Cursor). Measured ~1,000 output tokens/sec at $0.25/M input, $0.75/M output; time-to-first-token ~4s; Artificial Analysis Intelligence Index 21 (well below Opus-class).
+
+Consequences:
+1. The port stays at the **whole-turn** level. A Mercury worker adapter is a conventional OpenAI-style tool loop (~200-400 lines), not an SDK rebuild.
+2. The Mercury-as-coder experiment is cheap enough that best-of-N Mercury attempts cost near-nothing next to metered Opus. The intelligence gap (index 21) is exactly what the experiment measures: hypothesis is that with Opus planning + recon, execution is mechanical enough for a fast cheap model to win on time-to-verified-result.
 
 ## Where we already are
-
-The Wave 2 seam (shipped dormant 2026-06-20) is already half of this:
 
 | Piece | Status | Location |
 |---|---|---|
 | Role -> model routing port | DONE (`ExecutorProfile`, `resolve_executor(role)`) | `orchestrator/executor.py:106-210` |
-| Foreign-provider transport port | DONE, recon-only (`MercuryTransport = Callable[[str, str, dict], str]`, `/raw` proxy forward, server-side key) | `executor.py:250-315` |
+| Foreign-provider transport | DONE, recon-only (`MercuryTransport`, secrets-proxy `/raw` forward, server-side key) | `executor.py:250-315` |
 | Recon adapter (Mercury) | DONE but dormant (`run_recon` never called from the loop) | `orchestrator.py:~312-366` |
-| Worker port | **MISSING**: Worker is hard-wired to the Claude Agent SDK | `worker.py:302-384+` |
+| Worker port | MISSING: Worker hard-wired to the Claude Agent SDK | `worker.py:302-384+` |
 | Telemetry | recon-only (`ReconRecord` on `state.last_recon`) | `state.py:89-99` |
 
 ## Invariants (unchanged, load-bearing)
 
-1. **Judge invariant**: both Proxies stay Claude. `ExecutorProfile.is_claude` keeps enforcing it; tests in `tests/test_executor.py` stay.
+1. **Judge invariant**: both Proxies stay Claude. `ExecutorProfile.is_claude` keeps enforcing it.
 2. **Operator-config-only routing**: `[executors.<role>]` in `~/.config/orchestrator/config.toml`. Never goal frontmatter, never repo registry.
-3. **No provider registry**: adapters are a small literal dict, not a plugin system. The spec named registry-creep the #1 scope risk; this plan keeps it that way.
-4. **Key hygiene**: foreign keys only ever server-side via the secrets proxy `/raw` endpoint; `apply_env_contract` scrub stays first in every adapter spawn path.
+3. **No plugin registry**: adapters are a small literal dict. One generic OpenAI-compatible adapter covers Mercury and future compatible providers without adapter-per-vendor creep.
+4. **Key hygiene**: foreign keys only ever server-side via the secrets proxy `/raw` endpoint; `apply_env_contract` scrub stays first in every spawn path. The orchestrator process never holds the Inception key.
 5. **Fail loud**: adapter unavailable -> warning + Claude fallback (recon) or hard error (worker), never silent skip.
-6. **Non-Claude code-writing stays gated**: a Mercury worker adapter only goes live behind best-of-N with a held-out verifier and a measured `time_to_verified_ms` win. This plan builds the port; it does not flip that switch.
+6. **Non-Claude code-writing stays gated**: a Mercury worker only goes live behind best-of-N with a held-out verifier and a measured `time_to_verified_ms` win. This plan builds the port and the experiment rig; the default stays Claude until the data says otherwise.
 
 ## Ports (the interface layer)
 
-All in a new `orchestrator/ports.py` (leaf module, no SDK import), as `typing.Protocol`s:
+New `orchestrator/ports.py` (leaf module, no SDK import), as `typing.Protocol`s:
 
 ```python
-class CompletionPort(Protocol):
-    """Single-shot, tool-free completion. Generalizes MercuryTransport."""
-    def complete(self, system: str, prompt: str, params: dict) -> str: ...
+class WorkerPort(Protocol):
+    """One agentic coding turn against a workspace (whole-turn boundary)."""
+    def run_turn(self, cfg: TurnConfig, profile: ExecutorProfile) -> TurnResult: ...
 
 class ReconPort(Protocol):
     def run(self, question: str, profile: ExecutorProfile) -> ReconFindings: ...
-
-class WorkerPort(Protocol):
-    """One agentic coding turn against a workspace."""
-    def run_turn(self, cfg: TurnConfig, profile: ExecutorProfile) -> TurnResult: ...
 ```
 
-`TurnConfig` / `TurnResult` are extracted from the current `run_worker_turn` signature so the Claude adapter is a pure wrap (byte-for-byte behavior with default config).
+`TurnConfig` / `TurnResult` are extracted from the current `run_worker_turn` signature. Provider-specific knobs (MCP servers for Claude, `reasoning_effort` for Mercury) live on the profile/adapter side, not in `TurnConfig`, so the contract stays provider-neutral.
+
+### ExecutorProfile extensions
+
+- `provider: Literal["anthropic", "inception"]` as an **explicit field** (TOML `provider = "..."`), validated at load. No inference from model-ID string patterns.
+- `reasoning_effort: str | None` (Inception-only knob; `high` for hard steps, `low`/`instant` for mechanical ones). Rejected for `provider = "anthropic"` at load time.
+- `cost_ceiling_usd`: either enforced against usage telemetry in E3 or deleted. No dead safety-looking config.
 
 ## Adapters
 
-- `adapters/claude_worker.py`: wraps today's `build_worker_options` + `run_worker_turn` (Claude Agent SDK, hooks isolation, MCP ceiling, env contract). The only worker adapter that exists after this plan.
-- `adapters/claude_recon.py`: today's `_claude_recon` (SDK `query()`, no tools).
-- `adapters/mercury_recon.py`: today's `run_mercury_recon` over the `/raw` proxy transport.
-- Adapter selection: `resolve_adapter(profile) -> WorkerPort | ReconPort`, a literal `{("worker", "claude-*"): ClaudeWorkerAdapter, ...}` mapping. Unknown combo = `ValueError` at startup, not at turn time.
+- `adapters/claude_worker.py`: wraps today's `build_worker_options` + `run_worker_turn` (Claude Agent SDK, hooks isolation, MCP ceiling, env contract). Byte-for-byte default behavior.
+- `adapters/openai_compat_worker.py`: generic tool loop over an OpenAI-compatible chat-completions endpoint, routed through the secrets-proxy `/raw` transport. Tools: read file, edit file, run command, all confined to the attempt worktree; same verify gate as Claude. Works for `mercury-2` and any future compatible provider.
+- `adapters/claude_recon.py` / `adapters/mercury_recon.py`: today's `_claude_recon` and `run_mercury_recon`, repackaged.
+- Selection: `resolve_adapter(profile)` keyed on `(role, provider)`. Unknown combo = `ValueError` at startup, not turn time.
 
 ## Phases
 
-**E1: wire the dormant recon seam.** Call `orchestrator.run_recon` from `run_orchestrator` at the recon point (recon-early per the 2026-06-18 handover), record `ReconRecord`. First live proof of the seam. Small, ships alone.
+**E1: wire the dormant recon seam, config-gated.** Call `orchestrator.run_recon` from `run_orchestrator` **only when an `[executors.recon]` override exists** (or explicit `recon = true`), so default runs add zero extra model calls. Record `ReconRecord`. Small, ships alone.
 
-**E2: extract WorkerPort.** Move `TurnConfig`/`TurnResult` types out of `worker.py`, wrap the SDK path as `ClaudeWorkerAdapter`, route the control loop through `resolve_adapter(resolve_executor("worker"))`. Zero behavior change with no operator config; test = existing suite green plus an adapter-fake turn test.
+**E2: extract WorkerPort + `provider` field.** Move `TurnConfig`/`TurnResult` out of `worker.py`, wrap the SDK path as `ClaudeWorkerAdapter`, add `provider`/`reasoning_effort` to `ExecutorProfile`, route the loop through `resolve_adapter`. Golden test: same goal, seam off vs on, terminal `state.json` identical minus timestamps.
 
-**E3: unify telemetry.** Generalize `ReconRecord` to a per-role `ExecutorRecord` (executor, model_id, elapsed_ms, ok, ran_at) appended per turn; `time_to_verified_ms` unchanged. Logged, never gated.
+**E3: unify telemetry + enforce cost ceiling.** Generalize `ReconRecord` to per-role `ExecutorRecord` (executor, provider, model_id, elapsed_ms, ok, ran_at) appended per turn. Wire `cost_ceiling_usd` to usage accounting or delete it. Logged, never gated (except the ceiling, which aborts loudly).
 
-**E4 (gated, NOT in this plan's implementation scope):** `adapters/mercury_worker.py` behind `--best-of` + held-out verifier, compared on `time_to_verified_ms`. Requires its own goal file and the measured win before default-on.
+**E4: OpenAI-compatible worker adapter + the Mercury experiment.** Build `openai_compat_worker`, then race Claude vs Mercury on the same goals via the existing `--best-of` machinery with the held-out verifier, selection and comparison on `time_to_verified_ms`. Mercury becomes an allowed worker default only on a measured win. Needs its own goal file.
 
 ## Non-goals
 
 - No plugin/registry system, no dynamic adapter discovery.
-- No planner adapter work yet (planner stays Claude; the port covers it for free later).
+- No planner adapter work yet (planner stays Claude; the port covers it later for free).
 - No change to Marlin Proxy / Decision Proxy (judge invariant).
+- `mercury-edit-2` (FIM/edit endpoints, no tool calling) is out of scope; if ever used it would be a tool *inside* a worker, not an executor.
 
 ## Verification
 
-- Full existing test suite green after E2 with no operator config (default-path invariance).
-- New tests: adapter resolution table, fake WorkerPort turn, judge-invariant regression (worker non-Claude without gate -> refuse).
-- E1 smoke: one real orchestrator run with `[executors.recon] model_id = "mercury"` shows `state.last_recon.executor == "mercury"` and Claude fallback on proxy-down.
+- Existing suite green after E2 with no operator config; golden `state.json` invariance test.
+- New tests: adapter resolution table, fake WorkerPort turn, judge-invariant regression (non-Claude worker without held-out gate -> refuse), profile validation (`provider` required for non-Claude, `reasoning_effort` rejected for Anthropic).
+- E1 smoke: run with `[executors.recon] model_id = "mercury-2"` shows `state.last_recon.executor == "mercury"`, and Claude fallback on proxy-down.
+- E4 exit criterion: N >= 10 goals, Mercury cohort median `time_to_verified_ms` < Claude cohort, held-out green rate within an agreed band.
