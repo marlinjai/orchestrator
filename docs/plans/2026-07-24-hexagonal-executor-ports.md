@@ -1,6 +1,6 @@
 ---
 title: Hexagonal executor ports (ports-and-adapters seam for exchangeable models)
-status: draft
+status: decided (E1+E2 implemented 2026-07-24; E3+E4 open)
 date: 2026-07-24
 revised: 2026-07-24 (v2 after reading the Inception Labs docs + OpenAPI spec)
 owner: marlin

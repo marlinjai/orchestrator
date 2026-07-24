@@ -62,6 +62,7 @@ def test_resolve_executor_config_points_recon_at_mercury(tmp_path):
         """
 [executors.recon]
 model_id = "mercury"
+provider = "inception"
 auth_mode = "api_key"
 cost_ceiling_usd = 0.50
 """
@@ -120,7 +121,7 @@ def test_judges_stay_claude_even_with_a_mercury_recon_config(tmp_path):
     """A config that points recon at Mercury must NOT move the Worker or either
     Proxy off Claude. Their integrity is the whole trust model."""
     p = tmp_path / "config.toml"
-    p.write_text('[executors.recon]\nmodel_id = "mercury"\n')
+    p.write_text('[executors.recon]\nmodel_id = "mercury"\nprovider = "inception"\n')
     # Worker (code-writing) and the two judge roles the orchestrator routes by
     # all resolve to Claude regardless of the recon override.
     for judge_role in ("worker", "decision_proxy", "marlin_proxy"):
@@ -240,7 +241,7 @@ def test_recon_defaults_to_claude_when_no_config(tmp_path):
 
 def test_recon_uses_mercury_when_configured(tmp_path):
     p = tmp_path / "config.toml"
-    p.write_text('[executors.recon]\nmodel_id = "mercury"\n')
+    p.write_text('[executors.recon]\nmodel_id = "mercury"\nprovider = "inception"\n')
 
     def transport(url, token, body):
         return _fake_inception_response("mercury findings")
@@ -256,7 +257,7 @@ def test_recon_falls_back_to_claude_when_mercury_unavailable(tmp_path):
     """Mercury configured but the proxy token is absent: FAIL LOUD into a Claude
     recon fallback, never a silent skip, never a blocked run."""
     p = tmp_path / "config.toml"
-    p.write_text('[executors.recon]\nmodel_id = "mercury"\n')
+    p.write_text('[executors.recon]\nmodel_id = "mercury"\nprovider = "inception"\n')
 
     def boom(url, token, body):  # would be the proxy call
         raise AssertionError("transport should not be reached without a token")
@@ -275,7 +276,7 @@ def test_recon_falls_back_to_claude_when_mercury_unavailable(tmp_path):
 
 def test_recon_falls_back_to_claude_on_transport_error(tmp_path):
     p = tmp_path / "config.toml"
-    p.write_text('[executors.recon]\nmodel_id = "mercury"\n')
+    p.write_text('[executors.recon]\nmodel_id = "mercury"\nprovider = "inception"\n')
 
     def bad_transport(url, token, body):
         raise MercuryUnavailable("proxy 502")
