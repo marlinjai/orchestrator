@@ -8,11 +8,17 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import get_args
 
-from claude_agent_sdk import ClaudeSDKClient
 from rich.console import Console
 
+from orchestrator.adapters import resolve_worker_adapter
 from orchestrator.config import MarlinProxyConfig, apply_task_overrides, load_config
-from orchestrator.executor import ReconFindings, record_recon
+from orchestrator.executor import (
+    ReconFindings,
+    load_executor_config,
+    record_recon,
+    resolve_executor,
+)
+from orchestrator.ports import WorkerSession
 from orchestrator.guardrails import (
     DEFAULT_API_KEY_COST_CAP_USD,
     bash_allowed,
@@ -58,7 +64,7 @@ from orchestrator.state import (
     save_state,
 )
 from orchestrator.tamper import scan_tamper
-from orchestrator.transcript import AssistantTurn, extract_model, extract_text, extract_usage
+from orchestrator.transcript import AssistantTurn, extract_text
 from orchestrator.usage_guard import (
     daily_cap_hit,
     global_kill_active,
@@ -79,7 +85,6 @@ from orchestrator.worker import (
     build_worker_options,
     load_worker_extras,
     resolve_effective_mcp_servers,
-    run_worker_turn,
 )
 
 
@@ -230,39 +235,35 @@ def _initialize_state(cfg: OrchestratorConfig) -> State:
 
 async def _run_one_turn(
     *,
-    client: ClaudeSDKClient,
+    session: WorkerSession,
     user_message: str,
     state: State,
     out_console: Console | None = None,
 ) -> tuple[list[str], IterationUsage]:
-    """Run one Worker turn and return its text chunks + token usage.
+    """Run one Worker turn through the WorkerPort and return its text chunks +
+    token usage.
 
+    Provider-neutral: the session is whatever adapter ``resolve_worker_adapter``
+    picked (Claude SDK today); this function never sees provider message shapes.
     The Decision Proxy is intentionally NOT called here: the caller reloads and
     reconciles state against git first, then asks the Proxy, so the Proxy judges
     on machine ground truth rather than the Worker's (possibly incomplete)
     self-report.
     """
     out = out_console or console
-    chunks: list[str] = []
     usage = IterationUsage(iteration=state.iteration)
     worker_start = time.monotonic()
-    async for msg in run_worker_turn(client=client, user_message=user_message):
-        text = extract_text(msg)
-        if text:
-            chunks.append(text)
-            out.print(f"[dim]worker:[/dim] {text}", end="")
-        u = extract_usage(msg)
-        if u:
-            usage.input_tokens += int(u.get("input_tokens", 0) or 0)
-            usage.output_tokens += int(u.get("output_tokens", 0) or 0)
-            usage.cache_read_tokens += int(u.get("cache_read_input_tokens", 0) or 0)
-            usage.cache_creation_tokens += int(u.get("cache_creation_input_tokens", 0) or 0)
-        if not usage.model:
-            m = extract_model(msg)
-            if m:
-                usage.model = m
+    result = await session.run_turn(
+        user_message,
+        on_text=lambda text: out.print(f"[dim]worker:[/dim] {text}", end=""),
+    )
+    usage.input_tokens = result.input_tokens
+    usage.output_tokens = result.output_tokens
+    usage.cache_read_tokens = result.cache_read_tokens
+    usage.cache_creation_tokens = result.cache_creation_tokens
+    usage.model = result.model
     usage.worker_ms = int((time.monotonic() - worker_start) * 1000)
-    return chunks, usage
+    return result.chunks, usage
 
 
 def _load_marlin(cfg: OrchestratorConfig, goal_text: str) -> tuple[MarlinProxyConfig, str]:
@@ -422,7 +423,7 @@ def _record_marlin_decision(
 
 async def _execute_handover(
     *,
-    client: ClaudeSDKClient,
+    session: WorkerSession,
     handover_prompt: str,
     state: State,
     state_path: Path,
@@ -443,7 +444,7 @@ async def _execute_handover(
     save_state(state_path, state)
 
     handover_chunks, handover_usage = await _run_one_turn(
-        client=client,
+        session=session,
         user_message=handover_prompt,
         state=state,
         out_console=local_console,
@@ -737,12 +738,50 @@ async def run_orchestrator(cfg: OrchestratorConfig) -> None:
             allowed_mcp_servers=policy.allowed_mcp_servers,
         )
 
+        # WorkerPort resolution (hexagonal seam, E2): the loop talks to a
+        # provider-neutral session; the adapter owns the SDK. With no operator
+        # [executors.worker] config this resolves to the Claude adapter and is
+        # byte-for-byte the pre-port behavior. A non-Claude worker provider is
+        # refused loudly here at startup (the E4 gate), before any turn runs.
+        worker_profile = resolve_executor("worker")
+        try:
+            worker_adapter = resolve_worker_adapter(worker_profile, claude_options=options)
+        except ValueError as e:
+            state.status = "stopped"
+            state.exit_reason = f"worker executor refused: {e}"
+            save_state(state_path, state)
+            local_console.print(f"[bold red]{state.exit_reason}[/bold red]")
+            return
+
+        # Config-gated recon (hexagonal seam, E1): runs ONLY when the operator
+        # pinned the recon role in [executors.recon]. Default runs add zero
+        # extra model calls. Findings are prepended to the Worker's first
+        # message; telemetry lands on state.last_recon (logged, never gated).
+        if "recon" in load_executor_config():
+            recon_question = (
+                "Reconnaissance before an autonomous coding run. Given this goal, "
+                "list concrete pitfalls, constraints, and context the implementer "
+                "should know. Be terse.\n\n" + state.goal
+            )
+            findings = await run_recon(recon_question, state=state)
+            save_state(state_path, state)
+            local_console.print(
+                f"[dim]recon: executor={findings.executor} model={findings.model_id} "
+                f"ok={findings.ok} in {findings.elapsed_ms}ms[/dim]"
+            )
+            if findings.ok and findings.findings.strip():
+                initial_message = (
+                    initial_message
+                    + "\n\n## Reconnaissance findings (read-only, advisory)\n"
+                    + findings.findings.strip()
+                )
+
         next_message = initial_message
         leg = 0
         transient_retries = 0
         while leg < _MAX_HANDOVER_LEGS:
             try:
-                async with ClaudeSDKClient(options=options) as client:
+                async with worker_adapter.open() as session:
                     while True:
                         if iteration_cap_hit(iteration=state.iteration, max_iterations=cfg.max_iterations):
                             state.status = "stopped"
@@ -776,7 +815,7 @@ async def run_orchestrator(cfg: OrchestratorConfig) -> None:
                         local_console.print(f"\n[bold cyan]=== iteration {state.iteration} ===[/bold cyan]")
 
                         chunks, usage = await _run_one_turn(
-                            client=client,
+                            session=session,
                             user_message=next_message,
                             state=state,
                             out_console=local_console,
@@ -1064,7 +1103,7 @@ async def run_orchestrator(cfg: OrchestratorConfig) -> None:
 
                         if decision.action == "handover":
                             seed = await _execute_handover(
-                                client=client,
+                                session=session,
                                 handover_prompt=decision.text,
                                 state=state,
                                 state_path=state_path,

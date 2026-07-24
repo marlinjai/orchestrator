@@ -262,7 +262,7 @@ async def test_orchestrator_marks_failed_on_sdk_error(cfg: OrchestratorConfig):
     class FakeError(RuntimeError):
         pass
 
-    with patch("orchestrator.orchestrator.ClaudeSDKClient") as mock_client_cls:
+    with patch("orchestrator.adapters.claude_worker.ClaudeSDKClient") as mock_client_cls:
         mock_client_cls.return_value.__aenter__.side_effect = FakeError("auth blew up")
         with pytest.raises(FakeError):
             await run_orchestrator(cfg)
@@ -369,7 +369,7 @@ async def test_tamper_trip_escalates_on_weakened_tests(tmp_path: Path):
     repo = _repo_with_test(tmp_path)
     cfg = _cfg_for_repo(tmp_path, repo)
 
-    def fake_turn(*, client, user_message, state, out_console=None):
+    def fake_turn(*, session, user_message, state, out_console=None):
         # The "Worker" guts the test to make a red suite green, then claims done.
         (repo / "tests" / "test_a.py").write_text("def test_a():\n    assert 1 == 1\n")
         return (["did the thing"], IterationUsage(iteration=state.iteration))
@@ -483,7 +483,7 @@ async def test_clean_pass_in_git_repo_completes(tmp_path: Path):
     repo = _repo_with_test(tmp_path)
     cfg = _cfg_for_repo(tmp_path, repo)
 
-    def fake_turn(*, client, user_message, state, out_console=None):
+    def fake_turn(*, session, user_message, state, out_console=None):
         # Touches a non-test file only; tests untouched.
         (repo / "feature.py").write_text("x = 1\n")
         return (["did the thing"], IterationUsage(iteration=state.iteration))
@@ -510,7 +510,7 @@ async def test_worktree_isolation_runs_in_worktree_original_untouched(tmp_path: 
     cfg.worktree_isolation = True
     wt = default_worktree_path(repo, cfg.task_id)
 
-    def adversary_turn(*, client, user_message, state, out_console=None):
+    def adversary_turn(*, session, user_message, state, out_console=None):
         # The Worker guts the test IN THE WORKTREE (its cwd), not the original.
         (wt / "tests" / "test_a.py").write_text("def test_a():\n    assert 1 == 1\n")
         return (["all green"], IterationUsage(iteration=state.iteration))
@@ -540,7 +540,7 @@ async def test_worktree_clean_completion_removes_worktree(tmp_path: Path):
     cfg.worktree_isolation = True
     wt = default_worktree_path(repo, cfg.task_id)
 
-    def good_turn(*, client, user_message, state, out_console=None):
+    def good_turn(*, session, user_message, state, out_console=None):
         (wt / "feature.py").write_text("x = 1\n")
         _git(["git", "add", "-A"], wt)
         _git(["git", "commit", "-q", "-m", "feat: add feature"], wt)
@@ -574,7 +574,7 @@ async def test_held_out_override_gates_and_escalates(tmp_path: Path):
     cfg = _cfg_for_repo(tmp_path, repo, verify="true")
     cfg.held_out_override = "false"  # held-out always fails
 
-    def noop_turn(*, client, user_message, state, out_console=None):
+    def noop_turn(*, session, user_message, state, out_console=None):
         return (["done"], IterationUsage(iteration=state.iteration))
 
     with patch("orchestrator.orchestrator._run_one_turn", side_effect=noop_turn), patch(
@@ -617,7 +617,7 @@ async def test_registry_held_out_cannot_be_weakened_by_override(tmp_path: Path):
     cfg.repos_config = repos_toml
     cfg.held_out_override = "false"  # would fail; must be IGNORED
 
-    def noop_turn(*, client, user_message, state, out_console=None):
+    def noop_turn(*, session, user_message, state, out_console=None):
         return (["done"], IterationUsage(iteration=state.iteration))
 
     with patch("orchestrator.orchestrator._run_one_turn", side_effect=noop_turn), patch(

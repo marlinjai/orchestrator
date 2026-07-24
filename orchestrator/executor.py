@@ -52,11 +52,21 @@ import urllib.error
 import urllib.request
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Callable, get_args
+from typing import Callable, Literal, get_args
 
 from orchestrator.worker import AuthMode
 
 logger = logging.getLogger(__name__)
+
+
+# The providers an executor profile may name. Explicit, validated at load:
+# provider is NEVER inferred from model-id string patterns (a "mercury-coder-2"
+# release or an Anthropic id-shape change must not silently reroute a role).
+Provider = Literal["anthropic", "inception"]
+
+# reasoning_effort values the Inception API accepts (OpenAPI spec). Only valid
+# with provider = "inception"; Anthropic profiles reject it at load.
+REASONING_EFFORTS: tuple[str, ...] = ("instant", "low", "medium", "high")
 
 
 # The default Claude model id. Every role resolves to this when no executor is
@@ -122,14 +132,16 @@ class ExecutorProfile:
     model_id: str
     auth_mode: AuthMode = "subscription"
     cost_ceiling_usd: float | None = None
+    provider: Provider = "anthropic"
+    reasoning_effort: str | None = None
 
     @property
     def is_claude(self) -> bool:
-        return self.model_id == CLAUDE_MODEL_ID
+        return self.provider == "anthropic" and self.model_id == CLAUDE_MODEL_ID
 
     @property
     def is_mercury(self) -> bool:
-        return self.model_id == MERCURY_MODEL_ID
+        return self.provider == "inception"
 
 
 def _claude_profile(role: str) -> ExecutorProfile:
@@ -160,11 +172,45 @@ def _coerce_profile(role: str, raw: dict) -> ExecutorProfile:
         if ceiling <= 0:
             ceiling = None
 
+    model_id = model_id.strip()
+
+    provider = raw.get("provider")
+    if provider is None:
+        # Explicit-provider rule: only the default Claude model may omit it.
+        # Anything else must name its provider so routing is never inferred
+        # from model-id string shapes.
+        if model_id != CLAUDE_MODEL_ID:
+            raise ValueError(
+                f"executor[{role}].provider is required for non-default model "
+                f"{model_id!r} (one of {get_args(Provider)}); provider is never "
+                "inferred from the model id"
+            )
+        provider = "anthropic"
+    if provider not in get_args(Provider):
+        raise ValueError(
+            f"executor[{role}].provider must be one of {get_args(Provider)}, got {provider!r}"
+        )
+
+    effort = raw.get("reasoning_effort")
+    if effort is not None:
+        if provider != "inception":
+            raise ValueError(
+                f"executor[{role}].reasoning_effort is an Inception-only knob; "
+                f"remove it for provider {provider!r}"
+            )
+        if effort not in REASONING_EFFORTS:
+            raise ValueError(
+                f"executor[{role}].reasoning_effort must be one of {REASONING_EFFORTS}, "
+                f"got {effort!r}"
+            )
+
     return ExecutorProfile(
         role=role,
-        model_id=model_id.strip(),
+        model_id=model_id,
         auth_mode=auth_mode,  # type: ignore[arg-type]
         cost_ceiling_usd=ceiling,
+        provider=provider,  # type: ignore[arg-type]
+        reasoning_effort=effort,
     )
 
 
@@ -384,6 +430,8 @@ def run_mercury_recon(
             {"role": "user", "content": question},
         ],
     }
+    if profile.reasoning_effort is not None:
+        request_body["reasoning_effort"] = profile.reasoning_effort
 
     start = time.monotonic()
     raw = forward(url, token, request_body)

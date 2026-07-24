@@ -41,7 +41,7 @@ async def test_run_recon_uses_mercury_when_configured(tmp_path, monkeypatch):
     """recon pinned to Mercury => the non-Claude transport runs, the key never
     touches this process, and telemetry records the mercury executor."""
     p = tmp_path / "config.toml"
-    p.write_text('[executors.recon]\nmodel_id = "mercury"\n')
+    p.write_text('[executors.recon]\nmodel_id = "mercury"\nprovider = "inception"\n')
     state = State(task_id="t", goal="g")
     monkeypatch.setenv("SECRETS_PROXY_TOKEN", "tok-xyz")
 
@@ -60,7 +60,7 @@ async def test_run_recon_mercury_failure_falls_back_to_claude(tmp_path, monkeypa
     """Mercury configured but the transport fails: FAIL LOUD into a Claude recon
     fallback, never a silent skip, never a blocked run."""
     p = tmp_path / "config.toml"
-    p.write_text('[executors.recon]\nmodel_id = "mercury"\n')
+    p.write_text('[executors.recon]\nmodel_id = "mercury"\nprovider = "inception"\n')
     state = State(task_id="t", goal="g")
     monkeypatch.setenv("SECRETS_PROXY_TOKEN", "tok")
 
