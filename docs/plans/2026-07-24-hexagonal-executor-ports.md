@@ -76,9 +76,23 @@ class ReconPort(Protocol):
 
 **E2: extract WorkerPort + `provider` field.** Move `TurnConfig`/`TurnResult` out of `worker.py`, wrap the SDK path as `ClaudeWorkerAdapter`, add `provider`/`reasoning_effort` to `ExecutorProfile`, route the loop through `resolve_adapter`. Golden test: same goal, seam off vs on, terminal `state.json` identical minus timestamps.
 
-**E3: unify telemetry + enforce cost ceiling.** Generalize `ReconRecord` to per-role `ExecutorRecord` (executor, provider, model_id, elapsed_ms, ok, ran_at) appended per turn. Wire `cost_ceiling_usd` to usage accounting or delete it. Logged, never gated (except the ceiling, which aborts loudly).
+**E3: unify telemetry + enforce cost ceiling + latency decomposition.** Generalize `ReconRecord` to per-role `ExecutorRecord` (executor, provider, model_id, elapsed_ms, ok, ran_at) appended per turn. Wire `cost_ceiling_usd` to usage accounting or delete it. Logged, never gated (except the ceiling, which aborts loudly).
+
+Each `ExecutorRecord` additionally carries a per-model-call latency decomposition, because an agentic turn is many short generations, not one long one, and each call pays time-to-first-token (TTFT):
+
+```
+calls: list[CallLatency]
+  ttft_ms          # request sent -> first token
+  generation_ms    # first token -> last token
+  tool_ms          # tool execution between this call and the next
+  output_tokens
+```
+
+Aggregates (`total_ttft_ms`, `total_generation_ms`, `total_tool_ms`, `call_count`) roll up onto the record so `time_to_verified_ms` can be decomposed into waiting vs generating vs tooling without reading per-call rows. The Claude SDK adapter fills what its stream exposes (best effort, `None` for unavailable fields); the OpenAI-compat adapter measures all three directly since it owns the HTTP calls.
 
 **E4: OpenAI-compatible worker adapter + the Mercury experiment.** Build `openai_compat_worker`, then race Claude vs Mercury on the same goals via the existing `--best-of` machinery with the held-out verifier, selection and comparison on `time_to_verified_ms`. Mercury becomes an allowed worker default only on a measured win. Needs its own goal file.
+
+TTFT is a first-class experiment dimension. Mercury's headline ~1,000 tok/s comes with ~4s TTFT at default `reasoning_effort: medium`; in a tool loop of 30-60 short calls per turn, TTFT can dominate wall-clock and erase the throughput win. The Mercury cohort therefore runs with per-step effort tuning (`instant`/`low` for mechanical steps, `high` where the plan flags a hard step; also evaluate the API's `realtime` flag), and the E3 decomposition tells us whether time is lost waiting, generating, or tooling. Decision rule: if `total_ttft_ms` dominates the Mercury cohort and Inception's own knobs cannot close it, that is the trigger to consider a low-TTFT alternative model, added as one more `(role, provider)` adapter entry, never an architecture change.
 
 ## Non-goals
 
