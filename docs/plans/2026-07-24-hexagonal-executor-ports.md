@@ -101,6 +101,12 @@ TTFT is a first-class experiment dimension. Mercury's headline ~1,000 tok/s come
 - No change to Marlin Proxy / Decision Proxy (judge invariant).
 - `mercury-edit-2` (FIM/edit endpoints, no tool calling) is out of scope; if ever used it would be a tool *inside* a worker, not an executor.
 
+## Reality update (2026-07-24)
+
+E1 + E2 implemented and shipped on PR #14 (branch `plan/hexagonal-executor-ports`): `ports.py`, `adapters/claude_worker.py`, explicit `provider` + `reasoning_effort` on `ExecutorProfile`, config-gated recon wiring. 461 tests green, ruff clean. SKILL.md + ROADMAP updated in the same PR. E3 and E4 remain open.
+
+Downstream consumers of this seam (recorded here because the knowledge-base backlog is not available on hermes): the autonomous-orchestration skill on the MacBook (picks everything up via git pull; needs its own `~/.config/orchestrator/config.toml` entries and Tailscale reach to the secrets proxy), and the Lumitra Agentic OS Platform (`~/workspace/lumitra/agentic-os-platform`), whose open milestone **M9 "Mercury sprint worker" IS this plan's E4** (design doc `docs/plans/2026-07-17-agentic-os-saas-design.md`, M9 row). M9 is therefore blocked on: (1) PR #14 review + merge, (2) E3 telemetry, (3) E4 adapter + experiment, (4) the INCEPTION_API_KEY scaffold in Infisical `/providers` (placeholder flow).
+
 ## Verification
 
 - Existing suite green after E2 with no operator config; golden `state.json` invariance test.
