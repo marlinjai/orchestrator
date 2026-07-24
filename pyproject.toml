@@ -27,7 +27,12 @@ dependencies = [
 dev = [
     "pytest>=8.0",
     "pytest-asyncio>=0.23",
-    "ruff>=0.5",
+    # Pinned below 0.16: CI installs fresh (no lockfile), and an unpinned ruff
+    # made the gate nondeterministic when 0.16 enabled TRY004 on existing code
+    # (config.py "must be a table" ValueErrors). The TRY004 modernization is a
+    # deliberate refactor (registry fail-loud paths catch ValueError
+    # specifically), tracked for its own PR, not a lint-chore rider.
+    "ruff>=0.15,<0.16",
 ]
 
 [project.scripts]
