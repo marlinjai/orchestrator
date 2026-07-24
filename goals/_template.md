@@ -26,6 +26,17 @@ Whatever the spec's "Definition of done" section lists. Plus, always:
 - Spec frontmatter `status: draft` becomes `status: done` (if there is a spec)
 - Any shared-index row (STATUS.md, ROADMAP.md, etc.) updated using the existing column format exactly. Do not add columns, do not reformat the table, do not add suffixes.
 - Single commit on this branch with a conventional-commit message describing the WHY
+- If the slice touches a MULTI-STEP STATEFUL FLOW (wizard, minting, checkout,
+  review loop): tests MUST cover the revision paths, not just forward
+  progression: (a) backtrack and change an earlier choice, asserting every
+  piece of derived downstream state invalidates (and that keeping the same
+  choice preserves it); (b) resume-from-persistence, asserting a persisted
+  derived artifact whose source key no longer matches is discarded, not
+  reattached; (c) clean re-entry after completion or failure. Rationale and
+  the canonical prod bug this prevents:
+  knowledge-base/standards/stateful-flow-testing.md (found live 2026-07-24:
+  a re-rolled seed left a stale turnaround run attached because nothing
+  keyed the run to its source).
 
 ## Constraints
 
