@@ -16,12 +16,24 @@ the trade-off record `docs/internal/fga-authoritative-tradeoffs.html`.
 
 ## Current state (verified 2026-07-27)
 
-- `packages/app/src/lib/openfga/schema.json` is a FLAT model, schema 1.1:
-  - `tenant_group`: parent, owner, admin, member
-  - `tenant`: group, owner, admin, billing_admin, member
-  - `workspace`: tenant, admin, member, viewer
-  - `platform`: admin, auditor
-  There are NO userset rewrites, so no role inherits anything today.
+- `packages/app/src/lib/openfga/schema.json` (schema 1.1) ALREADY contains
+  userset rewrites. An earlier draft of this goal wrongly called it flat; that
+  was an operator error from listing relation names without their definitions.
+  The ACTUAL current definitions are:
+  - `tenant_group.parent`, `tenant_group.owner`: direct only
+  - `tenant_group.admin` = this OR owner OR (parent's admin)
+  - `tenant_group.member` = this OR admin
+  - `tenant.group`, `tenant.owner`: direct only
+  - `tenant.admin` = this OR owner OR (group's admin)
+  - `tenant.billing_admin` = this OR owner
+  - `tenant.member` = this OR admin
+  - `workspace.tenant`: direct only
+  - `workspace.admin` = this OR (tenant's OWNER)
+  - `workspace.member` = this OR admin OR (tenant's MEMBER)
+  - `workspace.viewer` = this OR member
+  - `platform.admin`: direct only; `platform.auditor` = this OR admin
+  Verify this yourself before changing anything; do not trust this summary
+  blindly.
 - Tuple writes are ASYNC: mutations call `enqueueOutboxEvent(tx, {...})`
   (`packages/app/src/lib/outbox.ts`) and `packages/app/src/lib/openfga/sync-worker.ts`
   (consumer `openfga-sync`) drains them into `writeAndDeleteTuples`
@@ -74,19 +86,45 @@ run is report-only, because a silent auto-heal can paper over a write-path bug.
 
 ## Part 3: inheritance in the FGA MODEL
 
-Encode decision 1 as userset rewrites in `schema.json`, then make `push.ts`
-publish the new model version:
+The model is PARTLY there already, so this part is a set of precise DELTAS
+against the definitions listed above, not a from-scratch encoding. Reconcile
+`schema.json` to decision 1, then make `push.ts` publish the new model version.
 
-- `tenant_group.owner` -> effective `owner` on child `tenant`s;
-  `tenant_group.admin` -> effective `admin` on child `tenant`s. (The `tenant`
-  type already has a `group` relation to hang this on.)
-- `tenant.owner` / `tenant.admin` -> effective `admin` on that tenant's
-  `workspace`s (workspaces have no owner tier). The `workspace` type already has
-  a `tenant` relation.
-- `member` NEVER cascades at any tier. `billing_admin` NEVER cascades
-  (tenant-only semantics). `viewer` does not cascade.
-- Direct role wins if higher; inheritance must never LOWER an explicit direct
-  role.
+**Delta 1 (a live over-grant, fix this first).** `workspace.member` currently
+includes `(tenant's member)`. That is a downward cascade of plain `member`,
+which decision 1 explicitly forbids: "a cascading `member` would silently make
+every org member a member of every company and workspace beneath, which is
+wrong... being in a company or workspace always requires a direct membership
+there." Today every company member is automatically a member of EVERY workspace
+in that company. Remove the `tenant's member` arm from `workspace.member`.
+Keep `this OR admin` (a workspace admin is still a member of that same
+workspace: that is role hierarchy WITHIN one scope, not a cascade across tiers).
+
+Removing this narrows real access, so it may drop people out of workspaces they
+currently reach implicitly. Before/after, produce a count (and, if cheap, a
+list) of (user, workspace) pairs that lose access, so the operator can seed
+direct memberships where they were actually intended. Report it in your final
+message. Do NOT auto-create those memberships.
+
+**Delta 2.** `workspace.admin` currently inherits only from the tenant's OWNER.
+Decision 1 says company `owner` AND `admin` both become effective `admin` on the
+company's workspaces. Add the tenant's `admin` arm.
+
+**Delta 3.** `tenant.owner` is direct-only, so an org owner currently becomes
+tenant ADMIN (via `tenant.admin` <- group's admin <- group owner) but never
+tenant OWNER. Decision 1 says org `owner` -> effective `owner` on child
+companies. Add that arm to `tenant.owner`.
+
+**Leave alone, and say why in a comment:** `tenant.member = this OR admin`,
+`tenant_group.member = this OR admin`, `workspace.viewer = this OR member`,
+`tenant.billing_admin = this OR owner`, `platform.auditor = this OR admin`.
+These are same-scope role hierarchies (a higher role at a scope implies the
+lower one AT THAT SAME SCOPE), not cross-tier cascades, so decision 1's
+"member never cascades" rule does not touch them. `billing_admin` must not gain
+any cross-tier arm.
+
+Invariant to preserve throughout: direct role wins if higher; inheritance must
+never LOWER an explicit direct role.
 
 Model migration safety: uploading a new authorization model creates a new model
 id. Make sure the client resolves the model id the same way after the change
@@ -133,7 +171,11 @@ not sufficient. Cover:
 3. Direct-wins: a direct role higher than the inherited one survives; a direct
    role LOWER than the inherited one does not lower the effective role.
 4. Never-cascade: `member` and `billing_admin` at a parent produce NO effective
-   role on children, at every tier.
+   role on children, at every tier. Specifically assert the Delta 1 regression:
+   a plain company `member` gets NO access to a workspace in that company
+   without a direct workspace membership. Also assert the same-scope hierarchies
+   that must SURVIVE (a workspace admin is still a workspace member; a tenant
+   admin is still a tenant member).
 5. Dual-write failure: a simulated FGA failure fails the request loudly and does
    not leave an over-grant in Postgres.
 6. Reconciliation: a deliberately-introduced divergence is detected and reported.
