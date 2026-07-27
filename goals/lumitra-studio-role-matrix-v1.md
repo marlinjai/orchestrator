@@ -22,11 +22,22 @@ role-differentiated actions. The matrix below is the binding target from
 | Mint / revoke company API keys | `owner` / `admin` | Machine credentials (already LIVE) |
 | Billing, credits, spend | `billing_admin` + `owner` | Arrives with the billing slice |
 
-**Read tier note:** a tenant-level `viewer` role does NOT exist yet (pre-launch
-gate item 10, still a product call pending with Marlin). Build the matrix
-WITHOUT a viewer tier: read actions require `member`. Leave the viewer row
-clearly marked as planned in the code's matrix declaration so adding it later is
-a one-line change. Do NOT invent a viewer role.
+**Read tier note (DECIDED 2026-07-27):** Marlin approved the tenant-level
+`viewer` role, so pre-launch gate item 10 is settled: viewer is WANTED.
+
+However, the role must exist in auth-brain before Studio can gate on it
+(`TenantRole` currently unions `owner|admin|billing_admin|member`; only
+`workspace` has a `viewer`). Sequencing:
+
+- If the auth-brain tenant-level `viewer` role has ALREADY shipped when you run,
+  wire the read tier to `viewer` as the matrix says.
+- If it has NOT, build the matrix with the read tier gated at `member`, but
+  declare the viewer row in the policy module as a first-class entry marked
+  pending, so switching it on is a one-line change and not a re-design.
+
+Either way: do NOT invent a viewer role locally in Studio, and do NOT
+special-case it in scattered call sites. The policy module is the only place
+that knows which role satisfies the read tier.
 
 ## Where the roles come from
 
