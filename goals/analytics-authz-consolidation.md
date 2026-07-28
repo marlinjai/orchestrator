@@ -15,10 +15,18 @@ the verify payload and nothing else. OpenFGA stays auth-brain's internal engine,
 plus the platform-admin gate and future sharing graphs. No app talks to FGA
 directly.
 
-By the time this slice runs, the verify payload delivers EFFECTIVE roles
-(inheritance evaluated in the FGA model inside auth-brain) with a
-direct-vs-inherited marker, which is what makes this consolidation possible
-without losing semantics.
+The verify payload NOW delivers EFFECTIVE roles (inheritance evaluated in the
+FGA model inside auth-brain) with a direct-vs-inherited marker, which is what
+makes this consolidation possible without losing semantics. Shipped in
+auth-brain#69 and LIVE since 2026-07-28.
+
+**Dependency bump comes first.** This repo pins `@marlinjai/auth-brain-shared`
+`^1.0.0` and `@marlinjai/auth-brain-sdk` `^1.1.0`, which predate the field
+entirely. The published versions carrying `effective_roles` are shared **1.5.0**
+and sdk **1.4.0**. Bump both before writing any code against the new shape, and
+COMMIT the updated lockfile (a Worker forgetting the lockfile on a dependency
+bump is a known recurring failure here). Verify the installed version actually
+exposes `effective_roles` rather than assuming the range resolved.
 
 ## What to change
 

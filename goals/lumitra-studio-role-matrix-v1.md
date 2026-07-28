@@ -2,7 +2,7 @@
 task: lumitra-studio-role-matrix-v1
 spec: auth-brain docs/internal/authorization-overview.html section 05 + docs/plans/2026-07-24-authz-hardening.md decision 3
 depends_on: [auth-brain-bsync-inheritance-v2]
-verify: pnpm build && pnpm typecheck && pnpm lint && pnpm test
+verify: pnpm lint && pnpm build
 verify_fix_cap: 2
 verify_timeout_s: 1800
 ---
@@ -22,22 +22,27 @@ role-differentiated actions. The matrix below is the binding target from
 | Mint / revoke company API keys | `owner` / `admin` | Machine credentials (already LIVE) |
 | Billing, credits, spend | `billing_admin` + `owner` | Arrives with the billing slice |
 
-**Read tier note (DECIDED 2026-07-27):** Marlin approved the tenant-level
-`viewer` role, so pre-launch gate item 10 is settled: viewer is WANTED.
+**Read tier (SETTLED, and the role now EXISTS):** Marlin approved the
+tenant-level `viewer` role on 2026-07-27 (gate item 10), it shipped in
+auth-brain#73, and it is LIVE in the production FGA model as of 2026-07-28.
+So wire the read tier to `viewer` directly, as the matrix says. There is no
+placeholder branch to build any more.
 
-However, the role must exist in auth-brain before Studio can gate on it
-(`TenantRole` currently unions `owner|admin|billing_admin|member`; only
-`workspace` has a `viewer`). Sequencing:
+What `viewer` means, so you gate on it correctly:
+- It is the LOWEST rung on the company ladder and is READ-ONLY.
+- `tenant.viewer = this OR member`, a SAME-SCOPE hierarchy: every
+  member/admin/owner of a company is also a viewer of it. So a viewer-or-above
+  check passes for all four roles, while a member-or-above check must FAIL for a
+  plain viewer.
+- It does NOT cascade across tiers: a company viewer gets nothing on the
+  workspaces beneath it.
 
-- If the auth-brain tenant-level `viewer` role has ALREADY shipped when you run,
-  wire the read tier to `viewer` as the matrix says.
-- If it has NOT, build the matrix with the read tier gated at `member`, but
-  declare the viewer row in the policy module as a first-class entry marked
-  pending, so switching it on is a one-line change and not a re-design.
-
-Either way: do NOT invent a viewer role locally in Studio, and do NOT
-special-case it in scattered call sites. The policy module is the only place
-that knows which role satisfies the read tier.
+Do NOT invent a viewer role locally in Studio and do NOT special-case it in
+scattered call sites. The policy module is the only place that knows which role
+satisfies the read tier. Confirm the installed `@marlinjai/auth-brain-shared`
+actually exposes the tenant `viewer` role before relying on it (published as
+**1.6.0**; this repo pins something far older, so bump it and COMMIT the
+lockfile).
 
 ## Where the roles come from
 
@@ -80,9 +85,27 @@ effective roles before relying on them; if it does not, say so and stop.
   workspace access (the B slice removes that cascade; assert Studio agrees).
 - Fail-closed: unknown/absent role, missing grant, or a verify failure denies.
 
+## Verification reality in THIS repo (read before you rely on a green gate)
+
+lumitra-studio has **no CI verify workflow**. `.github/workflows/` contains only
+`deploy.yml`, which builds and pushes an image. There is NO automated gate on a
+pull request here, so whatever you run locally is the ONLY verification this
+change will ever get. Treat that as a reason for more care, not less.
+
+`pnpm test` in this repo is wrapped in `infisical run` (it needs injected env),
+so it may not run in your environment. The goal's `verify` line is therefore
+lint + build, which always runs. You must ALSO:
+
+- run `pnpm test` if it works in your environment, and say plainly in your final
+  message whether it ran and what the result was;
+- if it cannot run, say so explicitly rather than implying the suite passed. Do
+  NOT report a green build as though it were a green test suite.
+
+Write the new tests regardless, so the operator can run them.
+
 ## Definition of done
 
-- Verify chain (mirroring CI: build, typecheck, lint, test) exits 0.
+- `pnpm lint` and `pnpm build` exit 0.
 - The action inventory from step 1 is in your final message, with each entry
   mapped to its matrix row.
 - No direct OpenFGA calls added to Studio.
