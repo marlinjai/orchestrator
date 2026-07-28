@@ -1,5 +1,11 @@
 # HANDOVER: Lumitra platform program, remaining work (fresh session, agent teams)
 
+> **PROGRAM COMPLETE 2026-07-28.** Every engineering item on the pre-launch gate is closed (items 1-7, 9-11); item 8 is built and waits only on the lawyer review. Workstreams A, B, C1 and C2 all shipped, deployed and live-verified. Beyond the original scope this wave also shipped the company-move machine API, two reconciliation safety fixes, and the B-sync delete half, and restructured the orgs so `marlinjai` is the umbrella.
+>
+> **Three defects were found that a green CI run could not have caught**, all by post-deploy verification against live systems: workspace-scoped keys could never pass the storage grant door (lola prod storage would have died on its next redeploy); `reconcile --heal` would have deleted the platform-admin tuple and locked the admin console; and shipping the FGA model changed nothing until the manual env flip, so a live over-grant survived the merge. If you take one habit from this program, take that one.
+>
+> **Open, and all human calls:** delete the 361 orphaned `kie-input` files (review page built, evidence conclusive); the lawyer review of erasure/retention; and the three analytics multi-company design decisions in `goals/HANDOVER-analytics-multi-company.md`, which is the successor document to this one.
+
 > **STATUS UPDATE 2026-07-27, session 2.** Workstream A is DONE except one decision for Marlin. Workstream B is in flight. C1/C2 goal files are written and ready to dispatch once B merges. Read this block before the original text below, which is now partly historical.
 >
 > **Shipped + deployed + live-verified:** storage-brain#21 (signed-url rate-limit bucketing; ~6% of live requests were 429ing), auth-brain#68 (workspace-scoped keys inherit their company's app_grants), storage-brain#22 (S2 execution record). The `storage` app grant was seeded for the lola-stories company. lola prod's storage key now returns 200 -> tenant lola-stories, where it had been 403ing.
