@@ -1,3 +1,10 @@
+---
+type: handover
+date: 2026-07-28
+summary: Make Analytics a proper multi-company citizen. SSO already exists; the active-scope switcher is half-built in auth-brain (setActiveContext has zero callers). Blocked on three design decisions from Marlin.
+tags: [analytics, auth-brain, multi-company, scope-switcher]
+---
+
 # HANDOVER: make Analytics a proper multi-company citizen (SSO is done; the switcher is half-built)
 
 You are the OPERATOR (Claude Code, `autonomous-orchestration` skill, agent teams).

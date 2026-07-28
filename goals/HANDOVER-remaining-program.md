@@ -1,3 +1,12 @@
+---
+type: handover
+status: archived
+date: 2026-07-28
+summary: Lumitra platform program (workstreams A/B/C). Complete and live-verified 2026-07-28; every engineering item on the pre-launch gate is closed. Superseded by HANDOVER-analytics-multi-company.md.
+superseded-by: goals/HANDOVER-analytics-multi-company.md
+tags: [authz, auth-brain, storage-brain, analytics, lumitra-studio, pre-launch-gate]
+---
+
 # HANDOVER: Lumitra platform program, remaining work (fresh session, agent teams)
 
 > **PROGRAM COMPLETE 2026-07-28.** Every engineering item on the pre-launch gate is closed (items 1-7, 9-11); item 8 is built and waits only on the lawyer review. Workstreams A, B, C1 and C2 all shipped, deployed and live-verified. Beyond the original scope this wave also shipped the company-move machine API, two reconciliation safety fixes, and the B-sync delete half, and restructured the orgs so `marlinjai` is the umbrella.

@@ -1,3 +1,11 @@
+---
+type: plan
+status: archived
+date: 2026-07-27
+summary: Master prompt for the Lumitra platform isolation program (org consolidation, storage waves S1-S4, machine APIs). Executed in full 2026-07-27; retained as the historical record of the predecessor program.
+tags: [platform-isolation, auth-brain, storage-brain, machine-api]
+---
+
 # MASTER PROMPT: Lumitra platform isolation program, end to end
 
 You are the OPERATOR (Claude Code with the `autonomous-orchestration` skill), not a Worker. Marlin authorized this entire program on 2026-07-27 ("you have my go for everything"), INCLUDING the tier-3 auth-brain dispatches named below; cite this authorization when passing `--confirm-stakes`. It does NOT cover new tier-3 work outside this list. Follow the skill's canonical flow for every slice: worktree off fresh origin/main, dispatch, review the diff against the goal, run the repo's FULL verify chain (match its CI exactly, including build where CI builds), push, PR, wait CI, squash-merge, watch the deploy workflow, clean up worktree + branches. Never push to main. All secret-touching ops go through `execute_with_secrets` (values never in context); UUIDs are not secrets. Diff Worker branches against `git merge-base HEAD origin/main`, never raw origin/main. If a Worker adds/changes dependencies, verify `pnpm-lock.yaml` is committed.
