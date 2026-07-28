@@ -42,7 +42,56 @@ the trade-off record `docs/internal/fga-authoritative-tradeoffs.html`.
   `tenant.created`, `tenant_membership.granted|revoked`, `workspace.created`,
   `workspace.moved`, `workspace_membership.granted|revoked`,
   `service_account.role_granted|revoked`, and the three `*.deleted` kinds.
-- The model is uploaded by `packages/app/src/lib/openfga/push.ts`.
+- The model is uploaded by `packages/app/src/lib/openfga/push.ts`, run manually
+  as `pnpm --filter @auth-brain/app openfga:push`. **There is no automated model
+  migration**: pushing prints a new model id, and adopting it requires an
+  operator edit to `OPENFGA_AUTHORIZATION_MODEL_ID` in Infisical. Do not try to
+  automate that in this slice; DO state clearly in your final message what the
+  operator must push and set.
+- The atomic tuple primitive already exists:
+  `packages/app/src/lib/openfga/client.ts:45` `writeAndDeleteTuples(writes,
+  deletes)` performs ONE OpenFGA transaction. A synchronous dual write should
+  call this rather than `writeTuples` + `deleteTuples` separately.
+- `packages/app/src/lib/env.ts` marks every `OPENFGA_*` var `.optional()`, so
+  the app currently boots healthy with FGA unconfigured. A fail-loud synchronous
+  write path has to decide what happens when FGA is not configured at all.
+  Choose deliberately (refuse to start, or fail the mutation loudly) and say
+  which; silently skipping the tuple write is NOT acceptable.
+
+## A PRE-EXISTING BUG THAT WOULD SILENTLY DEFEAT THIS ENTIRE SLICE
+
+Fix this as Part 0, before the cascade work, because without it the cascades do
+nothing for a whole class of orgs.
+
+Two provisioning paths diverged. `packages/app/src/lib/flows/provision.ts` (the
+signup path) emits the STRUCTURAL events `tenant_group.created`,
+`tenant.created`, `workspace.created`. Those are the only events whose
+sync-worker cases write the structural PARENT tuples
+(`tenant_group:G group tenant:T`, `tenant:T tenant workspace:W`).
+
+`packages/app/src/lib/flows/provisioning.ts` (the admin-console AND machine-API
+path: `provisionOrganization` :50, `provisionTenant` :130, `provisionWorkspace`
+:161) emits only `*_membership.granted` plus `organization.provisioned` /
+`tenant.provisioned` / `workspace.provisioned` — event kinds the sync-worker's
+`tuplesFor` switch does not handle at all.
+
+Consequence: every org, company and workspace created through the admin console
+or the machine API has NO parent edge in the FGA graph. Inheritance walks those
+edges, so all three Deltas below would silently do nothing for exactly the orgs
+Marlin creates operationally. Verified 2026-07-27 by diffing the two files.
+
+Required: make the `provisioning.ts` path establish the same structural parent
+tuples as the signup path (either by emitting the same structural events or, in
+the new synchronous world, by writing the parent tuples directly). Note
+`packages/app/src/lib/flows/provisioning.spec.ts:82-88` asserts
+`toEqual([...exactly 3 membership events])`, which locks the gap in; that
+assertion must change deliberately, and the change must be an addition of the
+missing structural coverage, not a deletion of the assertion.
+
+BACKFILL: existing orgs already created through that path are missing their
+parent tuples in production. Report how many and provide (or describe) a
+one-shot backfill the operator can run. Do NOT run any production backfill
+yourself.
 
 ## Part 1: synchronous dual writes (B-sync)
 
@@ -76,10 +125,23 @@ Requirements:
 ## Part 2: reconciliation job
 
 A job that diffs Postgres membership/grant state against FGA tuples and reports
-mismatches LOUDLY. Reuse the alerting channel this repo already uses (find it;
-do not invent a new one). Runnable on a schedule (the deploy runs an
-`auth-brain-worker` container; wire it the same way the existing workers are
-wired) and also runnable on demand. It must report, per mismatch: scope type,
+mismatches LOUDLY.
+
+**There is no existing ops alerting channel in this repo** (no Telegram, Slack,
+webhook-to-ops or PagerDuty; everything else is `console.error`, and the erasure
+webhook machinery fans out to consuming APPS, not operators, so it is a misfit
+here). Do not invent a new external integration in this slice. Wire the job as a
+THIRD loop in `packages/app/src/workers/outbox-sync.ts` alongside the existing
+`runSyncWorker` and `runErasureWorker` — that matches the established pattern
+and needs no new container or Coolify manifest — and persist findings so they
+can be surfaced in the admin console the way the erasure page surfaces its
+flag. Also make it runnable on demand.
+
+Note the structural-tuple no-ops at `sync-worker.ts:95`
+(`tenant_group.deleted` / `tenant.deleted` / `workspace.deleted`) defer cleanup
+to "a periodic GC job" that does not exist; the reconciliation job is the
+natural home for that delete half. Include it if it fits cleanly, otherwise say
+why not. It must report, per mismatch: scope type,
 scope id, subject id, role, and which side is missing. It must NOT auto-heal
 silently by default: healing may exist behind an explicit flag, but the default
 run is report-only, because a silent auto-heal can paper over a write-path bug.
@@ -100,11 +162,14 @@ in that company. Remove the `tenant's member` arm from `workspace.member`.
 Keep `this OR admin` (a workspace admin is still a member of that same
 workspace: that is role hierarchy WITHIN one scope, not a cascade across tiers).
 
-Removing this narrows real access, so it may drop people out of workspaces they
-currently reach implicitly. Before/after, produce a count (and, if cheap, a
-list) of (user, workspace) pairs that lose access, so the operator can seed
-direct memberships where they were actually intended. Report it in your final
-message. Do NOT auto-create those memberships.
+Removing this narrows real access. The operator ALREADY MEASURED the blast
+radius against the production auth-brain database on 2026-07-27: **zero users
+lose access**. There are only 7 live `tenant_memberships` in all of production
+and every one has role `owner`; no plain `member` company membership exists yet,
+so the cascade currently grants nothing to nobody. It is a latent over-grant
+that would bite the moment the first real company member is onboarded, which is
+precisely what this pre-launch gate guards. Removal is safe now. Re-derive that
+count yourself in a test fixture if useful, but do not query production.
 
 **Delta 2.** `workspace.admin` currently inherits only from the tenant's OWNER.
 Decision 1 says company `owner` AND `admin` both become effective `admin` on the
@@ -180,6 +245,27 @@ not sufficient. Cover:
    not leave an over-grant in Postgres.
 6. Reconciliation: a deliberately-introduced divergence is detected and reported.
 
+7. Structural parents (Part 0): an org/company/workspace created through the
+   `provisioning.ts` path gets the same parent edges as one created through the
+   signup path, and a cascade actually reaches it. Without this test the Part 0
+   fix can silently regress.
+
+Test infrastructure facts (verified, use them rather than rediscovering):
+integration suites start their OWN containers via Testcontainers rather than
+using docker-compose service names. Postgres:
+`new PostgreSqlContainer('postgres:16-alpine')` + `runMigrations`. For a REAL
+OpenFGA model test, copy the pattern in
+`packages/app/tests/integration/service-account-openfga.spec.ts:47-67`, which
+spins up `openfga/openfga`, creates a store, pushes `schema.json` via
+`writeAuthorizationModel` and points `process.env.OPENFGA_*` at it. That file is
+the template for every inheritance test that must exercise the real model rather
+than the in-memory `Set` mock used by `admin-memberships.spec.ts` and
+`sync-worker.spec.ts`. Inheritance MUST be proven against the real model: a
+mocked tuple store cannot evaluate userset rewrites at all.
+
+The one existing revision-path test to model yours on is
+`ownership-transfer.spec.ts:238` (`'revision: A -> B then B -> A'`).
+
 Also add at least one test that exercises the REAL schema/wire boundary rather
 than a mock (the repo already has `verify-wire-contract.spec.ts`; extend it).
 Mock-only coverage is exactly how the workspace-grant bug shipped: real
@@ -193,9 +279,19 @@ tests mocked one that did.
   `docker compose up -d postgres openfga`) passes; run it if docker is available,
   and say explicitly in your final message if it was not.
 - All six test groups above exist and pass.
-- Your final message states: the dual-write guarantee you implemented, how the
-  new FGA model version is adopted at deploy, and whether the shared/SDK wire
-  shape changed (the operator publishes the bumps and updates consumers).
+- Your final message states: the dual-write guarantee you implemented; what the
+  operator must do to adopt the new FGA model (push command + the
+  `OPENFGA_AUTHORIZATION_MODEL_ID` value to set in Infisical); the Part 0
+  backfill scope (how many existing orgs lack parent tuples) and how to run it;
+  what happens on a mutation when FGA is unconfigured; and whether the
+  shared/SDK wire shape changed.
+- Shared/SDK context: `@marlinjai/auth-brain-shared` is at 1.4.0 and
+  `@marlinjai/auth-brain-sdk` at 1.3.0, both published MANUALLY via the root
+  `publish:shared` / `publish:sdk` scripts. Adding direct-vs-inherited markers
+  is additive, so 1.5.0. Do NOT publish; the operator does that. Be aware
+  consumers are far behind (lumitra-studio pins shared `^1.0.1`,
+  analytics-platform `^1.0.0`), so keep the change additive and backward
+  compatible or the operator has a fleet-wide bump to sequence.
 
 ## Constraints
 
