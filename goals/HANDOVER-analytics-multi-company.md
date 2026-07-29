@@ -1,159 +1,319 @@
 ---
 type: handover
-date: 2026-07-28
-summary: Make Analytics a proper multi-company citizen. SSO already exists; the active-scope switcher is half-built in auth-brain (setActiveContext has zero callers). Blocked on three design decisions from Marlin.
+date: 2026-07-29
+status: archived
+summary: "EXECUTED 2026-07-29. Analytics is a multi-company citizen: projects belong to companies, the active company is a hard boundary. All slices shipped, deployed and verified live. Kept for the reasoning; do NOT re-execute."
 tags: [analytics, auth-brain, multi-company, scope-switcher]
 ---
 
-# HANDOVER: make Analytics a proper multi-company citizen (SSO is done; the switcher is half-built)
+# ARCHIVED: fully executed 2026-07-29. Do not re-run.
+
+Everything below shipped, deployed and was verified in production on 2026-07-29.
+It is kept because the DECISIONS and their rationale are still the reference; the
+instructions are not. A future session must not dispatch from this file.
+
+## Outcome
+
+| Slice | Result |
+|---|---|
+| S1 active scope as a fail-closed boundary | auth-brain #76 |
+| S2 projects belong to companies | analytics #39 |
+| S3 switcher + hard boundary | analytics #41 |
+| S4 delete the two vestigial workspaces | ops, soft-deleted, reconcile clean |
+| S5 real `platform_admins` table | auth-brain #77 |
+
+Four more PRs came out of review and live use, none of them in the original plan:
+analytics #40 (GDPR erasure repointed from `workspace_ids` to `company_id`, which
+had to land BEFORE S4 or erasure would have silently become a no-op), auth-brain
+#78 (the platform-admin seed was not actually idempotent), auth-brain #79 + #80
+(SDK `invalidateSession`, 1.6.1), analytics #42 (the switcher snapped back because
+a 30s verify cache served pre-switch state).
+
+## Three things this document asserted that were FALSE
+
+Recorded so the next handover author is more careful, and because each cost real
+planning time:
+
+1. **"The switcher endpoint is missing, `setActiveContext` has zero callers."**
+   It shipped in PR #3. It was also wrong in a way nobody had noticed: it
+   validated DIRECT membership only, so after inheritance landed (#69) an org
+   owner with inherited rights got a false 403 on a company they controlled.
+2. **"Copy `lumitra-studio/src/lib/auth/roleMatrix.ts`."** That file does not
+   exist. The real pattern is `permissions.ts` + `can.ts` + `scope.ts`, and Studio
+   returns 404 (not 403) for a foreign resource to avoid existence leaks.
+3. **Unstated:** auth-brain serves no CORS and its CSRF cookie is host-only, so
+   analytics can never call the switch endpoint from the browser. S3 had to proxy
+   server-to-server, and S1 had to NOT gain a body CSRF token.
+
+## Two follow-ups this document did not know it needed
+
+- A config/data divergence: the `analytics` app grant sat on the Lumitra company
+  while the projects belonged to Lola Stories, so after the boundary shipped the
+  only offered company owned zero projects. Fixed by granting analytics to Lola
+  Stories and revoking it from Lumitra.
+- The deferred `projects.workspace_id` drop and the API 307-vs-401 fix landed in
+  analytics #43; the publish guard that would have caught the broken sdk 1.6.0
+  landed in auth-brain #81.
+
+---
+
+# Original handover follows (historical)
+
+# HANDOVER: Analytics multi-company, DECIDED and ready to execute
 
 You are the OPERATOR (Claude Code, `autonomous-orchestration` skill, agent teams).
-Written 2026-07-28 by the session that shipped the B-sync authz wave. Read the
-memory files `authz-decisions-prelaunch-gate.md` and
-`reference_authz_bsync_live.md` first.
+Written 2026-07-29 by the session that shipped the B-sync authz wave.
 
-## Read this before planning: three assumptions that are WRONG
+**Marlin has authorised this whole chain to run end to end, unattended, including
+the tier-3 auth-brain dispatches.** Cite this document when passing
+`--confirm-stakes`. New tier-3 work OUTSIDE this chain still needs its own go.
 
-1. **"Analytics needs SSO like Studio."** It already has it.
-   `packages/dashboard/src/middleware.ts:17-18` redirects unauthenticated page
-   navigations to `${AUTH_BRAIN_URL}/login`, exactly like Studio's
-   `src/middleware.ts`. Both ride the shared `lumitra_session` cookie. There is
-   also a `/request-access` page for the app-grant door. **Do not rebuild auth.**
+**Do this first:** read the memory files `authz-decisions-prelaunch-gate.md` and
+`reference_authz_bsync_live.md`, then PLAN the whole chain before writing code.
+The slices below are dependency-ordered for a reason.
 
-2. **"Copy Studio's company switcher."** Studio does NOT have one. Its
-   middleware gates on membership of a single Studio workspace. Neither app has
-   a scope switcher, so this is the FIRST one and it should be built at the
-   platform level, not twice in two apps.
+---
 
-3. **"Analytics still talks to OpenFGA."** Almost gone. `openfga-direct.ts` was
-   deleted (analytics-platform#38); project visibility now derives from the
-   verify payload's `effective_roles`. ONE `can()` survives on purpose, for
-   local CLI account keys, documented at
-   `packages/dashboard/src/lib/auth-brain.ts:16-28`. Leave it unless you are
-   explicitly doing the account-key migration (see "Deliberately out of scope").
+## THE TWO DECISIONS (both settled 2026-07-29, do not reopen)
 
-## The actual problem: analytics is structurally single-company
+### Decision 1: projects STOP being workspaces. YES.
 
-Analytics assumes exactly ONE company exists, in several places:
+Analytics currently mints one auth-brain **workspace per project** and uses
+workspace membership as a per-project ACL. That was never a design choice, it was
+a workaround: auth-brain's smallest scope is a workspace, so analytics used the
+only vocabulary available.
 
-- `packages/dashboard/src/lib/workspace-provisioning.ts:16-23` reads
+It is the wrong layer, for four reasons that are all now accepted:
+
+- It leaks an app's domain objects (a tracked website) into the identity service,
+  which should only hold organisational containers people belong to.
+- It does not scale: 50 tracked sites means 50 workspaces in the admin console
+  and 50 entries in every user's verify payload on every request.
+- It does not generalise. Studio does not do this per brand; receipts does not do
+  it per client. Analytics is the outlier.
+- It contradicts standing decision 3: role assignment is central, but what a role
+  means INSIDE an app is that app's policy-as-code. Per-resource access is an
+  inner rule that analytics pushed up into the platform.
+
+**The target model:** a project belongs to a **company** (auth-brain `tenant`).
+Access is company membership. A role matrix in analytics decides what
+viewer/member/admin may do to a project, exactly like Studio's (lumitra-studio#125
+is the reference implementation, `src/lib/auth/roleMatrix.ts`).
+
+**Accepted cost:** per-project granularity is dropped. Anyone who can see a
+company's analytics sees all of that company's projects. Nobody uses the
+granularity today. If it is ever wanted, the correct home is FGA resource-level
+sharing tuples inside auth-brain (already named as a future capability in
+`docs/internal/fga-authoritative-tradeoffs.html`), NOT workspaces-as-ACLs.
+
+### Decision 2: the scope switcher is a BOUNDARY, not a filter. 
+
+The active company is an access edge, not a view preference:
+
+- A project outside the active company returns 403/404 on EVERY entry point:
+  page routes, API routes, direct URLs. Not merely hidden in a list.
+- The active scope is re-validated against the user's LIVE roles on each request.
+  A revoked role fails closed immediately, it does not wait for a new session.
+
+Rationale: there are now genuinely separate companies with other people in them
+(Opuntia is Sharon's, Return Hypnosis is a third party). Fail-closed is correct
+the moment an access surface stops being "just Marlin".
+
+---
+
+## What is ALREADY TRUE (do not rebuild any of this)
+
+1. **Analytics already has SSO.** `packages/dashboard/src/middleware.ts:17-18`
+   redirects unauthenticated page navigations to `${AUTH_BRAIN_URL}/login`,
+   exactly like Studio. Both ride the shared `lumitra_session` cookie. There is a
+   `/request-access` page for the app-grant door.
+2. **Analytics no longer talks to OpenFGA for sessions.** `openfga-direct.ts` was
+   deleted (analytics-platform#38); project visibility already derives from the
+   verify payload's `effective_roles`. ONE `can()` survives for CLI account keys
+   (see "the account-key wrinkle" below).
+3. **The tenant-level `viewer` role exists and is live** (auth-brain#73), lowest
+   rung, read-only, `tenant.viewer = this OR member` (same-scope, no cross-tier
+   cascade). Use it as the read tier.
+4. **The switcher primitive is half-built.** `sessions.active_tenant_id` and
+   `active_workspace_id` exist (migration 004), the verify payload returns
+   `active_tenant`/`active_workspace`
+   (`packages/shared/src/types.ts:153-154`), and
+   `setActiveContext(sql, sessionId, tenantId, workspaceId)` exists at
+   `packages/app/src/lib/db/repositories/sessions.ts:94` with **ZERO callers**.
+   Only the endpoint is missing.
+5. **The backfill is already done.** There are exactly TWO analytics projects,
+   both Lola's, and their workspaces were moved to the Lola Stories company on
+   2026-07-28. Nothing to reassign.
+
+---
+
+## The slices, dependency-ordered
+
+### S1 (auth-brain): the active-scope endpoint + fail-closed read
+
+Expose the switcher primitive. This is the highest-leverage slice because the
+schema, the read path and the setter all exist and nothing calls them, and
+because Studio and Receipts get the capability for free.
+
+- A session-authenticated endpoint that sets the active scope, calling
+  `setActiveContext`.
+- **Never trust a client-supplied scope id.** Validate that the caller actually
+  holds a role on the target tenant (and workspace, if given) before writing.
+  Unauthorised target is a 403, not a silent no-op.
+- **Close the latent read hole in the same slice:** `sessions/verify/route.ts:62`
+  resolves `active_tenant` by id lookup WITHOUT re-checking that the user still
+  holds a role there. So a revoked user keeps reporting their old active scope.
+  Treat an active scope the user no longer holds as `null` on read (and clear it),
+  fail-closed. This is what makes decision 2's "re-validated per request"
+  guarantee real.
+- **Default behaviour with no active scope set:** if the user has exactly one
+  company, default to it; otherwise leave null and let the app require a pick. Do
+  not silently pick the first of several.
+- Revision-path tests per `knowledge-base/standards/stateful-flow-testing.md`:
+  switch, switch back, switch to a scope you have lost access to (must fail
+  closed), resume after re-login, and the no-active-scope default.
+- Bump shared + SDK. Do NOT publish; the operator publishes.
+
+### S2 (analytics): projects belong to companies
+
+The heart of decision 1.
+
+- Add `company_id` to `projects` (the auth-brain `tenant` uuid). Backfill BOTH
+  existing rows to the Lola Stories company
+  `019f6a89-ea4a-75d4-90ff-4e809491647e`:
+  - `lola-landing`, domain `lolastories.com`, workspace `019ee142-44af-786d-9366-a705b7607f86`
+  - `lola-web`, domain `app.lolastories.com`, workspace `019ee142-453c-702c-9e6e-cba872eadcca`
+- **Delete `ensureAnalyticsTenant()` and `provisionProjectWorkspace()`**
+  (`packages/dashboard/src/lib/workspace-provisioning.ts`) and the boot-time
+  `provisionMissingWorkspaces()` step. Analytics must never write to auth-brain
+  again: it CONSUMES companies, it does not create them. Remove the
   `AUTH_BRAIN_TENANT_SLUG` / `AUTH_BRAIN_TENANT_NAME` / `AUTH_BRAIN_GROUP_ID`
-  from env, with defaults that used to be `lumitra-analytics` under the Lumitra
-  org.
-- `ensureAnalyticsTenant()` (same file, ~line 100) POSTs that company to
-  auth-brain's machine `/tenants` on EVERY boot, swallowing "already exists".
-- `provisionProjectWorkspace()` creates every project's workspace under that one
-  `TENANT_SLUG`.
-- `projects` (migration 001) has **no company column at all**. `workspace_id`
-  was added in migration 014. A project's company is implicit: whatever company
-  owns its workspace.
+  env plumbing with it.
+- Project CREATION takes a target company the caller actually holds a role on
+  (validate against the verify payload; never trust the request body).
+- Replace `hasWorkspaceAccess(effective_roles, p.workspace_id, ...)` in
+  `packages/dashboard/src/app/api/projects/route.ts` with a company-role check.
+- Add a Studio-style role matrix module as the single source of truth for
+  action -> minimum company role. Copy the SHAPE of
+  `lumitra-studio/src/lib/auth/roleMatrix.ts`, including its two good calls:
+  `billing_admin` stays OFF the general ladder (it authorises billing only and
+  never satisfies a viewer/member/admin check), and the `direct` vs `inherited`
+  marker is IGNORED for gating (an inherited admin IS an admin).
+- Leave `projects.workspace_id` in place but UNUSED in this slice; drop it in a
+  separate follow-up migration once nothing reads it. Do not do both in one step.
 
-**Two production incidents on 2026-07-28 came from exactly this**, so treat it
-as demonstrated, not theoretical:
-- A phantom "Lumitra Analytics" COMPANY kept reappearing (created 2 seconds
-  after each analytics boot). Deleting it did nothing; the next deploy remade
-  it. Fixed for now by pointing the env at the real `lumitra-core` company.
-- `lola-web` and `lola-landing` project workspaces sat under the **Lumitra**
-  company when they belong to **Lola Stories**, purely because analytics puts
-  every project under its one configured company. Moved by hand.
+### S3 (analytics): the switcher UI + boundary enforcement
 
-Both will recur for any new project until the model changes.
+- Read `active_tenant` from the verify payload; render the picker from the
+  companies the payload already carries; call S1's endpoint to switch.
+- Enforce decision 2 as a BOUNDARY on every project-scoped route and page, not
+  just the list. A project outside the active company is 403/404.
+- Handle the no-active-scope case per S1's rule.
 
-## The switcher is HALF-BUILT ALREADY (the key finding)
+### S4 (cleanup): retire the vestigial workspaces
 
-Do not design this from scratch. auth-brain already models active scope:
+Once S2 ships and nothing reads `workspace_id`, delete the two auto-created
+workspaces (`lola-landing-6e00471d`, `lola-web-8f469eec`) from auth-brain via
+`DELETE /api/admin/machine/workspaces`. Then run `openfga:reconcile` and confirm
+zero findings. Do NOT use raw SQL.
 
-- `packages/app/migrations/004_sessions.sql:4-5` — `sessions.active_tenant_id`
-  and `sessions.active_workspace_id` columns.
-- `SessionVerifyResponse` carries `active_tenant` / `active_workspace` objects
-  (`packages/shared/src/types.ts:153-154`), assembled in
-  `packages/app/src/app/api/sessions/verify/route.ts:62`.
-- `setActiveContext(sql, sessionId, tenantId, workspaceId)` exists at
-  `packages/app/src/lib/db/repositories/sessions.ts:94` — and has **ZERO
-  callers**. Nothing exposes it.
+### S5 (auth-brain, independent hygiene): a real platform_admins table
 
-So the platform work is: expose a "switch active scope" endpoint that validates
-the user actually holds a role on the target scope, calls `setActiveContext`,
-and lets every suite app read `active_tenant` from the payload it already
-receives. That is a small auth-brain slice, and it makes the switcher available
-to Studio and Receipts for free.
+Can run any time; it touches migrations so do NOT run it in parallel with S1.
 
-## Decisions needed from Marlin BEFORE building (do not guess these)
+`seed-platform-admin.ts` writes `user:<id>#admin@platform:lumitra` straight to
+FGA because "Phase 1 has no SQL `platform_admins` table". That shortcut forced a
+permanent special-case in reconciliation (auth-brain#70 excludes the `platform`
+type on both sides, or `--heal` would delete the tuple and lock the admin
+console). Give platform admins a real table, seed through it, and then narrow or
+remove the reconciliation exception so the safety of `--heal` no longer rests on
+a hardcoded type exclusion.
 
-1. **What does a "project" belong to?** Options: (a) a project belongs to a
-   COMPANY, and its workspace is created under that company; (b) a project
-   belongs to a WORKSPACE the user picks, which already implies a company.
-   (b) is closer to the existing schema (`projects.workspace_id`), (a) reads
-   more naturally to a user. This decides the creation UI and the data model.
-2. **Does switching scope filter the project list, or is the list global?**
-   i.e. is the switcher a FILTER (show projects in the active company) or a
-   BOUNDARY (you cannot even see the others)? Fail-closed suggests boundary.
-3. **Backfill:** every existing project sits under Lumitra. Do they get
-   reassigned to real companies (Lola's projects to Lola Stories), and by what
-   rule? Today's manual moves are the precedent.
+---
 
-## Suggested slices (dependency-ordered)
+## The account-key wrinkle (read before touching auth)
 
-**S1 auth-brain: active-scope endpoint.** Expose the switcher primitive. Must
-verify the caller actually holds a role on the target tenant/workspace (never
-trust a client-supplied id), write via `setActiveContext`, and return the
-updated payload shape. Add revision-path tests per
-`knowledge-base/standards/stateful-flow-testing.md`: switch, switch back, switch
-to a scope you lost access to (must fail closed), and resume after re-login.
-Bump shared/SDK; the operator publishes.
+`checkAccountKeyProjectAccess` is the ONE surviving direct `can()` in analytics.
+Account keys are developer CLI credentials (`ap_account_` prefix, minted through
+the `cli_device_codes` device flow), NOT customer-facing ingest keys, and they
+produce no verify payload at all, so there is nothing to read roles from.
 
-**S2 analytics: project -> company binding.** Per decision 1. Add the column or
-formalise the workspace link, make project CREATION take a target company/
-workspace the user actually has rights on, and delete `ensureAnalyticsTenant()`
-so analytics never provisions a company again. Analytics should CONSUME
-companies, never create them.
+Under S2 that path must become "does this user hold a role on the project's
+COMPANY" instead of "on the project's workspace". It may still need a `can()`
+against the `tenant` type, or a small auth-brain endpoint. Either is acceptable;
+what is NOT acceptable is silently dropping the check or failing open. Keep it
+fail-closed and keep the comment explaining why it exists.
 
-**S3 analytics: the switcher UI + scoping.** Read `active_tenant` from the
-verify payload, render the picker from the payload's companies, call S1's
-endpoint. Apply decision 2 to the project list and every project-scoped route.
+---
 
-**S4 backfill.** Per decision 3, using the machine APIs — `PATCH
-/api/admin/machine/workspaces` moves a workspace between companies and rewrites
-the FGA parent tuple atomically (auth-brain#72 added the tenant equivalent). Do
-NOT move things with raw SQL.
+## Traps. Do not relearn these.
 
-## Traps this session hit, do not relearn them
-
-- **Pushing code does not change authorization.** Adopting a new OpenFGA model
-  is MANUAL: `openfga:push`, then set `OPENFGA_AUTHORIZATION_MODEL_ID` in
-  Infisical, then restart. Between merge and that flip, prod runs the OLD model.
-- **Verify against the model the service actually queries**, not the repo's
+- **Pushing code does not change authorization.** Adopting a new OpenFGA model is
+  MANUAL: `openfga:push`, then set `OPENFGA_AUTHORIZATION_MODEL_ID` in Infisical
+  (auth-brain project `97c4971e-78c1-4adf-83e1-6c0b5f13375c`, prod), then restart
+  app AND worker. Between merge and that flip, production runs the OLD model.
+  Record the previous model id as a rollback anchor before pushing.
+- **Verify against the model the service actually queries**, never the repo's
   `schema.json`.
-- **Raw SQL on identity data is how today's two incidents happened** (a company
-  with no creation event; an untraceable key swap). Use the machine APIs; they
-  emit audit + outbox rows and keep tuples correct.
-- **Deleting a scope currently leaks its FGA tuple** until `openfga:reconcile
-  -- --heal`. A fix is in flight (`auth-brain-delete-tuple-sync`); check whether
-  it landed.
-- **Analytics CI builds first**; a stray non-route export in a Next route file
-  has broken that build before. Studio has NO CI verify workflow at all, so
-  local verification is the only gate there.
-- The reconcile CLI needs the app's injected env, which `docker exec` does not
-  inherit: read it from `/proc/<pid>/environ` of the node process and pass with
-  `-e`.
+- **Raw SQL on identity data caused two incidents on 2026-07-28** (a company with
+  no creation event; an untraceable key swap). Use the machine APIs at
+  `/api/admin/machine/*`; they emit audit + outbox rows and keep tuples correct.
+- **The reconcile CLI does not inherit the app's injected env through
+  `docker exec`.** Read it from `/proc/<pid>/environ` of the node process and pass
+  with `-e`. Command: `pnpm --filter @auth-brain/app openfga:reconcile`
+  (report-only, exits non-zero when findings exist) and `-- --heal` to write.
+  ALWAYS inspect the orphan list before healing: heal DELETES.
+- **Inheritance cannot be tested against the in-memory FGA mock** (a mock cannot
+  evaluate userset rewrites). Copy
+  `packages/app/tests/integration/inheritance-openfga.spec.ts`, which spins up
+  real OpenFGA.
+- **Analytics CI builds first**; a stray non-route export in a Next route file has
+  broken that build before. Studio's `pnpm test` is wrapped in `infisical run`.
+- **Workers forget the lockfile on dependency bumps.** Analytics pins lag badly;
+  the published versions are shared **1.6.0** and sdk **1.4.0**.
+- `gh pr merge` from inside a worktree fails on local branch cleanup while the
+  merge itself SUCCEEDS. Re-check `gh pr view --json state` before retrying.
+- A PR can sit green and unmerged because it is a **draft** (that is exactly why
+  the framer-clone CVE patch waited from Monday to Tuesday).
 
-## Deliberately out of scope
+## Operating protocol (non-negotiable)
 
-- The surviving `can()` for CLI account keys. Those are developer credentials
-  (`ap_account_` prefix, minted via the `cli_device_codes` device flow), not
-  customer-facing ingest keys. Migrating them to auth-brain service accounts is
-  a SEMANTIC change (an account key means "act as user X"; a service account is
-  a machine bound to a scope) and would force every CLI user to re-authenticate.
-  Marlin's standing call: leave it until analytics gains a non-human consumer.
+Per code slice: worktree off FRESH origin/main -> `orchestrator start` (background,
+harness-tracked) -> review the diff against `git merge-base HEAD origin/main` ->
+run the repo's FULL verify chain matching its CI exactly, gating on EXIT CODES,
+never `test | grep` -> PR -> CI -> squash-merge -> watch the deploy -> **live-probe
+the changed surface** -> clean up worktree and branches.
+
+Post-deploy verification is not optional. Three defects in the last wave were
+invisible to a green CI run and obvious within minutes of probing production.
+After anything touching identity: re-run reconciliation and check the live model.
 
 ## Key ids
 
-Orgs: `marlinjai` `019f6a90-8b69-7d7f-a8fe-268b62ae1cc7` (umbrella: Lumitra +
-marlinjai + Whiz-Art Media), `Lola Stories` `019f6a89-ea38-7f0e-bbe7-544652b65f56`,
-`sharondisalvo` (personal, Opuntia + Return Hypnosis). Companies: `lumitra-core`
-`019ec2f2-f19e-70f4-a889-8afb34c314ca`, `lola-stories`
-`019f6a89-ea4a-75d4-90ff-4e809491647e`. Infisical: auth-brain
-`97c4971e-78c1-4adf-83e1-6c0b5f13375c`, analytics workspace resolves by name
-"Analytics Platform". auth-brain app container prefix
-`h10iicx7b1g7c5dj9z69z4f2`, analytics `u30x30hokl4flljrmvywy5t8`, auth-brain DB
-container `gzcpriw2sbpsuwka4spb788x`, shared-server-I `157.90.119.98`.
+Orgs: `marlinjai` `019f6a90-8b69-7d7f-a8fe-268b62ae1cc7` (umbrella: Lumitra,
+marlinjai, Whiz-Art Media), `Lola Stories` `019f6a89-ea38-7f0e-bbe7-544652b65f56`,
+`sharondisalvo` (personal: Opuntia, Return Hypnosis).
+Companies: `lumitra-core` `019ec2f2-f19e-70f4-a889-8afb34c314ca`, `lola-stories`
+`019f6a89-ea4a-75d4-90ff-4e809491647e`.
+Infisical: auth-brain `97c4971e-78c1-4adf-83e1-6c0b5f13375c`; analytics resolves
+by workspace name "Analytics Platform".
+Containers on shared-server-I (`157.90.119.98`): auth-brain app
+`h10iicx7b1g7c5dj9z69z4f2*`, auth-brain worker `sedr9u7xa2y3fu8jkv3yjq04*`,
+auth-brain DB `gzcpriw2sbpsuwka4spb788x`, analytics `u30x30hokl4flljrmvywy5t8*`,
+analytics DB `j5hw5h60e1mujxgfvtaea87l`, storage DB `mexlrzpf5pa8u4g7bia65gd3`.
+Current FGA model `01KYMAAS0X4W779CZ9G7S95BBA` (prior anchor
+`01KYKZ8MG9HJVD9RNKKYG24N3H`).
+
+## Also queued, NOT part of this chain
+
+- **framer-clone PR #83 (CM-12)** fails `verify` for two distinct reasons:
+  `COMMERCE_APP_DATABASE_URL` is not set in CI, and its own idempotency test hits
+  `duplicate key value violates unique constraint "tenant_groups_slug_key"`. It
+  is a month old and one commit behind main. Real work, not a rebase.
+- Stale open PRs needing triage: lumitra-studio #75/#76/#77, analytics #32,
+  lola-stories #264/#265 (#264 needs Marlin to listen to audio).
+- **Marlin and Sharon still get forced TOTP enrollment** at their next
+  auth.lumitra.co login, from the security hardening slice.
+- The 361 orphaned `kie-input` storage files (371 MB) await Marlin's delete
+  decision. Review page was built; evidence is conclusive; do NOT delete
+  unilaterally.
