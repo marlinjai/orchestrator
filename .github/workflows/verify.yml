@@ -1,14 +1,14 @@
 name: Verify
 
-# Lint + test gate. The push trigger is the post-merge alarm on master; the
+# Lint + test gate. The push trigger is the post-merge alarm on main; the
 # pull_request trigger is what branch protection pins against so a PR cannot
 # merge with red tests or lint. There is no deploy here: the orchestrator ships
 # as a uv tool / PyPI package, not a Coolify app.
 on:
   push:
-    branches: [master]
+    branches: [main]
   pull_request:
-    branches: [master]
+    branches: [main]
 
 concurrency:
   group: ${{ github.workflow }}-${{ github.ref }}
