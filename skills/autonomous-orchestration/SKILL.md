@@ -60,12 +60,14 @@ If `orchestrator` is not found at all, run the one-time install above first. The
 
 1. **Write a goal file** at `~/software-dev/orchestrator/goals/<task-id>.md`. Use `goals/_template.md` as the starting shape. The goal file is the Worker's full instruction set: definition-of-done, constraints, what NOT to touch.
 
-2. **Set up a worktree** in the target repo (one worktree per task isolates state):
+2. **Set up a worktree** in the target repo (one worktree per task isolates state). **Branch from `origin/main`, never local `main`.** A local checkout can silently drift behind origin by any number of commits (nothing refreshes it just by existing), and `git worktree add -b <branch> ... main` branches from whatever the stale local ref happens to point at, with no error. This produces a worktree that looks fine, passes its own verify gate, and then hits real merge conflicts against `main` at PR time because it was missing weeks of work from the start. Always fetch first:
    ```bash
    cd <target-repo>
-   git worktree add -b orchestrator/<task-id> ../<repo>-orch-<task-id> main
+   git fetch origin --quiet
+   git worktree add -b orchestrator/<task-id> ../<repo>-orch-<task-id> origin/main
    cd ../<repo>-orch-<task-id> && <install command if any>  # e.g. pnpm install
    ```
+   If a dispatch later turns out to have branched from a stale base anyway, don't hand-resolve the conflicts: close the PR, delete the branch and worktree, fast-forward local `main` to `origin/main`, and redispatch the same goal from a fresh worktree. The goal file's own "read the sibling files fresh, don't assume their shape" instructions make redispatch safe, since the Worker re-reads whatever changed in the meantime.
    Alternative (in-process isolation): pass `--worktree` and point `--project` at the repo itself. The orchestrator then creates and manages its own worktree on branch `orchestrator/<task-id>`, threads it through every gate, and cleans it up at the end (clean = removed with the work preserved on the branch; escalated/failed/dirty = retained for inspection, never `--force`). Use the manual worktree above OR `--worktree`, never both (they would nest). The manual pattern is still preferred for parallel batches where you install once per checkout.
 
 3. **Launch.** Two modes; pick by whether you want the dispatching session woken on completion:
