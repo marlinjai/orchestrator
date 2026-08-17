@@ -318,17 +318,23 @@ def build_worker_options(
         # Secrets proxy: credential-requiring commands route through this MCP
         # server (which calls the Tailscale-only proxy) instead of running
         # `infisical run` in Worker context, where raw secrets would land in
-        # the subprocess env and the transcript sent to Anthropic. If
-        # SECRETS_PROXY_TOKEN is unset (e.g. bare `orchestrator start` not
-        # launched via cc.sh), this stdio server exits(1) at startup and the
-        # tool simply degrades to unavailable.
+        # the subprocess env and the transcript sent to Anthropic.
+        #
+        # NEVER put the proxy token in this dict. The SDK serializes
+        # `mcp_servers` into a `--mcp-config '{...}'` COMMAND LINE ARGUMENT, and
+        # argv is world-readable: `ps aux` printed the token to anyone on the
+        # machine. That is exactly how it leaked on 2026-08-17 and forced a
+        # rotation. The MCP server now reads the token itself from a 0600 file
+        # (~/.config/secrets-proxy/token, override with SECRETS_PROXY_TOKEN_FILE),
+        # which cannot appear in argv and does not propagate to child processes.
+        # With no readable token file the stdio server exits(1) at startup and
+        # the tool simply degrades to unavailable.
         "secrets-proxy": {
             "type": "stdio",
             "command": "node",
             "args": ["/Users/marlinjai/software-dev/secrets-proxy/mcp/dist/index.js"],
             "env": {
                 "SECRETS_PROXY_URL": "http://100.124.97.31:8765",
-                "PROXY_TOKEN": os.environ.get("SECRETS_PROXY_TOKEN", ""),
             },
         },
     }
