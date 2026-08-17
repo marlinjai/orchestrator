@@ -196,3 +196,34 @@ def test_telegram_failure_swallowed(monkeypatch):
 
     monkeypatch.setattr(notify_mod.urllib.request, "urlopen", boom)
     notify(task_id="t", status="completed")  # must not raise
+
+
+def test_token_file_beats_env(tmp_path, monkeypatch):
+    """The 0600 file is the token's home; a stale env value must not win.
+
+    After a rotation the env var (injected from Infisical by cc.sh) can still
+    hold the OLD token. If env won, every proxy call would 401 until someone
+    re-synced Infisical. File-first makes the rotation self-contained.
+    """
+    tf = tmp_path / "token"
+    tf.write_text("token-from-file\n")
+    tf.chmod(0o600)
+    monkeypatch.setenv("SECRETS_PROXY_TOKEN_FILE", str(tf))
+    monkeypatch.setenv("SECRETS_PROXY_TOKEN", "stale-token-from-env")
+    assert notify_mod._resolve_proxy_token() == "token-from-file"
+
+
+def test_token_file_ignored_when_world_readable(tmp_path, monkeypatch):
+    """A secret readable by group/other is refused, not trusted."""
+    tf = tmp_path / "token"
+    tf.write_text("token-from-file")
+    tf.chmod(0o644)
+    monkeypatch.setenv("SECRETS_PROXY_TOKEN_FILE", str(tf))
+    monkeypatch.setenv("SECRETS_PROXY_TOKEN", "env-fallback")
+    assert notify_mod._resolve_proxy_token() == "env-fallback"
+
+
+def test_no_token_anywhere_resolves_none(tmp_path, monkeypatch):
+    monkeypatch.setenv("SECRETS_PROXY_TOKEN_FILE", str(tmp_path / "absent"))
+    monkeypatch.delenv("SECRETS_PROXY_TOKEN", raising=False)
+    assert notify_mod._resolve_proxy_token() is None

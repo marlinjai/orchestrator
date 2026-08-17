@@ -1,3 +1,4 @@
+import json
 import os
 from pathlib import Path
 
@@ -51,32 +52,35 @@ def test_worker_options_has_secrets_proxy_mcp(tmp_path: Path):
     assert "mcp__secrets-proxy__execute_with_secrets" in options.allowed_tools
 
 
-def test_worker_options_secrets_proxy_token_from_env(tmp_path: Path, monkeypatch):
-    """The proxy token passes through from env (injected by cc.sh) into the MCP
-    server subprocess env. The env contract only scrubs Anthropic auth and foreign
-    provider keys, so SECRETS_PROXY_TOKEN is left intact."""
+def test_worker_options_never_puts_proxy_token_in_mcp_config(
+    tmp_path: Path, monkeypatch
+):
+    """The proxy token must NEVER appear in the MCP server config, even when the
+    environment holds one.
+
+    The SDK serializes `mcp_servers` into a `--mcp-config '{...}'` COMMAND LINE
+    ARGUMENT. Argv is world-readable, so a token placed here is printed by
+    `ps aux` to every process on the machine -- which is how it leaked on
+    2026-08-17 and forced a rotation. The MCP server reads the token itself from
+    a 0600 file instead. This test is the regression guard for that leak, so it
+    asserts on the WHOLE serialized config, not just the key we happened to use.
+    """
     monkeypatch.setenv("SECRETS_PROXY_TOKEN", "tok-from-cc-sh")
     options = build_worker_options(
         state_path=tmp_path / "s.json",
         project_dir=tmp_path,
         denied_bash=[],
     )
-    assert options.mcp_servers["secrets-proxy"]["env"]["PROXY_TOKEN"] == "tok-from-cc-sh"
-    # token must survive build_worker_options (it is not an auth/provider key)
+    server = options.mcp_servers["secrets-proxy"]
+    assert "PROXY_TOKEN" not in server["env"]
+    assert server["env"]["SECRETS_PROXY_URL"]
+    # Nothing anywhere in the config may carry the secret, however nested.
+    # `default=str` because the in-process state server is an SDK object, not
+    # JSON: we only care that the token string appears nowhere in the payload.
+    assert "tok-from-cc-sh" not in json.dumps(options.mcp_servers, default=str)
+    # The env var itself is still left alone: only Anthropic/provider keys are
+    # scrubbed, and other tooling may legitimately read it.
     assert os.environ.get("SECRETS_PROXY_TOKEN") == "tok-from-cc-sh"
-
-
-def test_worker_options_secrets_proxy_token_defaults_empty(tmp_path: Path, monkeypatch):
-    """When the token is absent, env carries an empty string. The MCP server will
-    exit(1) at startup and the tool degrades to unavailable; the orchestrator
-    itself stays up."""
-    monkeypatch.delenv("SECRETS_PROXY_TOKEN", raising=False)
-    options = build_worker_options(
-        state_path=tmp_path / "s.json",
-        project_dir=tmp_path,
-        denied_bash=[],
-    )
-    assert options.mcp_servers["secrets-proxy"]["env"]["PROXY_TOKEN"] == ""
 
 
 def test_worker_options_includes_default_tools(tmp_path: Path):
