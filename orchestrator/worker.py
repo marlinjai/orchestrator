@@ -16,6 +16,11 @@ from pathlib import Path
 from typing import AsyncIterator, Literal
 
 from claude_agent_sdk import ClaudeAgentOptions, ClaudeSDKClient
+from claude_agent_sdk.types import (
+    PermissionResultAllow,
+    PermissionResultDeny,
+    ToolPermissionContext,
+)
 
 from orchestrator.tools import build_state_mcp_server
 
@@ -53,7 +58,9 @@ CROSS_PROVIDER_KEY_DENYLIST: tuple[str, ...] = (
 # never drop them: dropping orchestrator-state would blind the control loop, and
 # dropping secrets-proxy would push credential-requiring commands back into raw
 # Worker context.
-DEFAULT_MCP_SERVER_KEYS: frozenset[str] = frozenset({"orchestrator-state", "secrets-proxy"})
+DEFAULT_MCP_SERVER_KEYS: frozenset[str] = frozenset(
+    {"orchestrator-state", "secrets-proxy"}
+)
 DEFAULT_ALLOWED_TOOLS: tuple[str, ...] = (
     "Read",
     "Edit",
@@ -299,6 +306,83 @@ def resolve_effective_mcp_servers(
     return allowed, dropped
 
 
+# File-editing tools whose input carries a `file_path` the Worker is about to
+# write to. Guarded by build_worktree_guard below.
+PATH_GUARDED_TOOLS: frozenset[str] = frozenset(
+    {"Write", "Edit", "NotebookEdit", "MultiEdit"}
+)
+
+
+def _out_of_root_path(tool_input: dict, project_root: Path) -> Path | None:
+    """Resolve tool_input's file_path against project_root and return it if it
+    escapes project_root, else None. project_root must already be resolved
+    (realpath)."""
+    raw = tool_input.get("file_path")
+    if not raw:
+        return None
+    candidate = Path(raw)
+    if not candidate.is_absolute():
+        candidate = project_root / candidate
+    try:
+        resolved = candidate.resolve()
+    except OSError:
+        # Unresolvable path (e.g. a broken component): let the tool itself
+        # fail naturally rather than guessing.
+        return None
+    if resolved == project_root or project_root in resolved.parents:
+        return None
+    return resolved
+
+
+def build_worktree_guard(project_dir: Path):
+    """Build a `can_use_tool` callback that hard-denies any Write / Edit /
+    NotebookEdit / MultiEdit call whose target path resolves outside
+    project_dir (realpath).
+
+    This closes the 2026-08-01 bug where a Worker given a prepared worktree
+    via --project edited the repo's MAIN checkout instead: `cwd` only sets the
+    SDK subprocess's *starting* directory, it does not constrain where a
+    later absolute-path Edit/Write call lands. can_use_tool is invoked by the
+    SDK before every tool call, so this is a true per-call assertion, not a
+    post-hoc check.
+
+    Deliberately scoped to the structured file-editing tools, which carry an
+    explicit file_path the SDK gives us to check. It does not, and cannot,
+    guard against a Bash command writing outside project_dir (that would
+    require parsing/simulating arbitrary shell, a much larger feature); the
+    existing git-based reconcile step is the backstop for Bash-driven edits
+    made *inside* project_dir's own repo.
+    """
+    project_root = project_dir.resolve()
+
+    async def can_use_tool(
+        tool_name: str,
+        tool_input: dict,
+        context: ToolPermissionContext,
+    ) -> PermissionResultAllow | PermissionResultDeny:
+        if tool_name in PATH_GUARDED_TOOLS:
+            offending = _out_of_root_path(tool_input, project_root)
+            if offending is not None:
+                logger.error(
+                    "worker tool %s targeted %s, outside assigned worktree %s; "
+                    "denying and interrupting the turn",
+                    tool_name,
+                    offending,
+                    project_root,
+                )
+                return PermissionResultDeny(
+                    message=(
+                        f"Refused: {tool_name} targeted {offending}, which is "
+                        f"outside the assigned project root {project_root}. "
+                        "Only edit files inside the assigned worktree."
+                    ),
+                    interrupt=True,
+                )
+        return PermissionResultAllow()
+
+    return can_use_tool
+
+
 def build_worker_options(
     *,
     state_path: Path,
@@ -384,6 +468,7 @@ def build_worker_options(
         setting_sources=[],
         mcp_servers=mcp_servers,
         allowed_tools=allowed_tools,
+        can_use_tool=build_worktree_guard(project_dir),
     )
 
 

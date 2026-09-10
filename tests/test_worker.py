@@ -2,6 +2,12 @@ import json
 import os
 from pathlib import Path
 
+from claude_agent_sdk.types import (
+    PermissionResultAllow,
+    PermissionResultDeny,
+    ToolPermissionContext,
+)
+
 from orchestrator.worker import (
     CROSS_PROVIDER_KEY_DENYLIST,
     DEFAULT_ALLOWED_TOOLS,
@@ -9,6 +15,7 @@ from orchestrator.worker import (
     WorkerExtras,
     apply_env_contract,
     build_worker_options,
+    build_worktree_guard,
     load_worker_extras,
     resolve_effective_mcp_servers,
 )
@@ -366,3 +373,83 @@ def test_none_ceiling_is_unchanged_behavior(tmp_path: Path):
         allowed_mcp_servers=None,
     )
     assert "context7" in options.mcp_servers
+
+
+def test_worker_options_wires_worktree_guard(tmp_path: Path):
+    """build_worker_options must install the path guard as can_use_tool, not
+    just leave the SDK's own permission_mode to gate it."""
+    options = build_worker_options(
+        state_path=tmp_path / "s.json",
+        project_dir=tmp_path,
+        denied_bash=[],
+    )
+    assert options.can_use_tool is not None
+
+
+async def test_worktree_guard_allows_edit_inside_root(tmp_path: Path):
+    guard = build_worktree_guard(tmp_path)
+    (tmp_path / "file.py").write_text("x")
+    result = await guard(
+        "Edit",
+        {"file_path": str(tmp_path / "file.py")},
+        ToolPermissionContext(),
+    )
+    assert isinstance(result, PermissionResultAllow)
+
+
+async def test_worktree_guard_allows_relative_path_inside_root(tmp_path: Path):
+    guard = build_worktree_guard(tmp_path)
+    result = await guard("Write", {"file_path": "notes.md"}, ToolPermissionContext())
+    assert isinstance(result, PermissionResultAllow)
+
+
+async def test_worktree_guard_denies_absolute_path_outside_root(tmp_path: Path):
+    """The 2026-08-01 bug this guards against: a Worker given worktree A edits
+    the main checkout B instead. An absolute file_path outside project_dir must
+    be hard-denied, not silently allowed."""
+    project_root = tmp_path / "worktree-a"
+    other_checkout = tmp_path / "main-checkout"
+    project_root.mkdir()
+    other_checkout.mkdir()
+    guard = build_worktree_guard(project_root)
+    result = await guard(
+        "Edit",
+        {"file_path": str(other_checkout / "src.py")},
+        ToolPermissionContext(),
+    )
+    assert isinstance(result, PermissionResultDeny)
+    assert result.interrupt is True
+    assert str(other_checkout) in result.message
+
+
+async def test_worktree_guard_denies_dot_dot_escape(tmp_path: Path):
+    project_root = tmp_path / "worktree-a"
+    project_root.mkdir()
+    (tmp_path / "sibling").mkdir()
+    guard = build_worktree_guard(project_root)
+    result = await guard(
+        "Write",
+        {"file_path": "../sibling/leak.txt"},
+        ToolPermissionContext(),
+    )
+    assert isinstance(result, PermissionResultDeny)
+
+
+async def test_worktree_guard_ignores_unguarded_tools(tmp_path: Path):
+    """Bash is not (and cannot cheaply be) path-guarded; the guard must pass
+    it through rather than pretending to cover it."""
+    project_root = tmp_path / "worktree-a"
+    project_root.mkdir()
+    guard = build_worktree_guard(project_root)
+    result = await guard(
+        "Bash",
+        {"command": "rm -rf /Users/marlinjai/software-dev/orchestrator"},
+        ToolPermissionContext(),
+    )
+    assert isinstance(result, PermissionResultAllow)
+
+
+async def test_worktree_guard_ignores_tool_input_without_file_path(tmp_path: Path):
+    guard = build_worktree_guard(tmp_path)
+    result = await guard("Edit", {}, ToolPermissionContext())
+    assert isinstance(result, PermissionResultAllow)
