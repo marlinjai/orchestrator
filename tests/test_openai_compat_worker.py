@@ -361,3 +361,47 @@ async def test_audit_file_is_secured_even_if_it_pre_existed_world_readable(tmp_p
     session = _session(tmp_path, _ScriptedChat())
     await _tool(session, "write_file", {"path": "a.txt", "content": "x"})
     assert stat.S_IMODE(audit_path.stat().st_mode) == 0o600
+
+
+# ---- observed actions keep the self-report in step with git ----
+
+
+async def test_tool_calls_record_their_files_and_commits(tmp_path):
+    import subprocess
+
+    from orchestrator.reconcile import reconcile
+
+    session = _session(tmp_path, _ScriptedChat())
+    root = tmp_path / "work"
+    git = ["git", "-c", "user.email=t@example.invalid", "-c", "user.name=t"]
+    subprocess.run(["git", "init", "-q", "-b", "main"], cwd=root, check=True)
+    (root / "seed.txt").write_text("seed")
+    subprocess.run([*git, "add", "-A"], cwd=root, check=True)
+    subprocess.run([*git, "commit", "-q", "-m", "seed"], cwd=root, check=True)
+    base = subprocess.run(["git", "rev-parse", "HEAD"], cwd=root, capture_output=True, text=True).stdout.strip()
+    state = load_state(tmp_path / "state.json")
+    state.baseline_ref = base
+    save_state(tmp_path / "state.json", state)
+
+    await _tool(session, "write_file", {"path": "src/a.py", "content": "x = 1\n"})
+    out = await _tool(
+        session,
+        "run_command",
+        {"command": 'git add -A && git -c user.email=t@example.invalid -c user.name=t commit -q -m "feat: a"'},
+    )
+    assert out.startswith("exit code 0")
+
+    state = load_state(tmp_path / "state.json")
+    head = subprocess.run(["git", "rev-parse", "HEAD"], cwd=root, capture_output=True, text=True).stdout.strip()
+    assert [(c.sha, c.message, c.decided_by) for c in state.commits] == [(head, "feat: a", "proxy")]
+    assert [f.path for f in state.files_touched] == ["src/a.py"]
+    # Reconcile finds nothing the Worker did not report.
+    assert reconcile(state, root) == (0, 0)
+
+
+async def test_failed_commit_and_refused_write_record_nothing(tmp_path):
+    session = _session(tmp_path, _ScriptedChat())
+    await _tool(session, "write_file", {"path": "../escape.txt", "content": "x"})
+    await _tool(session, "run_command", {"command": "git commit -m nothing"})  # not a repo: exit != 0
+    state = load_state(tmp_path / "state.json")
+    assert state.commits == [] and state.files_touched == []

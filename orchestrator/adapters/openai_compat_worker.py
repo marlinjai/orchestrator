@@ -78,6 +78,8 @@ TRANSIENT_HTTP_STATUSES = frozenset({408, 409, 425, 429, 500, 502, 503, 504, 529
 MAX_TOOL_ROUNDS = 60
 COMMAND_TIMEOUT_S = 600
 MAX_TOOL_OUTPUT_CHARS = 30_000
+# A shell command that creates a commit (`git commit`, `git -C x commit ...`).
+_GIT_COMMIT = re.compile(r"\bgit\b[^;&|\n]*\bcommit\b")
 TOOL_AUDIT_FILE = "worker-tools.jsonl"
 AUDIT_RESULT_CHARS = 500
 
@@ -507,7 +509,62 @@ class OpenAICompatWorkerSession:
     async def _run_tool(self, name: str, raw_args: str) -> str:
         output = await self._dispatch_tool(name, raw_args)
         self._audit(name, raw_args, output)
+        await self._record_observed(name, raw_args, output)
         return output
+
+    async def _record_observed(self, name: str, raw_args: str, output: str) -> None:
+        """Record in state what the Worker's own tool calls observably did.
+
+        Every change this Worker makes goes through its tools, so the harness
+        knows exactly which files it wrote and which commits its `git commit`
+        commands created. Recording them here (through the same update_state
+        handler, so matching and dedupe rules apply) keeps the self-report in
+        step with git without depending on the model remembering to call
+        update_state; in the E4b race and its remeasure that forgetfulness cost
+        Mercury an extra iteration on most goals. The raw record stays in the
+        audit log either way.
+        """
+        try:
+            args = json.loads(raw_args) if raw_args.strip() else {}
+        except json.JSONDecodeError:
+            return
+        if not isinstance(args, dict):
+            return
+        if name in ("write_file", "edit_file") and output.startswith("ok"):
+            try:
+                rel = self._confined(args.get("path")).relative_to(self._root)
+            except (PermissionError, ValueError):
+                return
+            await self._update_state({"kind": "file_touched", "path": str(rel)})
+        elif (
+            name == "run_command"
+            and output.startswith("exit code 0")
+            and _GIT_COMMIT.search(str(args.get("command", "")))
+        ):
+            head = await asyncio.to_thread(self._read_head_commit)
+            if head is None:
+                return
+            sha, message, files = head
+            await self._update_state({"kind": "commit", "sha": sha, "message": message})
+            for f in files:
+                await self._update_state({"kind": "file_touched", "path": f})
+
+    def _read_head_commit(self) -> tuple[str, str, list[str]] | None:
+        """The SHA, subject and changed files of HEAD in the work dir."""
+
+        def git(*argv: str) -> str:
+            return subprocess.run(
+                ["git", *argv], cwd=self._root, capture_output=True, text=True, check=True
+            ).stdout.strip()
+
+        try:
+            sha = git("rev-parse", "HEAD")
+            message = git("log", "-1", "--format=%s")
+            files = [f for f in git("show", "--name-only", "--format=", "HEAD").splitlines() if f]
+        except (subprocess.CalledProcessError, OSError) as e:
+            logger.warning("openai-compat worker: could not read the new commit: %s", e)
+            return None
+        return sha, message, files
 
     def _audit(self, name: str, raw_args: str, output: str) -> None:
         """Append one JSON line per tool call. File contents are recorded by
