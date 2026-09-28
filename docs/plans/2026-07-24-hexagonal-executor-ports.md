@@ -148,6 +148,8 @@ Probe findings that shape the experiment (live, 2026-09-28): Mercury is a diffus
 
 Deliberately not built yet: per-step `reasoning_effort` tuning (apply the profile value uniformly until the E3 numbers show TTFT dominating). Open design question for the race, not blocking E4a: the loop's handover trigger reads `usage[-1].input_tokens`, which for both adapters is the turn's summed uncached prompt tokens, not the peak context size; with Mercury's 128K window and no prompt caching the summed figure can trigger handovers earlier than the real context requires. Measure on the first cohort before changing the trigger for both providers.
 
+**Live E4a smoke, passed 2026-09-28**: `orchestrator start` with `[executors.worker] model_id = "mercury-2", provider = "inception"` and `--held-out` on a throwaway repo (goal: add `multiply` plus a test and commit). One iteration; the Claude Decision Proxy stopped; in-tree verify PASS; held-out PASS; `completed`. Worker record: 16 model calls, 13,332 ms worker time, of which TTFT 12,679 ms (Inception server time 8,017 ms, so roughly 290 ms of network plus proxy overhead per call), generation 50 ms, tools 454 ms; 23,808 input and 1,301 output tokens, about $0.01. The shape confirms the TTFT finding above: per-call latency times call count is the whole cost, and proxy transit is a measurable third of it.
+
 **E4b (open)**: the race itself. No repo in the operator registry has a real `held_out_verify` yet (only a commented placeholder for analytics-platform), and a held-out set must live where the Worker's OS user cannot write it. Which repos and which held-out tests is Marlin's call; it is on the ROADMAP line and a decision page.
 
 ## Verification

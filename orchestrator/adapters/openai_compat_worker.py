@@ -285,7 +285,12 @@ class OpenAICompatWorkerSession:
         self.messages.append({"role": "user", "content": user_message})
         result = TurnResult()
         for _ in range(self._max_tool_rounds):
-            call = await asyncio.to_thread(self._call_model, on_text)
+            call = await asyncio.to_thread(self._call_model)
+            # One on_text per model call, not per stream delta: the loop prefixes
+            # every on_text with "worker:", and Mercury's delta boundaries fall
+            # mid-word, so per-delta output interleaved prefixes into the text.
+            if call.content and on_text is not None:
+                on_text(call.content)
             self._account(result, call)
             assistant: dict[str, Any] = {"role": "assistant", "content": call.content or None}
             if call.tool_calls:
@@ -346,7 +351,7 @@ class OpenAICompatWorkerSession:
             body["reasoning_effort"] = self._profile.reasoning_effort
         return body
 
-    def _call_model(self, on_text: OnText | None) -> _ModelCall:
+    def _call_model(self) -> _ModelCall:
         """One streamed model call, run in a worker thread (blocking I/O)."""
         call = _ModelCall()
         pending: dict[int, dict] = {}
@@ -369,8 +374,6 @@ class OpenAICompatWorkerSession:
                 if text:
                     parts.append(text)
                     produced = True
-                    if on_text is not None:
-                        on_text(text)
                 for frag in delta.get("tool_calls") or []:
                     slot = pending.setdefault(
                         int(frag.get("index") or 0), {"id": None, "name": "", "arguments": ""}

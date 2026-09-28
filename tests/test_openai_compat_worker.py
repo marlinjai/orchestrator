@@ -137,7 +137,7 @@ async def test_turn_reassembles_streamed_tool_call_and_measures_latency(tmp_path
 
     assert (tmp_path / "work" / "src" / "a.py").read_text() == "x = 1\n"
     assert result.chunks == ["done, wrote a.py"]
-    assert "".join(seen) == "done, wrote a.py"
+    assert seen == ["done, wrote a.py"]  # once per model call, never per delta
     assert result.model == "mercury-2"
     # Request shape: the forward gets tools, streaming with usage, the model id.
     first = chat.bodies[0]
