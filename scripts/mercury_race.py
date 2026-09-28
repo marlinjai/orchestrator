@@ -205,10 +205,16 @@ def cmd_run(args) -> int:
     install_vault()
     slugs = [g for g in goal_slugs() if not args.goals or g in args.goals.split(",")]
     jobs = [(slug, cohort) for slug in slugs for cohort in COHORTS]
+
+    def _safe(j):
+        try:
+            return _run_one(out, j[0], j[1], args.attempts, args.max_iterations)
+        except Exception as e:  # keep the other records
+            print(f"error {j[1]:7} {j[0]}: {e!r}", flush=True)
+            return {"goal": j[0], "cohort": j[1], "exit_code": None, "error": repr(e)}
+
     with ThreadPoolExecutor(max_workers=args.parallel) as pool:
-        records = list(
-            pool.map(lambda j: _run_one(out, j[0], j[1], args.attempts, args.max_iterations), jobs)
-        )
+        records = list(pool.map(_safe, jobs))
     (out / "results.json").write_text(json.dumps(records, indent=2))
     print(f"results: {out / 'results.json'}")
     return cmd_report(args)
