@@ -14,6 +14,7 @@ from orchestrator.adapters import resolve_worker_adapter
 from orchestrator.config import MarlinProxyConfig, apply_task_overrides, load_config
 from orchestrator.executor import (
     ExecutorProfile,
+    handover_threshold,
     ReconFindings,
     executor_label,
     load_executor_config,
@@ -63,6 +64,7 @@ from orchestrator.state import (
     IterationUsage,
     State,
     VerifyRecord,
+    context_size,
     load_state,
     save_state,
 )
@@ -243,6 +245,7 @@ async def _run_one_turn(
     state: State,
     profile: ExecutorProfile,
     out_console: Console | None = None,
+    checkpoint: bool = False,
 ) -> tuple[list[str], IterationUsage, ExecutorRecord]:
     """Run one Worker turn through the WorkerPort and return its text chunks,
     token usage and executor telemetry record (the per-call latency
@@ -265,12 +268,16 @@ async def _run_one_turn(
     result = await session.run_turn(
         user_message,
         on_text=lambda text: out.print(f"[dim]worker:[/dim] {text}", end=""),
+        # Only the handover turn passes the flag, so ordinary turns keep the
+        # plain two-argument call.
+        **({"checkpoint": True} if checkpoint else {}),
     )
     usage.input_tokens = result.input_tokens
     usage.output_tokens = result.output_tokens
     usage.cache_read_tokens = result.cache_read_tokens
     usage.cache_creation_tokens = result.cache_creation_tokens
     usage.model = result.model or ""
+    usage.context_tokens = result.context_tokens
     usage.worker_ms = int((time.monotonic() - worker_start) * 1000)
     # An errored turn (the provider's own verdict, e.g. SDK
     # ResultMessage.is_error) is recorded as a failed worker record. The loop
@@ -479,6 +486,7 @@ async def _execute_handover(
         state=state,
         profile=worker_profile,
         out_console=local_console,
+        checkpoint=True,
     )
     worker_output = "".join(handover_chunks)
 
@@ -788,6 +796,9 @@ async def run_orchestrator(cfg: OrchestratorConfig) -> None:
             save_state(state_path, state)
             local_console.print(f"[bold red]{state.exit_reason}[/bold red]")
             return
+        # The token watcher's threshold: the operator's context_handover_tokens
+        # capped at 70 percent of the Worker model's window (M9, design 6.3).
+        handover_at = handover_threshold(worker_profile, mp_config.context_handover_tokens)
         try:
             worker_adapter = resolve_worker_adapter(
                 worker_profile,
@@ -795,6 +806,7 @@ async def run_orchestrator(cfg: OrchestratorConfig) -> None:
                 held_out_verify=state.held_out_verify,
                 work_dir=work_dir,
                 state_path=state_path,
+                context_limit=handover_at,
             )
         except ValueError as e:
             state.status = "stopped"
@@ -1015,14 +1027,14 @@ async def run_orchestrator(cfg: OrchestratorConfig) -> None:
                         # quality degrades further.
                         if (
                             decision.action == "reply"
-                            and mp_config.context_handover_tokens > 0
+                            and handover_at > 0
                             and state.usage
-                            and state.usage[-1].input_tokens >= mp_config.context_handover_tokens
+                            and context_size(state.usage[-1]) >= handover_at
                         ):
-                            tokens_now = state.usage[-1].input_tokens
+                            tokens_now = context_size(state.usage[-1])
                             local_console.print(
                                 f"[bold yellow]handover:[/bold yellow] context threshold "
-                                f"({tokens_now:,} >= {mp_config.context_handover_tokens:,} tokens), "
+                                f"({tokens_now:,} >= {handover_at:,} tokens), "
                                 f"overriding reply with handover"
                             )
                             decision = ProxyDecision(

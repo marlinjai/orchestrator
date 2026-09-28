@@ -379,9 +379,14 @@ class OpenAICompatWorkerSession:
         clock: Clock = time.monotonic,
         max_tool_rounds: int = MAX_TOOL_ROUNDS,
         command_timeout_s: int = COMMAND_TIMEOUT_S,
+        context_limit: int = 0,
     ) -> None:
         self._profile = profile
         self._chat = chat
+        # The token watcher: once a call's prompt reaches this size the turn
+        # ends (after its tool results are in, so the history stays valid) and
+        # the loop's handover gives the Worker a fresh session. 0 = off.
+        self._context_limit = context_limit
         self._root = work_dir.resolve()
         self._clock = clock
         self._max_tool_rounds = max_tool_rounds
@@ -393,7 +398,9 @@ class OpenAICompatWorkerSession:
         self.audit_path = state_path.parent / TOOL_AUDIT_FILE
         self.messages: list[dict] = [{"role": "system", "content": build_system_prompt()}]
 
-    async def run_turn(self, user_message: str, *, on_text: OnText | None = None) -> TurnResult:
+    async def run_turn(
+        self, user_message: str, *, on_text: OnText | None = None, checkpoint: bool = False
+    ) -> TurnResult:
         self.messages.append({"role": "user", "content": user_message})
         result = TurnResult()
         for _ in range(self._max_tool_rounds):
@@ -424,6 +431,18 @@ class OpenAICompatWorkerSession:
                     {"role": "tool", "tool_call_id": tc["id"], "content": output}
                 )
             call.latency.tool_ms = _ms(self._clock() - tools_started)
+            prompt = int((call.usage or {}).get("prompt_tokens") or 0)
+            # Never on the checkpoint turn: it must reach HANDOVER_COMPLETE.
+            if not checkpoint and self._context_limit and prompt >= self._context_limit:
+                note = (
+                    f"[turn ended by the orchestrator: the context reached {prompt:,} tokens, "
+                    f"the handover threshold of {self._context_limit:,}]"
+                )
+                logger.info("openai-compat worker: %s", note)
+                result.chunks.append(note)
+                if on_text is not None:
+                    on_text(note)
+                return result
         # Out of tool rounds: end the turn visibly instead of failing the run, so
         # the Decision Proxy sees the cap and the loop's own iteration cap governs.
         note = (
@@ -447,6 +466,8 @@ class OpenAICompatWorkerSession:
         details = u.get("prompt_tokens_details") or {}
         cached = int(details.get("cached_tokens") or 0) if isinstance(details, dict) else 0
         result.input_tokens += max(0, prompt - cached)
+        if prompt:
+            result.context_tokens = max(result.context_tokens or 0, prompt)
         result.cache_read_tokens += cached
         result.output_tokens += int(u.get("completion_tokens") or 0)
 
@@ -788,8 +809,10 @@ class OpenAICompatWorkerAdapter:
         state_path: Path,
         chat: ChatStream | None = None,
         clock: Clock = time.monotonic,
+        context_limit: int = 0,
     ) -> None:
         self._profile = profile
+        self._context_limit = context_limit
         self._work_dir = work_dir
         self._state_path = state_path
         self._chat = chat or forward_chat_stream(profile.provider)
@@ -803,4 +826,5 @@ class OpenAICompatWorkerAdapter:
             work_dir=self._work_dir,
             state_path=self._state_path,
             clock=self._clock,
+            context_limit=self._context_limit,
         )

@@ -121,6 +121,21 @@ def resolve_proxy_cli() -> Path | None:
 # startup.
 PROVIDER_FORWARD_ROUTES: dict[str, str] = {"inception": INCEPTION_FORWARD_ROUTE}
 
+# Context window per provider (tokens). The session-refresh ("token watcher")
+# threshold is a fraction of it, see handover_threshold.
+DEFAULT_CONTEXT_WINDOWS: dict[str, int] = {"anthropic": 200_000, "inception": 128_000}
+HANDOVER_WINDOW_FRACTION = 0.7
+
+
+def handover_threshold(profile: "ExecutorProfile", configured: int) -> int:
+    """The context size at which the Worker's session is handed over to a fresh
+    one: the operator's ``context_handover_tokens`` capped at 70 percent of the
+    Worker model's window (design section 6.3, the M9 token watcher). A
+    non-positive configured value disables proactive handover (returns 0)."""
+    if configured <= 0:
+        return 0
+    return min(configured, int(profile.context_window * HANDOVER_WINDOW_FRACTION))
+
 
 def _config_home() -> Path:
     override = os.environ.get("ORCHESTRATOR_CONFIG_HOME")
@@ -149,6 +164,13 @@ class ExecutorProfile:
     auth_mode: AuthMode = "subscription"
     provider: Provider = "anthropic"
     reasoning_effort: str | None = None
+    # The model's context window in tokens; None means the provider default
+    # (DEFAULT_CONTEXT_WINDOWS). Operator-overridable in [executors.<role>].
+    context_window_tokens: int | None = None
+
+    @property
+    def context_window(self) -> int:
+        return self.context_window_tokens or DEFAULT_CONTEXT_WINDOWS[self.provider]
 
     @property
     def is_claude(self) -> bool:
@@ -214,6 +236,12 @@ def _coerce_profile(role: str, raw: dict) -> ExecutorProfile:
             "(the default is a Claude model id)"
         )
 
+    window = raw.get("context_window_tokens")
+    if window is not None and (isinstance(window, bool) or not isinstance(window, int) or window < 1000):
+        raise ValueError(
+            f"executor[{role}].context_window_tokens must be an integer >= 1000, got {window!r}"
+        )
+
     effort = raw.get("reasoning_effort")
     if effort is not None:
         if provider != "inception":
@@ -233,6 +261,7 @@ def _coerce_profile(role: str, raw: dict) -> ExecutorProfile:
         auth_mode=auth_mode,  # type: ignore[arg-type]
         provider=provider,  # type: ignore[arg-type]
         reasoning_effort=effort,
+        context_window_tokens=window,
     )
 
 

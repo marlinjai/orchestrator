@@ -49,6 +49,9 @@ class TurnResult:
     cache_creation_tokens: int = 0
     model: str | None = None
     calls: list[CallLatency] = field(default_factory=list)
+    # Peak prompt size of any single model call in the turn (see
+    # IterationUsage.context_tokens). None when not measurable.
+    context_tokens: int | None = None
     is_error: bool = False
     error_subtype: str | None = None
 
@@ -59,7 +62,11 @@ class WorkerSession(Protocol):
     loop iterates turns against the same session so the worker keeps context);
     the adapter owns whatever connection/process backs it."""
 
-    async def run_turn(self, user_message: str, *, on_text: OnText | None = None) -> TurnResult:
+    async def run_turn(
+        self, user_message: str, *, on_text: OnText | None = None, checkpoint: bool = False
+    ) -> TurnResult:
+        """``checkpoint`` marks the handover turn: the token watcher must let it
+        run to completion instead of ending it early at the context threshold."""
         ...
 
 

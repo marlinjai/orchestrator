@@ -84,6 +84,18 @@ class IterationUsage(BaseModel):
     model: str = ""
     worker_ms: int = 0
     proxy_ms: int = 0
+    # Peak prompt size of any single model call in the turn: the real context
+    # fill. input_tokens is the turn's SUM of uncached prompt tokens (a billing
+    # figure), which overstates context on a tool loop and, for Claude, leaves
+    # out cache reads. None when the adapter could not measure it.
+    context_tokens: int | None = None
+
+
+def context_size(usage: "IterationUsage") -> int:
+    """The context fill the handover trigger and the saturation guard compare
+    against: the measured peak when an adapter reports one, else the legacy
+    summed input tokens."""
+    return usage.context_tokens if usage.context_tokens is not None else usage.input_tokens
 
 
 class CallLatency(BaseModel):

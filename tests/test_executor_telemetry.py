@@ -352,3 +352,44 @@ def test_legacy_recon_record_is_migrated_once_on_load(tmp_path):
     again = load_state(path)
     assert again.executor_records == loaded.executor_records
     assert again.last_recon == rec
+
+
+async def test_claude_adapter_reports_peak_context_per_call():
+    messages = [
+        _assistant("a", [TextBlock(text="x")], out=5, inp=100),
+        _tool_result(),
+        _assistant("b", [TextBlock(text="y")], out=5, inp=300),
+    ]
+    result = await ClaudeWorkerSession(_FakeClient(messages), clock=_Clock([0, 1, 2, 3])).run_turn("go")
+    # input + cache_read (10) + cache_creation (1) of the largest call
+    assert result.context_tokens == 311
+
+
+async def test_claude_adapter_context_ignores_subagent_calls():
+    # A sub-agent's big prompt lives in its own context: it must not size the
+    # main Worker's measurement, while its tokens still count toward the total.
+    messages = [
+        _assistant("a", [TextBlock(text="x")], out=5, inp=100),
+        _assistant("sub", [TextBlock(text="s")], out=5, inp=90_000, parent="tu1"),
+        _tool_result(),
+        _assistant("b", [TextBlock(text="y")], out=5, inp=300),
+    ]
+    result = await ClaudeWorkerSession(_FakeClient(messages), clock=_Clock([0, 1, 2, 3, 4])).run_turn("go")
+    assert result.context_tokens == 311
+    assert result.input_tokens == 100 + 90_000 + 300
+
+
+async def test_claude_adapter_subagent_without_usage_does_not_block_context():
+    silent_sub = AssistantMessage(
+        content=[TextBlock(text="s")],
+        model="claude-opus-4-8",
+        parent_tool_use_id="tu1",
+        usage=None,
+        message_id="sub",
+    )
+    messages = [
+        _assistant("a", [TextBlock(text="x")], out=5, inp=100),
+        silent_sub,
+    ]
+    result = await ClaudeWorkerSession(_FakeClient(messages), clock=_Clock([0, 1, 2])).run_turn("go")
+    assert result.context_tokens == 111

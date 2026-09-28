@@ -6,7 +6,7 @@ from typing import Literal, get_args
 from claude_agent_sdk import ClaudeAgentOptions, query
 
 from orchestrator.config import CATEGORIES, MarlinProxyConfig
-from orchestrator.state import State, ground_truth_summary
+from orchestrator.state import State, context_size, ground_truth_summary
 from orchestrator.transcript import AssistantTurn, extract_text
 
 
@@ -188,7 +188,7 @@ def resolve_marlin_decision(
 def context_saturated(state: State, threshold: int) -> bool:
     if not state.usage:
         return False
-    return state.usage[-1].input_tokens >= threshold
+    return context_size(state.usage[-1]) >= threshold
 
 
 def _escalate(category: str, reason: str) -> MarlinDecision:
@@ -221,7 +221,7 @@ async def run_marlin_decision(
     # on the reply path in orchestrator.py) did not trigger in time. Escalate
     # rather than spending more tokens in the Dumb Zone.
     if context_saturated(state, config.context_saturation_tokens):
-        tokens = state.usage[-1].input_tokens
+        tokens = context_size(state.usage[-1])
         return _escalate(
             "context_saturation",
             f"context saturated ({tokens} tokens >= {config.context_saturation_tokens}); "

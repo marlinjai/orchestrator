@@ -94,6 +94,7 @@ export interface IterationUsage {
   model?: string;
   worker_ms?: number;
   proxy_ms?: number;
+  context_tokens?: number | null;
 }
 
 export interface PlanStep {
