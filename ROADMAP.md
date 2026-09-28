@@ -23,6 +23,11 @@ Living tracker for orchestrator work. Read top to bottom: shipped at the top, in
 - **Typed contract**: `scripts/gen_state_dts.py` now ALSO emits `types/events.d.ts` (the `EventType` alias + `Event` interface, `data` dict as a `{ [key: string]: unknown }` index signature). Same self-contained pure-Python emitter, no node toolchain, no new dependency. A drift test (`tests/test_state_dts.py`) byte-diffs the committed contract and reddens on any `Event` change (verified by prove-then-revert). 433 tests green; ruff clean.
 - **`types/state.d.ts` codegen** (`scripts/gen_state_dts.py`): a self-contained pure-Python emitter walks `State.model_json_schema()` and emits a typed `.d.ts` (one `export interface` per model, named `export type` unions for the four `Literal` aliases, `?` for optional/nullable fields, ISO datetime as `string`, arrays as `T[]`). No node toolchain, no new dependency. A drift test (`tests/test_state_dts.py`) regenerates into memory and byte-diffs the committed file, so `uv run pytest` fails the moment the model changes without a regenerate (verified: a temp field on `State` reddens the test). The future Kanban board reads state.json against this contract and can never silently drift from the source of truth.
 
+### Hexagonal executor ports E4a: the Mercury worker adapter behind the gate (2026-09-28)
+- **`adapters/openai_compat_worker.py`**: an OpenAI-shaped tool loop over the secrets-proxy provider forward (streaming), with confined `read_file` / `write_file` / `edit_file` / `list_dir` / `run_command` / `update_state` tools. One shared path check (`worker.path_outside_root`) for both adapters; `run_command` under the denylist with a scrubbed env.
+- **The E4 gate**: an `inception` worker is refused at startup unless the run has a held-out verifier (registry or `--held-out`). A provider failure fails the run; it never falls back to Claude.
+- **Telemetry**: per-call TTFT, generation, tool time and Inception's own server latency (`CallLatency.server_ms`). Provider errors carry an explicit `transient` flag the retry classifier honors first. Mercury pricing added.
+
 ### Mercury transport: secrets-proxy provider forward (2026-09-28)
 - **The Mercury path was dead**: it POSTed to the secrets proxy's `/raw`, which the proxy refuses by design (501), so every Mercury recon silently fell back to Claude. It now uses the proxy's provider forward (`POST /forward/inception/chat/completions`, secrets-proxy#21): only the chat body crosses, the proxy owns the upstream URL and the key location.
 - **Key in place without a human step**: `INCEPTION_API_KEY` copied server-side into the Agentic OS Platform project's new `/providers` folder (fingerprint-matched, HTTP 200). The synthetic `INCEPTION_PROJECT_ID` default and the other Infisical coordinates are deleted from this repo.
@@ -89,9 +94,9 @@ Living tracker for orchestrator work. Read top to bottom: shipped at the top, in
 - Plan: `docs/plans/2026-05-27-marlin-proxy.md` (in-progress).
 - [ ] Continue the Marlin Proxy rollout past Phase 0 (off -> shadow -> live on safe categories -> self-improvement); see `docs/plans/2026-05-27-marlin-proxy.md`. (2026-09-10)
 
-### Hexagonal executor ports (E1 to E3 landed, E4 open)
-- The seam that makes the model or provider behind a Worker exchangeable (ports-and-adapters). E4 is the OpenAI-compatible worker adapter and the Claude vs Mercury experiment. The Agentic OS milestone M9 (Mercury sprint worker) is blocked on E4.
-- [ ] Build executor ports E4 (OpenAI-compatible worker adapter + Mercury experiment), then unblock M9 in agentic-os-platform; see `docs/plans/2026-07-24-hexagonal-executor-ports.md`. (2026-09-28)
+### Hexagonal executor ports (E1 to E4a landed, E4b open)
+- The seam that makes the model or provider behind a Worker exchangeable (ports-and-adapters). E4b is the Claude vs Mercury race that decides whether Mercury may write code by default. The Agentic OS milestone M9 (Mercury sprint worker) is blocked on E4.
+- [ ] E4b: race Claude vs Mercury workers on N >= 10 goals with held-out verifiers (needs Marlin to pick the repos and held-out test sets; none is configured in the registry yet), decide on `time_to_verified_ms`, then unblock or close M9 in agentic-os-platform; see `docs/plans/2026-07-24-hexagonal-executor-ports.md`. (2026-09-28)
 
 ## Queued (v2 themes, prioritized)
 

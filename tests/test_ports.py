@@ -34,10 +34,34 @@ def test_anthropic_worker_resolves_to_claude_adapter():
     assert isinstance(adapter, WorkerAdapter)  # satisfies the port protocol
 
 
-def test_non_claude_worker_is_refused_until_e4_gate():
+def test_non_claude_worker_is_refused_without_a_held_out_verifier(tmp_path):
+    """The E4 gate: non-Claude code-writing needs a held-out verifier."""
     prof = ExecutorProfile(role="worker", model_id="mercury-2", provider="inception")
-    with pytest.raises(ValueError, match="gated"):
-        resolve_worker_adapter(prof, claude_options=object())
+    with pytest.raises(ValueError, match="held-out verifier"):
+        resolve_worker_adapter(
+            prof, claude_options=object(), work_dir=tmp_path, state_path=tmp_path / "s.json"
+        )
+
+
+def test_non_claude_worker_passes_the_gate_with_a_held_out_verifier(tmp_path):
+    from orchestrator.adapters.openai_compat_worker import OpenAICompatWorkerAdapter
+
+    prof = ExecutorProfile(role="worker", model_id="mercury-2", provider="inception")
+    adapter = resolve_worker_adapter(
+        prof,
+        claude_options=object(),
+        held_out_verify="pytest held_out/",
+        work_dir=tmp_path,
+        state_path=tmp_path / "s.json",
+    )
+    assert isinstance(adapter, OpenAICompatWorkerAdapter)
+    assert isinstance(adapter, WorkerAdapter)
+
+
+def test_provider_without_a_forward_route_is_refused():
+    prof = ExecutorProfile(role="worker", model_id="gpt-x", provider="openai")  # type: ignore[arg-type]
+    with pytest.raises(ValueError, match="no worker adapter"):
+        resolve_worker_adapter(prof, claude_options=object(), held_out_verify="x")
 
 
 def test_default_resolution_yields_claude_worker_adapter(tmp_path):

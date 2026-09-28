@@ -100,9 +100,13 @@ class CallLatency(BaseModel):
     ``ttft_ms`` + ``generation_ms`` split it further when the provider streams
     tokens (the Claude SDK does not without partial messages, so it leaves both
     ``None``). ``tool_ms``: tool execution between this call and the next.
+    ``server_ms``: the provider's own reported processing time for the call
+    (Inception's ``server_timing.server_latency_ms``), so the gap to
+    ``response_ms`` is network plus secrets-proxy overhead.
     """
 
     response_ms: int | None = None
+    server_ms: int | None = None
     ttft_ms: int | None = None
     generation_ms: int | None = None
     tool_ms: int | None = None
@@ -143,6 +147,7 @@ class ExecutorRecord(BaseModel):
     total_ttft_ms: int | None = None
     total_generation_ms: int | None = None
     total_tool_ms: int | None = None
+    total_server_ms: int | None = None
 
     @classmethod
     def build(cls, *, calls: list[CallLatency] | None = None, **fields) -> "ExecutorRecord":
@@ -155,6 +160,7 @@ class ExecutorRecord(BaseModel):
             total_ttft_ms=_sum_known([c.ttft_ms for c in calls]),
             total_generation_ms=_sum_known([c.generation_ms for c in calls]),
             total_tool_ms=_sum_known([c.tool_ms for c in calls]),
+            total_server_ms=_sum_known([c.server_ms for c in calls]),
             **fields,
         )
 

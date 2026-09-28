@@ -133,12 +133,22 @@ The live recon smoke found the secrets proxy answering `/raw` with HTTP 501. `/r
 
 ## Next steps (ordered, as of 2026-09-28)
 
-1. **Land E1+E2** as a fresh pull request (this plan + the seam), landed by land-pr in the background.
+1. **DONE 2026-09-28. E1+E2** landed as #28 (this plan + the seam).
 2. **DONE 2026-09-28. E3: latency telemetry** (own pull request). Per-call `CallLatency` on a generalized `ExecutorRecord`, plus enforce-or-delete `cost_ceiling_usd`. No experiment is interpretable without it.
-3. **E4: the OpenAI-compatible worker adapter** (own pull request). `adapters/openai_compat_worker.py`, the non-Claude worker gate (refuse without a held-out verifier), and the experiment rig: Claude vs Mercury via `--best-of` with a held-out verifier, decided on `time_to_verified_ms` with the TTFT decomposition from E3. Running the live cohort needs step 4. Exit criterion in Verification below.
+3. **E4a DONE 2026-09-28 (the adapter and the gate), E4b OPEN (the race).** **E4: the OpenAI-compatible worker adapter** (own pull request). `adapters/openai_compat_worker.py`, the non-Claude worker gate (refuse without a held-out verifier), and the experiment rig: Claude vs Mercury via `--best-of` with a held-out verifier, decided on `time_to_verified_ms` with the TTFT decomposition from E3. Running the live cohort needs step 4. Exit criterion in Verification below.
 4. **DONE 2026-09-28. Inception key + transport**: see the transport update above; no step for Marlin was needed. Live E1 smoke PASSED 2026-09-28 after secrets-proxy#21 deployed: the loop's `run_recon` with `[executors.recon] model_id = "mercury-2", provider = "inception", reasoning_effort = "low"` gave `state.last_recon.executor == "mercury"`, `ok`, one call, 2312 ms, a 695-character answer; with the proxy unreachable the transport raised `MercuryUnavailable`, the signal `run_recon` falls back to Claude on. The first Mercury completion this path has ever returned.
 5. **Platform side, after E4**: M9's sprint worker in `agentic-os-platform`, per its reconciliation plan.
 6. **MacBook**: after merge, pull the orchestrator checkout there and add `[executors.*]` entries to its own `~/.config/orchestrator/config.toml` to enable Mercury recon from the Mac (the secrets proxy is reachable over Tailscale).
+
+## Reality update (2026-09-28): E4a shipped, E4b needs held-out test sets
+
+E4 was split. **E4a (built)**: `orchestrator/adapters/openai_compat_worker.py`, a hand-rolled OpenAI-shaped tool loop over the provider forward with streaming. Tools `read_file` / `write_file` / `edit_file` / `list_dir` / `run_command` / `update_state` (the same schema constant and handler as the Claude Worker's MCP tool), confined through `worker.path_outside_root` (now the one check both adapters share), `run_command` under the denylist with a scrubbed env and a timeout, output capped, a 60-round per-turn cap that ends the turn visibly. The gate lives in `adapters.resolve_worker_adapter`: an `inception` worker is refused at startup without a held-out verifier. Provider errors carry an explicit `transient` flag that `retry.is_transient_sdk_error` now honors before its substring fallback (a terminal 400 whose body says "150233 tokens" contains "502" and would otherwise be retried). Measured per call: `ttft_ms`, `generation_ms`, `tool_ms`, `output_tokens`, and the new `server_ms` (Inception's `server_timing.server_latency_ms`), so network plus proxy overhead is `response_ms - server_ms`. Mercury pricing is in `MODEL_PRICING`.
+
+Probe findings that shape the experiment (live, 2026-09-28): Mercury is a diffusion model and streams in a few large blocks, not token by token; a tool call arrives whole in the first chunk. So `generation_ms` is near zero and `ttft_ms` is effectively the whole model time per call; the TTFT-vs-throughput question in E4 reduces to "per-call latency times call count". Inception honors `stream_options.include_usage`.
+
+Deliberately not built yet: per-step `reasoning_effort` tuning (apply the profile value uniformly until the E3 numbers show TTFT dominating). Open design question for the race, not blocking E4a: the loop's handover trigger reads `usage[-1].input_tokens`, which for both adapters is the turn's summed uncached prompt tokens, not the peak context size; with Mercury's 128K window and no prompt caching the summed figure can trigger handovers earlier than the real context requires. Measure on the first cohort before changing the trigger for both providers.
+
+**E4b (open)**: the race itself. No repo in the operator registry has a real `held_out_verify` yet (only a commented placeholder for analytics-platform), and a held-out set must live where the Worker's OS user cannot write it. Which repos and which held-out tests is Marlin's call; it is on the ROADMAP line and a decision page.
 
 ## Verification
 
