@@ -225,6 +225,16 @@ def build_system_prompt() -> str:
         "inside your assigned work directory; paths outside it are refused. Use\n"
         "run_command for git, tests and builds. Commands that need secrets are not\n"
         "available to you: if the task needs one, say so as your final message and stop.\n"
+        "\n"
+        "Reporting protocol (the orchestrator checks your reports against git, and a\n"
+        "mismatch sends you back to fix it, so follow it exactly):\n"
+        "- Report a commit only AFTER it exists: run `git commit`, then\n"
+        "  `git rev-parse HEAD`, then call update_state with kind \"commit\" and that\n"
+        "  full SHA. Never report the starting commit you found in the repository.\n"
+        "- Call update_state with kind \"file_touched\" for each file you created or\n"
+        "  changed.\n"
+        "- If you are told a commit or file was not self-reported, call update_state\n"
+        "  for it. Do not make new commits or revert files to fix a report.\n"
     )
 
 

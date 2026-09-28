@@ -204,7 +204,8 @@ def cmd_run(args) -> int:
     out.mkdir(parents=True, exist_ok=True)
     install_vault()
     slugs = [g for g in goal_slugs() if not args.goals or g in args.goals.split(",")]
-    jobs = [(slug, cohort) for slug in slugs for cohort in COHORTS]
+    cohorts = [c for c in COHORTS if not args.cohorts or c in args.cohorts.split(",")]
+    jobs = [(slug, cohort) for slug in slugs for cohort in cohorts]
 
     def _safe(j):
         try:
@@ -298,6 +299,7 @@ def main(argv=None) -> int:
             sp.add_argument("--parallel", type=int, default=3)
             sp.add_argument("--max-iterations", type=int, default=8)
             sp.add_argument("--goals", default="", help="comma-separated subset (a dry run)")
+            sp.add_argument("--cohorts", default="", help="comma-separated subset, e.g. mercury (a remeasure)")
     args = p.parse_args(argv)
     return {"validate": cmd_validate, "run": cmd_run, "report": cmd_report}[args.cmd](args)
 

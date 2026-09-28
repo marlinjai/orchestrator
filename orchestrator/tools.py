@@ -7,6 +7,63 @@ from pydantic import ValidationError
 from orchestrator.state import CommitEntry, Decision, FileTouched, load_state, save_state
 
 
+_SHA_CHARS = set("0123456789abcdef")
+
+
+def _same_commit(a: str, b: str) -> bool:
+    """Two SHAs name the same commit when one is a prefix of the other (a Worker
+    may report the short form of a SHA reconcile recorded in full)."""
+    a, b = a.lower(), b.lower()
+    return len(a) >= 7 and len(b) >= 7 and (a.startswith(b) or b.startswith(a))
+
+
+def _record_commit(state, sha: str, message: str) -> str:
+    """Record a Worker-reported commit and return the tool's reply text.
+
+    A report that matches a commit reconcile already found in git upgrades that
+    entry to self-reported instead of appending a duplicate. Before this, a
+    Worker that reported a commit after the end-of-turn reconcile (Mercury,
+    in the 2026-09-28 race) left the "not self-reported" flag set forever, and
+    the Decision Proxy kept sending it back until the stagnation guard stopped
+    a run whose work was already done.
+    """
+    sha = sha.strip()
+    if len(sha) < 7 or not set(sha.lower()) <= _SHA_CHARS:
+        raise ValueError(
+            f"sha {sha!r} is not a commit SHA: report a commit only AFTER `git commit`, "
+            "passing the full SHA printed by `git rev-parse HEAD`"
+        )
+    if state.baseline_ref and _same_commit(sha, state.baseline_ref):
+        raise ValueError(
+            "that SHA is the run's starting commit, not your work: report the commit "
+            "you created (`git rev-parse HEAD` right after your `git commit`)"
+        )
+    for entry in state.commits:
+        if _same_commit(entry.sha, sha):
+            if entry.decided_by == "system":
+                entry.decided_by = "proxy"
+                if len(sha) > len(entry.sha):
+                    entry.sha = sha
+                if message and not entry.message:
+                    entry.message = message
+                return f"ok: commit {sha[:12]} was already in git; now marked as self-reported"
+            return f"ok: commit {sha[:12]} was already recorded"
+    state.commits.append(CommitEntry(sha=sha, message=message, decided_by="proxy"))
+    return "ok: applied commit"
+
+
+def _record_file(state, path: str) -> str:
+    """Record a Worker-reported file; same upgrade-not-duplicate rule as commits."""
+    for entry in state.files_touched:
+        if entry.path == path:
+            if entry.decided_by == "system":
+                entry.decided_by = "proxy"
+                return f"ok: {path} was already in git; now marked as self-reported"
+            return f"ok: {path} was already recorded"
+    state.files_touched.append(FileTouched(path=path, decided_by="proxy"))
+    return "ok: applied file_touched"
+
+
 def build_update_state_handler(
     state_path: Path,
 ) -> Callable[[dict[str, Any]], Awaitable[dict[str, Any]]]:
@@ -16,6 +73,7 @@ def build_update_state_handler(
         kind = args.get("kind")
         try:
             state = load_state(state_path)
+            reply = f"ok: applied {kind}"
             if kind == "decision":
                 state.decisions.append(
                     Decision(
@@ -27,15 +85,9 @@ def build_update_state_handler(
                     )
                 )
             elif kind == "file_touched":
-                state.files_touched.append(FileTouched(path=args["path"], decided_by="proxy"))
+                reply = _record_file(state, args["path"])
             elif kind == "commit":
-                state.commits.append(
-                    CommitEntry(
-                        sha=args["sha"],
-                        message=args.get("message", ""),
-                        decided_by="proxy",
-                    )
-                )
+                reply = _record_commit(state, args["sha"], args.get("message", ""))
             elif kind == "step_completed":
                 step_id = args["step_id"]
                 for s in state.plan:
@@ -67,7 +119,7 @@ def build_update_state_handler(
                     ]
                 }
             save_state(state_path, state)
-            return {"content": [{"type": "text", "text": f"ok: applied {kind}"}]}
+            return {"content": [{"type": "text", "text": reply}]}
         except (KeyError, ValueError, ValidationError, OSError) as e:
             return {"content": [{"type": "text", "text": f"error: {e}"}]}
 
