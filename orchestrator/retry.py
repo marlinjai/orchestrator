@@ -36,7 +36,17 @@ _TRANSIENT_MARKERS = (
 
 def is_transient_sdk_error(exc: BaseException) -> bool:
     """True for upstream blips worth retrying (overload, rate-limit, network),
-    False for errors that indicate a real problem (bad config, auth, a bug)."""
+    False for errors that indicate a real problem (bad config, auth, a bug).
+
+    An exception that carries an explicit boolean ``transient`` attribute (the
+    OpenAI-compatible worker adapter's provider errors do) is classified by it
+    alone. Substring matching is only the fallback for SDK exceptions, where a
+    terminal error whose body happens to contain e.g. "502" inside a token count
+    would otherwise be retried.
+    """
+    flag = getattr(exc, "transient", None)
+    if isinstance(flag, bool):
+        return flag
     haystack = f"{type(exc).__name__} {exc}".lower()
     return any(marker in haystack for marker in _TRANSIENT_MARKERS)
 

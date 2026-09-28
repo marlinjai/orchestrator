@@ -93,6 +93,11 @@ MERCURY_MODEL_ID = "mercury-2"
 # only names the route.
 INCEPTION_FORWARD_ROUTE = "/forward/inception/chat/completions"
 
+# Chat-completions forward route per non-Anthropic provider (a literal table,
+# not a registry). A provider missing here has no transport and is refused at
+# startup.
+PROVIDER_FORWARD_ROUTES: dict[str, str] = {"inception": INCEPTION_FORWARD_ROUTE}
+
 # The secrets-proxy coordinates (same Tailscale-only host the Worker MCP +
 # notify already use). The Mercury provider forward goes through this proxy so
 # the Inception key is used server-side and never touches this process. The

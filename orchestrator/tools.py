@@ -74,45 +74,52 @@ def build_update_state_handler(
     return handler
 
 
+# The update_state tool contract, shared by every worker adapter: the Claude SDK
+# MCP tool below and the OpenAI-compatible adapter's native function tool, so a
+# Worker reports progress identically whatever model runs it. Explicit JSON
+# schema with `required`, because dict-shorthand @tool makes every field required.
+UPDATE_STATE_DESCRIPTION = (
+    "Update the orchestrator's state.json. Use after each meaningful step. "
+    "Pass `kind` plus only the fields relevant to that kind."
+)
+UPDATE_STATE_SCHEMA: dict[str, Any] = {
+    "type": "object",
+    "properties": {
+        "kind": {
+            "type": "string",
+            "enum": [
+                "decision",
+                "file_touched",
+                "commit",
+                "step_completed",
+                "open_thread",
+                "assumption",
+                "plan_contradiction",
+                "confidence",
+            ],
+        },
+        "turn": {"type": "integer"},
+        "question": {"type": "string"},
+        "answer": {"type": "string"},
+        "reasoning": {"type": "string"},
+        "decided_by": {"type": "string"},
+        "path": {"type": "string"},
+        "sha": {"type": "string"},
+        "message": {"type": "string"},
+        "step_id": {"type": "integer"},
+        "thread": {"type": "string"},
+        "assumption": {"type": "string"},
+        "contradiction": {"type": "string"},
+        "confidence": {"type": "number"},
+    },
+    "required": ["kind"],
+}
+
+
 def build_state_mcp_server(state_path: Path):
     handler = build_update_state_handler(state_path)
 
-    @tool(
-        "update_state",
-        "Update the orchestrator's state.json. Use after each meaningful step. Pass `kind` plus only the fields relevant to that kind.",
-        {
-            "type": "object",
-            "properties": {
-                "kind": {
-                    "type": "string",
-                    "enum": [
-                        "decision",
-                        "file_touched",
-                        "commit",
-                        "step_completed",
-                        "open_thread",
-                        "assumption",
-                        "plan_contradiction",
-                        "confidence",
-                    ],
-                },
-                "turn": {"type": "integer"},
-                "question": {"type": "string"},
-                "answer": {"type": "string"},
-                "reasoning": {"type": "string"},
-                "decided_by": {"type": "string"},
-                "path": {"type": "string"},
-                "sha": {"type": "string"},
-                "message": {"type": "string"},
-                "step_id": {"type": "integer"},
-                "thread": {"type": "string"},
-                "assumption": {"type": "string"},
-                "contradiction": {"type": "string"},
-                "confidence": {"type": "number"},
-            },
-            "required": ["kind"],
-        },
-    )
+    @tool("update_state", UPDATE_STATE_DESCRIPTION, UPDATE_STATE_SCHEMA)
     async def update_state_tool(args: dict[str, Any]) -> dict[str, Any]:
         return await handler(args)
 

@@ -23,6 +23,7 @@ export interface AutonomyStats {
 
 export interface CallLatency {
   response_ms?: number | null;
+  server_ms?: number | null;
   ttft_ms?: number | null;
   generation_ms?: number | null;
   tool_ms?: number | null;
@@ -60,6 +61,7 @@ export interface ExecutorRecord {
   total_ttft_ms?: number | null;
   total_generation_ms?: number | null;
   total_tool_ms?: number | null;
+  total_server_ms?: number | null;
 }
 
 export interface FileTouched {

@@ -773,8 +773,9 @@ async def run_orchestrator(cfg: OrchestratorConfig) -> None:
         # WorkerPort resolution (hexagonal seam, E2): the loop talks to a
         # provider-neutral session; the adapter owns the SDK. With no operator
         # [executors.worker] config this resolves to the Claude adapter and is
-        # byte-for-byte the pre-port behavior. A non-Claude worker provider is
-        # refused loudly here at startup (the E4 gate), before any turn runs.
+        # byte-for-byte the pre-port behavior. A non-Claude worker provider runs
+        # only behind the E4 gate (a held-out verifier resolved above); without
+        # one it is refused loudly here at startup, before any turn runs.
         # A malformed [executors] config is an operator error, not a refusal:
         # persist it as `failed` (terminal notify fires in `finally`) instead of
         # leaving the run stuck in `running`.
@@ -788,7 +789,13 @@ async def run_orchestrator(cfg: OrchestratorConfig) -> None:
             local_console.print(f"[bold red]{state.exit_reason}[/bold red]")
             return
         try:
-            worker_adapter = resolve_worker_adapter(worker_profile, claude_options=options)
+            worker_adapter = resolve_worker_adapter(
+                worker_profile,
+                claude_options=options,
+                held_out_verify=state.held_out_verify,
+                work_dir=work_dir,
+                state_path=state_path,
+            )
         except ValueError as e:
             state.status = "stopped"
             state.exit_reason = f"worker executor refused: {e}"
