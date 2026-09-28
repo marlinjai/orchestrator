@@ -475,3 +475,30 @@ async def test_terminal_failure_is_not_retried(tmp_path):
     with pytest.raises(ProviderError):
         await session.run_turn("go")
     assert len(calls) == 1
+
+
+# ---- M9 token watcher: peak context and the early end of a turn ----
+
+
+async def test_turn_reports_peak_context_and_ends_at_the_threshold(tmp_path):
+    big = _tool_call_events("list_dir", {}, call_id="c1")
+    big[-1]["usage"] = {"prompt_tokens": 90_000, "completion_tokens": 5}
+    chat = _ScriptedChat(
+        _tool_call_events("list_dir", {}, call_id="c0"), big, _text_events("never reached")
+    )
+    session = _session(tmp_path, chat, context_limit=89_600)
+    result = await session.run_turn("go")
+    assert result.context_tokens == 90_000
+    assert "handover threshold" in result.chunks[-1]
+    assert len(chat.bodies) == 2  # the third call never happened
+    # The history stays valid for the handover prompt: the last assistant tool
+    # call already has its tool result.
+    assert session.messages[-1]["role"] == "tool"
+
+
+async def test_no_threshold_means_no_early_end(tmp_path):
+    big = _tool_call_events("list_dir", {}, call_id="c1")
+    big[-1]["usage"] = {"prompt_tokens": 500_000, "completion_tokens": 5}
+    session = _session(tmp_path, _ScriptedChat(big, _text_events("finished")))
+    result = await session.run_turn("go")
+    assert result.chunks[-1] == "finished"

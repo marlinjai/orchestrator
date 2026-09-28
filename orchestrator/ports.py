@@ -49,6 +49,9 @@ class TurnResult:
     cache_creation_tokens: int = 0
     model: str | None = None
     calls: list[CallLatency] = field(default_factory=list)
+    # Peak prompt size of any single model call in the turn (see
+    # IterationUsage.context_tokens). None when not measurable.
+    context_tokens: int | None = None
     is_error: bool = False
     error_subtype: str | None = None
 

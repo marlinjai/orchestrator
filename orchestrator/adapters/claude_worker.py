@@ -152,6 +152,16 @@ class ClaudeWorkerSession:
         complete = calls_seen <= usage_by_call.keys()
         if not complete and result_usage is not None:
             usages = [result_usage]
+        # Context fill = the largest prompt any single call sent (uncached input
+        # plus both cache legs). Only when per-call usage is complete: the
+        # result-message fallback is a turn total, not a context size.
+        if complete and usage_by_call:
+            result.context_tokens = max(
+                int(u.get("input_tokens", 0) or 0)
+                + int(u.get("cache_read_input_tokens", 0) or 0)
+                + int(u.get("cache_creation_input_tokens", 0) or 0)
+                for u in usage_by_call.values()
+            )
         for u in usages:
             result.input_tokens += int(u.get("input_tokens", 0) or 0)
             result.output_tokens += int(u.get("output_tokens", 0) or 0)

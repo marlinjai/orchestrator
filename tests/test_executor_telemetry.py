@@ -352,3 +352,14 @@ def test_legacy_recon_record_is_migrated_once_on_load(tmp_path):
     again = load_state(path)
     assert again.executor_records == loaded.executor_records
     assert again.last_recon == rec
+
+
+async def test_claude_adapter_reports_peak_context_per_call():
+    messages = [
+        _assistant("a", [TextBlock(text="x")], out=5, inp=100),
+        _tool_result(),
+        _assistant("b", [TextBlock(text="y")], out=5, inp=300),
+    ]
+    result = await ClaudeWorkerSession(_FakeClient(messages), clock=_Clock([0, 1, 2, 3])).run_turn("go")
+    # input + cache_read (10) + cache_creation (1) of the largest call
+    assert result.context_tokens == 311

@@ -21,6 +21,7 @@ def resolve_worker_adapter(
     held_out_verify: str | None = None,
     work_dir: Path | None = None,
     state_path: Path | None = None,
+    context_limit: int = 0,
 ) -> WorkerAdapter:
     """Resolve the worker adapter for an executor profile, at startup.
 
@@ -62,7 +63,7 @@ def resolve_worker_adapter(
         from orchestrator.adapters.openai_compat_worker import OpenAICompatWorkerAdapter
 
         return OpenAICompatWorkerAdapter(
-            profile=profile, work_dir=work_dir, state_path=state_path
+            profile=profile, work_dir=work_dir, state_path=state_path, context_limit=context_limit
         )
     raise ValueError(
         f"no worker adapter for provider {profile.provider!r} (model {profile.model_id!r})"
