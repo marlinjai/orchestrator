@@ -29,7 +29,7 @@ Consequences:
 | Piece | Status | Location |
 |---|---|---|
 | Role -> model routing port | DONE (`ExecutorProfile`, `resolve_executor(role)`) | `orchestrator/executor.py:106-210` |
-| Foreign-provider transport | DONE, recon-only (`MercuryTransport`, secrets-proxy `/raw` forward, server-side key) | `executor.py:250-315` |
+| Foreign-provider transport | DONE, recon-only (`MercuryTransport`, secrets-proxy provider forward `/forward/inception/chat/completions`, server-side key; see the 2026-09-28 transport update) | `executor.py` `_proxy_provider_forward` |
 | Recon adapter (Mercury) | DONE but dormant (`run_recon` never called from the loop) | `orchestrator.py:~312-366` |
 | Worker port | MISSING: Worker hard-wired to the Claude Agent SDK | `worker.py:302-384+` |
 | Telemetry | recon-only (`ReconRecord` on `state.last_recon`) | `state.py:89-99` |
@@ -39,7 +39,7 @@ Consequences:
 1. **Judge invariant**: both Proxies stay Claude. `ExecutorProfile.is_claude` keeps enforcing it.
 2. **Operator-config-only routing**: `[executors.<role>]` in `~/.config/orchestrator/config.toml`. Never goal frontmatter, never repo registry.
 3. **No plugin registry**: adapters are a small literal dict. One generic OpenAI-compatible adapter covers Mercury and future compatible providers without adapter-per-vendor creep.
-4. **Key hygiene**: foreign keys only ever server-side via the secrets proxy `/raw` endpoint; `apply_env_contract` scrub stays first in every spawn path. The orchestrator process never holds the Inception key.
+4. **Key hygiene**: foreign keys only ever server-side via the secrets proxy's provider forward (`/forward/<provider>/<op>`; originally specified as `/raw`, which the proxy refuses by design, see the 2026-09-28 transport update); `apply_env_contract` scrub stays first in every spawn path. The orchestrator process never holds the Inception key.
 5. **Fail loud**: adapter unavailable -> warning + Claude fallback (recon) or hard error (worker), never silent skip.
 6. **Non-Claude code-writing stays gated**: a Mercury worker only goes live behind best-of-N with a held-out verifier and a measured `time_to_verified_ms` win. This plan builds the port and the experiment rig; the default stays Claude until the data says otherwise.
 
@@ -67,7 +67,7 @@ class ReconPort(Protocol):
 ## Adapters
 
 - `adapters/claude_worker.py`: wraps today's `build_worker_options` + `run_worker_turn` (Claude Agent SDK, hooks isolation, MCP ceiling, env contract). Byte-for-byte default behavior.
-- `adapters/openai_compat_worker.py`: generic tool loop over an OpenAI-compatible chat-completions endpoint, routed through the secrets-proxy `/raw` transport. Tools: read file, edit file, run command, all confined to the attempt worktree; same verify gate as Claude. Works for `mercury-2` and any future compatible provider.
+- `adapters/openai_compat_worker.py`: generic tool loop over an OpenAI-compatible chat-completions endpoint, routed through the secrets-proxy provider forward (streaming, so TTFT is measurable client-side). Tools: read file, edit file, run command, all confined to the attempt worktree; same verify gate as Claude. Works for `mercury-2` and any future compatible provider.
 - `adapters/claude_recon.py` / `adapters/mercury_recon.py`: today's `_claude_recon` and `run_mercury_recon`, repackaged.
 - Selection: `resolve_adapter(profile)` keyed on `(role, provider)`. Unknown combo = `ValueError` at startup, not turn time.
 
@@ -123,12 +123,20 @@ Correction to the M9 note above: M9 is a SUPERSET of E4, not the same thing. The
 - `cost_ceiling_usd` deleted, and rejected at load with a pointer to `--max-cost-usd` (a per-role ceiling needs per-role price attribution; the run-level cap already exists and is enforced).
 - `orchestrator status` prints an `executor:<role>` line with the latency split; the test suite now isolates `ORCHESTRATOR_CONFIG_HOME` so a developer's real `[executors.recon]` can never make loop tests fire live recon calls.
 
+## Reality update (2026-09-28): the Mercury transport was dead; replaced
+
+The live recon smoke found the secrets proxy answering `/raw` with HTTP 501. `/raw` was never implemented, by design: a "run a shell command, return stdout unredacted" endpoint returns every injected secret for `printenv`. So every Mercury recon since the Wave 2 seam shipped silently fell back to Claude, which is why nothing looked broken. Consequences, all handled on 2026-09-28:
+
+- **secrets-proxy#21** adds the replacement the proxy's own code had already named: a provider forward, `POST /forward/inception/chat/completions`. Literal route allowlist, the caller sends only the JSON body (steering fields rejected), the key is fetched server-side and only placed in the outbound header, caller headers dropped except `Accept`, no shell, response streamed back verbatim and flushed per chunk (so E4 can measure time-to-first-token), one audit line per call. Deploys on merge via its CI.
+- **The key**: the orchestrator's `INCEPTION_PROJECT_ID` default was a synthetic UUID that pointed at nothing. The Agentic OS Platform project (`7c00cb5c-...`) already held a live `INCEPTION_API_KEY` at its root. It was copied server-side with `copy_secret` into a new `/providers` folder of that project (holding only provider keys, so the forward's fetch scope is one secret), fingerprint-matched and functionally checked (HTTP 200). Rotate both locations together. No human handled the value and no placeholder step was needed.
+- **This repo**: `_proxy_raw_forward` and the curl builder are gone; `_proxy_provider_forward` POSTs the body to the route. `INCEPTION_PROJECT_ID` / `INCEPTION_SECRET_PATH` / `INCEPTION_SECRET_ENV` / `INCEPTION_ENDPOINT` are deleted (the proxy owns those coordinates now). The proxy token is resolved by the shared `proxy_token.resolve_proxy_token` (0600 file first), not only from the environment. `MERCURY_MODEL_ID` is `mercury-2` (Inception lists `mercury-2` and `mercury-2.5`; `mercury` does not exist).
+
 ## Next steps (ordered, as of 2026-09-28)
 
 1. **Land E1+E2** as a fresh pull request (this plan + the seam), landed by land-pr in the background.
 2. **DONE 2026-09-28. E3: latency telemetry** (own pull request). Per-call `CallLatency` on a generalized `ExecutorRecord`, plus enforce-or-delete `cost_ceiling_usd`. No experiment is interpretable without it.
 3. **E4: the OpenAI-compatible worker adapter** (own pull request). `adapters/openai_compat_worker.py`, the non-Claude worker gate (refuse without a held-out verifier), and the experiment rig: Claude vs Mercury via `--best-of` with a held-out verifier, decided on `time_to_verified_ms` with the TTFT decomposition from E3. Running the live cohort needs step 4. Exit criterion in Verification below.
-4. **Operator prerequisite: `INCEPTION_API_KEY`** in Infisical (`/providers`, project id in `executor.INCEPTION_PROJECT_ID`) via the placeholder flow: Claude sets `PLACEHOLDER_REPLACE_ME`, Marlin fills the real value in the Infisical UI. Then the live E1 smoke: `[executors.recon] model_id = "mercury-2", provider = "inception"` on a dogfood goal, asserting `state.last_recon.executor == "mercury"` and Claude fallback when the proxy is down.
+4. **DONE 2026-09-28. Inception key + transport**: see the transport update above; no step for Marlin was needed. Live E1 smoke PASSED 2026-09-28 after secrets-proxy#21 deployed: the loop's `run_recon` with `[executors.recon] model_id = "mercury-2", provider = "inception", reasoning_effort = "low"` gave `state.last_recon.executor == "mercury"`, `ok`, one call, 2312 ms, a 695-character answer; with the proxy unreachable the transport raised `MercuryUnavailable`, the signal `run_recon` falls back to Claude on. The first Mercury completion this path has ever returned.
 5. **Platform side, after E4**: M9's sprint worker in `agentic-os-platform`, per its reconciliation plan.
 6. **MacBook**: after merge, pull the orchestrator checkout there and add `[executors.*]` entries to its own `~/.config/orchestrator/config.toml` to enable Mercury recon from the Mac (the secrets proxy is reachable over Tailscale).
 

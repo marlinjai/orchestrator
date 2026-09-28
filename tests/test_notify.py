@@ -2,6 +2,7 @@ import json
 
 import orchestrator.notify as notify_mod
 from orchestrator.notify import TERMINAL_STATUSES, notify
+from orchestrator.proxy_token import resolve_proxy_token
 
 
 def test_notify_never_raises_without_channels(monkeypatch):
@@ -210,7 +211,7 @@ def test_token_file_beats_env(tmp_path, monkeypatch):
     tf.chmod(0o600)
     monkeypatch.setenv("SECRETS_PROXY_TOKEN_FILE", str(tf))
     monkeypatch.setenv("SECRETS_PROXY_TOKEN", "stale-token-from-env")
-    assert notify_mod._resolve_proxy_token() == "token-from-file"
+    assert resolve_proxy_token() == "token-from-file"
 
 
 def test_token_file_ignored_when_world_readable(tmp_path, monkeypatch):
@@ -220,10 +221,10 @@ def test_token_file_ignored_when_world_readable(tmp_path, monkeypatch):
     tf.chmod(0o644)
     monkeypatch.setenv("SECRETS_PROXY_TOKEN_FILE", str(tf))
     monkeypatch.setenv("SECRETS_PROXY_TOKEN", "env-fallback")
-    assert notify_mod._resolve_proxy_token() == "env-fallback"
+    assert resolve_proxy_token() == "env-fallback"
 
 
 def test_no_token_anywhere_resolves_none(tmp_path, monkeypatch):
     monkeypatch.setenv("SECRETS_PROXY_TOKEN_FILE", str(tmp_path / "absent"))
     monkeypatch.delenv("SECRETS_PROXY_TOKEN", raising=False)
-    assert notify_mod._resolve_proxy_token() is None
+    assert resolve_proxy_token() is None

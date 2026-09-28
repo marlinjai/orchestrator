@@ -257,7 +257,7 @@ Each ROLE (`worker`, `recon`, `planner`) resolves to an executor profile (model 
 
 ```toml
 [executors.recon]
-model_id = "mercury"        # Inception Mercury, read-only recon ONLY
+model_id = "mercury-2"      # Inception Mercury (mercury-2 or mercury-2.5), read-only recon ONLY
 provider = "inception"      # REQUIRED for any non-default model; never inferred
 auth_mode = "api_key"
 reasoning_effort = "low"    # optional, Inception-only: instant | low | medium | high
@@ -266,7 +266,7 @@ reasoning_effort = "low"    # optional, Inception-only: instant | low | medium |
 Rules:
 - **Defaults are Claude.** A role you do not pin stays on Claude. A malformed `[executors.*]` table fails the run loud.
 - **`provider` is explicit.** Any model other than the default Claude id must name its provider (`anthropic` or `inception`); routing is never inferred from model-id string shapes. `reasoning_effort` is valid only with `provider = "inception"`.
-- **Non-Anthropic keys go through the proxy.** The Mercury/Inception key is injected SERVER-SIDE on the ai-host secrets proxy (a raw-forward that returns the completion verbatim, not the redacting `/execute` path). The orchestrator process and the transcript never see the key. If the proxy/key is unavailable, recon FAILS LOUD and falls back to Claude recon, never silently skipping.
+- **Non-Anthropic keys go through the proxy.** The Mercury/Inception key is used SERVER-SIDE by the ai-host secrets proxy's provider forward (`POST /forward/inception/chat/completions`): the orchestrator sends only the chat body, the proxy fetches `INCEPTION_API_KEY` from its own allowlisted Infisical location (Agentic OS Platform project, `/providers`) and returns the completion verbatim (not the redacting `/execute` path). The orchestrator names no Infisical project, path or env for it. The proxy token is read from `~/.config/secrets-proxy/token` (0600) first, `SECRETS_PROXY_TOKEN` as fallback. The orchestrator process and the transcript never see the key. If the proxy/key is unavailable, recon FAILS LOUD and falls back to Claude recon, never silently skipping.
 - **Only `recon` (read-only) can be non-Claude in this slice.** The Worker (code-writing) and BOTH Proxies stay on Claude: their integrity is the trust model. A config that points `worker` at a non-Claude provider is refused loudly at startup. **Code-writing via a non-Claude model is NOT enabled here** (it needs a measured `time_to_verified_result` win and best-of-N via the E4 experiment in `docs/plans/2026-07-24-hexagonal-executor-ports.md`). Telemetry for that comparison is below (logged only, never a gate input).
 - **Recon is config-gated in the loop.** When `[executors.recon]` exists, the orchestrator runs one read-only recon question about the goal before the first Worker turn and prepends the findings (marked advisory) to the Worker's first message. With no `[executors.recon]` table, zero extra model calls happen.
 - **No per-role dollar ceiling.** `cost_ceiling_usd` was removed (it was parsed but never enforced) and is now REJECTED at load; cap spend per run with `orchestrator start --max-cost-usd`.
