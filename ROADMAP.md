@@ -101,7 +101,7 @@ Living tracker for orchestrator work. Read top to bottom: shipped at the top, in
 
 ### M9 sprint mode (orchestrator side of the Agentic OS milestone M9)
 - Plan: `agentic-os-platform/docs/plans/2026-09-28-m9-sprint-worker-build.md` (M9's home). Step A, the context-size token watcher, is this repo's first slice; step B is `orchestrator sprint`.
-- [ ] Build `orchestrator sprint`: Claude slices the goal once, every slice runs in one worktree with its own verify gate and Decision Proxy review, a handover document after each slice, hidden tests once at the end, a typed `sprint.json`, resume and re-entry; then a live sprint smoke on the benchmark repo. (2026-09-28)
+- [ ] Live-smoke `orchestrator sprint` on hermes through the Agentic OS once the platform side (agentic-os-platform step C) is deployed; the runner itself, its four flow paths and a local live smoke ship with the sprint pull request. (2026-09-28)
 
 ### Hexagonal executor ports: Mercury worker follow-ups (plan completed 2026-09-28)
 - E1 to E4 shipped; the E4b race verdict is "Mercury wins" on the benchmark (both 10/10 held-out green, median 15.0s against Claude's 28.6s, about 29x cheaper), with a tail of multi-iteration attempts. Details: `docs/plans/2026-07-24-hexagonal-executor-ports.md`, Verdict.

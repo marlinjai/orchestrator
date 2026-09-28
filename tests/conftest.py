@@ -32,3 +32,4 @@ def _isolate_machine_env(monkeypatch):
     # [executors.recon] entry would make every loop test fire a live recon call.
     # Tests that need a config point this at their own tmp dir.
     monkeypatch.setenv("ORCHESTRATOR_CONFIG_HOME", "/nonexistent/orchestrator-tests/config")
+    monkeypatch.delenv("ORCHESTRATOR_EXECUTORS_FILE", raising=False)

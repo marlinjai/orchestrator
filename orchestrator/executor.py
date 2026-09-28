@@ -137,6 +137,14 @@ def handover_threshold(profile: "ExecutorProfile", configured: int) -> int:
     return min(configured, int(profile.context_window * HANDOVER_WINDOW_FRACTION))
 
 
+# A per-run executor overlay, set by an OPERATOR process (the Agentic OS worker
+# routes a tenant's `sprint` rule to the Worker model this way): its
+# [executors.<role>] tables replace those of config.toml for the run, while
+# config.toml's other sections and repos.toml (the held-out verifiers) stay in
+# force. Environment, not goal frontmatter: a goal file can never set it.
+EXECUTORS_FILE_ENV = "ORCHESTRATOR_EXECUTORS_FILE"
+
+
 def _config_home() -> Path:
     override = os.environ.get("ORCHESTRATOR_CONFIG_HOME")
     if override:
@@ -275,9 +283,18 @@ def load_executor_config(path: Path | None = None) -> dict[str, ExecutorProfile]
     field: a goal file can never point a role at a non-Claude model.
     """
     cfg_path = path if path is not None else _config_home() / "config.toml"
-    if not cfg_path.exists():
-        return {}
+    profiles = _read_executors(cfg_path) if cfg_path.exists() else {}
+    if path is None:
+        overlay = os.environ.get(EXECUTORS_FILE_ENV)
+        if overlay:
+            overlay_path = Path(overlay).expanduser()
+            if not overlay_path.exists():
+                raise ValueError(f"{EXECUTORS_FILE_ENV} points at a missing file: {overlay_path}")
+            profiles.update(_read_executors(overlay_path))
+    return profiles
 
+
+def _read_executors(cfg_path: Path) -> dict[str, ExecutorProfile]:
     try:
         data = tomllib.loads(cfg_path.read_text())
     except tomllib.TOMLDecodeError as e:
