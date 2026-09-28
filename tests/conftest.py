@@ -7,22 +7,25 @@ def _isolate_machine_env(monkeypatch):
     developer's operator config.
 
     `notify()` fires in `run_orchestrator`'s `finally`, so without this guard a
-    test run on a machine that has SECRETS_PROXY_TOKEN / ORCHESTRATOR_NOTIFY_URL
-    in its env (e.g. launched via cc.sh) would POST to the live secrets-proxy or
-    webhook and send real Telegram messages. Tests that exercise those channels
-    set the vars explicitly inside the test, which overrides this fixture.
+    test run on a machine that has ORCHESTRATOR_NOTIFY_URL in its env (e.g.
+    launched via cc.sh) would POST to the live webhook and send real
+    notifications. Tests that exercise those channels set the vars explicitly
+    inside the test, which overrides this fixture.
 
-    The token file needs the same treatment and is easier to miss: unsetting the
-    env var is not enough now that the token's home is
-    `~/.config/secrets-proxy/token`, because the resolver falls back to the
-    developer's real file. That is how a real rotated token ended up in a pytest
-    assertion diff on 2026-08-17. Point the override at a path that cannot
-    exist so the resolver finds nothing unless a test says otherwise.
+    The secrets-proxy-call CLI needs the same treatment and is easier to miss:
+    a machine that has actually built the CLI at its default path
+    (`~/software-dev/secrets-proxy/mcp/dist/cli.js`) would otherwise have
+    every unguarded test spawn a real `node` process that mints a real
+    Infisical access token and reaches the live proxy. Point the override at a
+    path that cannot exist so the resolver finds nothing unless a test says
+    otherwise (this mirrors the shared-proxy-token version of this guard that
+    protected a real rotated token from ending up in a pytest assertion diff
+    on 2026-08-17; there is no token to leak any more, but a live network call
+    from the test suite is still the failure mode to prevent).
     """
-    monkeypatch.delenv("SECRETS_PROXY_TOKEN", raising=False)
     monkeypatch.delenv("ORCHESTRATOR_NOTIFY_URL", raising=False)
     monkeypatch.setenv(
-        "SECRETS_PROXY_TOKEN_FILE", "/nonexistent/orchestrator-tests/proxy-token"
+        "SECRETS_PROXY_CLI", "/nonexistent/orchestrator-tests/secrets-proxy-cli.js"
     )
     # The operator config (config.toml: [executors.*], the Marlin Proxy, the
     # repo registry) must never leak in from the developer's machine: a real

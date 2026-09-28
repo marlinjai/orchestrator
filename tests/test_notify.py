@@ -2,7 +2,6 @@ import json
 
 import orchestrator.notify as notify_mod
 from orchestrator.notify import TERMINAL_STATUSES, notify
-from orchestrator.proxy_token import resolve_proxy_token
 
 
 def test_notify_never_raises_without_channels(monkeypatch):
@@ -117,43 +116,64 @@ def test_terminal_statuses_cover_state_machine():
     assert TERMINAL_STATUSES == {"completed", "escalated", "stopped", "failed"}
 
 
-# --- Telegram via secrets-proxy ---------------------------------------------
+# --- Telegram via secrets-proxy (secrets-proxy-call CLI, no token here) -----
 
 
-def test_telegram_skipped_without_proxy_token(monkeypatch):
-    """No SECRETS_PROXY_TOKEN: the telegram channel is a no-op (no proxy call)."""
+def test_telegram_skipped_without_cli(monkeypatch, tmp_path):
+    """No secrets-proxy-call CLI built: the telegram channel is a no-op (no
+    subprocess call)."""
     monkeypatch.setattr(notify_mod.platform, "system", lambda: "Linux")
+    monkeypatch.setenv(notify_mod.PROXY_CLI_ENV, str(tmp_path / "missing" / "cli.js"))
     called = {"n": 0}
     monkeypatch.setattr(
-        notify_mod.urllib.request,
-        "urlopen",
-        lambda *a, **k: called.update(n=called["n"] + 1),
+        notify_mod.subprocess, "run", lambda *a, **k: called.update(n=called["n"] + 1)
     )
     notify(task_id="t", status="completed")
     assert called["n"] == 0
 
 
-def test_telegram_posts_to_proxy(monkeypatch):
+def test_telegram_skipped_without_node(monkeypatch, tmp_path):
+    """The CLI file exists but node is not on PATH: still a no-op."""
     monkeypatch.setattr(notify_mod.platform, "system", lambda: "Linux")
-    monkeypatch.setenv("SECRETS_PROXY_TOKEN", "proxy-tok")
-    monkeypatch.setenv("SECRETS_PROXY_URL", "http://proxy.example:8765")
+    cli = tmp_path / "cli.js"
+    cli.write_text("")
+    monkeypatch.setenv(notify_mod.PROXY_CLI_ENV, str(cli))
+    monkeypatch.setattr(notify_mod.shutil, "which", lambda name: None)
+    called = {"n": 0}
+    monkeypatch.setattr(
+        notify_mod.subprocess, "run", lambda *a, **k: called.update(n=called["n"] + 1)
+    )
+    notify(task_id="t", status="completed")
+    assert called["n"] == 0
+
+
+def _fake_run_result(returncode=0, stderr=""):
+    class _R:
+        pass
+
+    r = _R()
+    r.returncode = returncode
+    r.stderr = stderr
+    return r
+
+
+def test_telegram_pipes_execute_body_into_the_cli(monkeypatch, tmp_path):
+    monkeypatch.setattr(notify_mod.platform, "system", lambda: "Linux")
+    cli = tmp_path / "cli.js"
+    cli.write_text("")
+    monkeypatch.setenv(notify_mod.PROXY_CLI_ENV, str(cli))
+    monkeypatch.setattr(notify_mod.shutil, "which", lambda name: "/usr/bin/node")
     captured = {}
 
-    def fake_urlopen(req, timeout=0):
-        captured["req"] = req
+    def fake_run(argv, *, input, capture_output, text, timeout, check):
+        captured["argv"] = argv
+        captured["input"] = input
+        return _fake_run_result()
 
-        class _R:
-            def close(self):
-                pass
-
-        return _R()
-
-    monkeypatch.setattr(notify_mod.urllib.request, "urlopen", fake_urlopen)
+    monkeypatch.setattr(notify_mod.subprocess, "run", fake_run)
     notify(task_id="lumitra-u1", status="escalated", reason="needs sign-off")
-    req = captured["req"]
-    assert req.full_url == "http://proxy.example:8765/execute"
-    assert req.get_header("X-proxy-token") == "proxy-tok"
-    body = json.loads(req.data.decode())
+    assert captured["argv"] == ["node", str(cli), "execute"]
+    body = json.loads(captured["input"])
     assert body["path"] == "/monitoring"
     assert body["env"] == "production"
     assert body["projectId"]  # non-empty default
@@ -161,70 +181,59 @@ def test_telegram_posts_to_proxy(monkeypatch):
     assert "$TELEGRAM_BOT_TOKEN" in body["command"]
     assert "$TELEGRAM_CHAT_ID" in body["command"]
     assert "lumitra-u1" in body["command"]
+    # No token anywhere: no header, no bearer, no X-Proxy-Token.
+    assert "X-Proxy-Token" not in captured["input"]
+    assert "bearer" not in captured["input"].lower()
 
 
-def test_telegram_shell_safety(monkeypatch):
+def test_telegram_shell_safety(monkeypatch, tmp_path):
     """A reason with shell metacharacters is shlex-quoted into the text arg, not
     executable; the static token refs stay intact."""
     monkeypatch.setattr(notify_mod.platform, "system", lambda: "Linux")
-    monkeypatch.setenv("SECRETS_PROXY_TOKEN", "tok")
+    cli = tmp_path / "cli.js"
+    cli.write_text("")
+    monkeypatch.setenv(notify_mod.PROXY_CLI_ENV, str(cli))
+    monkeypatch.setattr(notify_mod.shutil, "which", lambda name: "/usr/bin/node")
     captured = {}
 
-    def fake_urlopen(req, timeout=0):
-        captured["data"] = req.data.decode()
+    def fake_run(argv, *, input, capture_output, text, timeout, check):
+        captured["input"] = input
+        return _fake_run_result()
 
-        class _R:
-            def close(self):
-                pass
-
-        return _R()
-
-    monkeypatch.setattr(notify_mod.urllib.request, "urlopen", fake_urlopen)
+    monkeypatch.setattr(notify_mod.subprocess, "run", fake_run)
     notify(task_id="t", status="failed", reason="boom '; rm -rf / #$(whoami) & ok")
-    cmd = json.loads(captured["data"])["command"]
+    cmd = json.loads(captured["input"])["command"]
     assert "$TELEGRAM_BOT_TOKEN" in cmd  # static ref preserved
     assert "--data-urlencode" in cmd
     # the dangerous text is present but contained inside the single-quoted arg
     assert "rm -rf" in cmd
 
 
-def test_telegram_failure_swallowed(monkeypatch):
+def test_telegram_failure_swallowed(monkeypatch, tmp_path):
     monkeypatch.setattr(notify_mod.platform, "system", lambda: "Linux")
-    monkeypatch.setenv("SECRETS_PROXY_TOKEN", "tok")
+    cli = tmp_path / "cli.js"
+    cli.write_text("")
+    monkeypatch.setenv(notify_mod.PROXY_CLI_ENV, str(cli))
+    monkeypatch.setattr(notify_mod.shutil, "which", lambda name: "/usr/bin/node")
 
     def boom(*a, **k):
-        raise OSError("proxy down")
+        raise OSError("cli spawn failed")
 
-    monkeypatch.setattr(notify_mod.urllib.request, "urlopen", boom)
+    monkeypatch.setattr(notify_mod.subprocess, "run", boom)
     notify(task_id="t", status="completed")  # must not raise
 
 
-def test_token_file_beats_env(tmp_path, monkeypatch):
-    """The 0600 file is the token's home; a stale env value must not win.
-
-    After a rotation the env var (injected from Infisical by cc.sh) can still
-    hold the OLD token. If env won, every proxy call would 401 until someone
-    re-synced Infisical. File-first makes the rotation self-contained.
-    """
-    tf = tmp_path / "token"
-    tf.write_text("token-from-file\n")
-    tf.chmod(0o600)
-    monkeypatch.setenv("SECRETS_PROXY_TOKEN_FILE", str(tf))
-    monkeypatch.setenv("SECRETS_PROXY_TOKEN", "stale-token-from-env")
-    assert resolve_proxy_token() == "token-from-file"
-
-
-def test_token_file_ignored_when_world_readable(tmp_path, monkeypatch):
-    """A secret readable by group/other is refused, not trusted."""
-    tf = tmp_path / "token"
-    tf.write_text("token-from-file")
-    tf.chmod(0o644)
-    monkeypatch.setenv("SECRETS_PROXY_TOKEN_FILE", str(tf))
-    monkeypatch.setenv("SECRETS_PROXY_TOKEN", "env-fallback")
-    assert resolve_proxy_token() == "env-fallback"
-
-
-def test_no_token_anywhere_resolves_none(tmp_path, monkeypatch):
-    monkeypatch.setenv("SECRETS_PROXY_TOKEN_FILE", str(tmp_path / "absent"))
-    monkeypatch.delenv("SECRETS_PROXY_TOKEN", raising=False)
-    assert resolve_proxy_token() is None
+def test_telegram_nonzero_exit_swallowed(monkeypatch, tmp_path):
+    """A non-2xx from the proxy (surfaced by the CLI's non-zero exit) is a
+    swallowed best-effort failure too, not a raise out of notify()."""
+    monkeypatch.setattr(notify_mod.platform, "system", lambda: "Linux")
+    cli = tmp_path / "cli.js"
+    cli.write_text("")
+    monkeypatch.setenv(notify_mod.PROXY_CLI_ENV, str(cli))
+    monkeypatch.setattr(notify_mod.shutil, "which", lambda name: "/usr/bin/node")
+    monkeypatch.setattr(
+        notify_mod.subprocess,
+        "run",
+        lambda *a, **k: _fake_run_result(returncode=1, stderr="403 forbidden"),
+    )
+    notify(task_id="t", status="completed")  # must not raise

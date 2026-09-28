@@ -404,15 +404,17 @@ def build_worker_options(
         # `infisical run` in Worker context, where raw secrets would land in
         # the subprocess env and the transcript sent to Anthropic.
         #
-        # NEVER put the proxy token in this dict. The SDK serializes
+        # NEVER put a token in this dict. There is no shared proxy token to put
+        # here any more: the MCP client mints its own short-lived access token
+        # from the operator's own Infisical machine identity, read out of the
+        # macOS Keychain (infisical-mi-<org>). Even so, the SDK serializes
         # `mcp_servers` into a `--mcp-config '{...}'` COMMAND LINE ARGUMENT, and
-        # argv is world-readable: `ps aux` printed the token to anyone on the
-        # machine. That is exactly how it leaked on 2026-08-17 and forced a
-        # rotation. The MCP server now reads the token itself from a 0600 file
-        # (~/.config/secrets-proxy/token, override with SECRETS_PROXY_TOKEN_FILE),
-        # which cannot appear in argv and does not propagate to child processes.
-        # With no readable token file the stdio server exits(1) at startup and
-        # the tool simply degrades to unavailable.
+        # argv is world-readable: `ps aux` printed a token to anyone on the
+        # machine back when one lived in this env dict. That is exactly how it
+        # leaked on 2026-08-17 and forced a rotation, so this config carries
+        # only the non-secret proxy URL, nothing that could regress that leak.
+        # With no Keychain identity provisioned the stdio server exits(1) at
+        # startup and the tool simply degrades to unavailable.
         "secrets-proxy": {
             "type": "stdio",
             "command": "node",

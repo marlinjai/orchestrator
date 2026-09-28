@@ -28,8 +28,7 @@ import shlex
 import shutil
 import subprocess
 import urllib.request
-
-from orchestrator.proxy_token import resolve_proxy_token
+from pathlib import Path
 
 logger = logging.getLogger(__name__)
 
@@ -39,17 +38,31 @@ _MAX_MESSAGE = 240
 
 # Telegram via the secrets-proxy: the bot token + chat id stay in Infisical and
 # are injected server-side, so they never enter this process env or any caller
-# context. Active when SECRETS_PROXY_TOKEN is present (the orchestrator already
-# carries it for the Worker's secrets-proxy MCP). The Infisical coordinates
-# default to the monitoring path and are env-overridable.
-PROXY_URL_ENV = "SECRETS_PROXY_URL"
-DEFAULT_PROXY_URL = "http://100.124.97.31:8765"
-# The proxy token comes from proxy_token.resolve_proxy_token (0600 file first).
+# context. This process never handles a token either: the /execute body is
+# piped into the secrets-proxy-call CLI (shipped alongside the MCP client),
+# which mints its own short-lived access token from the operator's own
+# Infisical machine identity in the macOS Keychain. Skipped silently when the
+# CLI is not built. The Infisical coordinates default to the monitoring path
+# and are env-overridable.
+PROXY_CLI_ENV = "SECRETS_PROXY_CLI"
+DEFAULT_PROXY_CLI = Path.home() / "software-dev" / "secrets-proxy" / "mcp" / "dist" / "cli.js"
 TELEGRAM_PROJECT_ID = os.environ.get(
     "ORCHESTRATOR_TELEGRAM_PROJECT_ID", "6adabd49-59d3-4bab-8a1e-c104a0da3c64"
 )
 TELEGRAM_SECRET_PATH = os.environ.get("ORCHESTRATOR_TELEGRAM_PATH", "/monitoring")
 TELEGRAM_SECRET_ENV = os.environ.get("ORCHESTRATOR_TELEGRAM_ENV", "production")
+
+
+def _resolve_proxy_cli() -> Path | None:
+    """The secrets-proxy-call CLI path, or None when it is not built.
+
+    node and the CLI file are checked here so the caller can skip silently
+    (no node on PATH, or the repo not built on this machine) rather than raise.
+    """
+    if not shutil.which("node"):
+        return None
+    cli = Path(os.environ.get(PROXY_CLI_ENV) or DEFAULT_PROXY_CLI)
+    return cli if cli.is_file() else None
 
 
 def _macos_notification(title: str, message: str) -> None:
@@ -93,13 +106,14 @@ def _telegram_via_proxy(title: str, message: str) -> None:
 
     The proxy injects TELEGRAM_BOT_TOKEN + TELEGRAM_CHAT_ID server-side from
     Infisical, so the bot credentials never enter this process env or any
-    caller's context. Reuses the proxy token the orchestrator already holds for
-    the Worker's secrets-proxy MCP; skips silently when that token is absent.
+    caller's context. This process never handles a proxy token either: the
+    /execute body is piped into the secrets-proxy-call CLI, which mints its own
+    token from the operator's Keychain identity. Skips silently when the CLI is
+    not built (no node, or the repo not built on this machine).
     """
-    token = resolve_proxy_token()
-    if not token:
+    cli = _resolve_proxy_cli()
+    if cli is None:
         return
-    proxy_url = os.environ.get(PROXY_URL_ENV, DEFAULT_PROXY_URL).rstrip("/")
     text = f"{title}\n{message}"
     # The message is untrusted (it carries the run's exit reason), so it is
     # shell-single-quoted via shlex.quote. The $TELEGRAM_* refs are static and
@@ -118,14 +132,18 @@ def _telegram_via_proxy(title: str, message: str) -> None:
             "projectId": TELEGRAM_PROJECT_ID,
             "path": TELEGRAM_SECRET_PATH,
         }
-    ).encode("utf-8")
-    req = urllib.request.Request(
-        f"{proxy_url}/execute",
-        data=body,
-        headers={"Content-Type": "application/json", "X-Proxy-Token": token},
-        method="POST",
     )
-    urllib.request.urlopen(req, timeout=15).close()
+    result = subprocess.run(
+        ["node", str(cli), "execute"],
+        input=body,
+        capture_output=True,
+        text=True,
+        timeout=20,
+        check=False,
+    )
+    if result.returncode != 0:
+        reason = (result.stderr or "").strip()[:300]
+        raise RuntimeError(f"secrets-proxy-call execute exited {result.returncode}: {reason}")
 
 
 def notify(

@@ -142,9 +142,8 @@ def _fake_inception_response(text: str) -> str:
 def test_run_mercury_recon_happy_path_with_mocked_transport():
     seen: dict = {}
 
-    def fake_transport(url, token, body):
-        seen["url"] = url
-        seen["token"] = token
+    def fake_transport(cli_path, body):
+        seen["cli_path"] = cli_path
         seen["body"] = body
         return _fake_inception_response("recon: 3 callers of foo()")
 
@@ -153,24 +152,27 @@ def test_run_mercury_recon_happy_path_with_mocked_transport():
         "who calls foo()?",
         profile=profile,
         transport=fake_transport,
-        proxy_token="tok-123",
+        cli_path="fake-secrets-proxy-cli.js",
     )
     assert result.ok is True
     assert result.executor == "mercury"
     assert result.model_id == MERCURY_MODEL_ID
     assert result.findings == "recon: 3 callers of foo()"
     assert result.elapsed_ms >= 0
+    assert seen["cli_path"] == "fake-secrets-proxy-cli.js"
     # The request the transport saw carries the Mercury model + the question, and
-    # nothing about the key (the transport injects it server-side).
+    # nothing about the key (the CLI/proxy inject it server-side).
     assert seen["body"]["model"] == MERCURY_MODEL_ID
     assert seen["body"]["messages"][-1]["content"] == "who calls foo()?"
     assert "INCEPTION_API_KEY" not in json.dumps(seen["body"])
 
 
-def test_run_mercury_recon_raises_without_proxy_token(monkeypatch):
-    monkeypatch.delenv("SECRETS_PROXY_TOKEN", raising=False)
+def test_run_mercury_recon_raises_without_cli(monkeypatch):
+    """No secrets-proxy-call CLI resolvable (and none passed explicitly):
+    availability is simply 'the CLI exists', so this fails loud."""
+    monkeypatch.setattr(ex, "resolve_proxy_cli", lambda: None)
     profile = ExecutorProfile(role="recon", model_id=MERCURY_MODEL_ID)
-    with pytest.raises(MercuryUnavailable, match="token absent"):
+    with pytest.raises(MercuryUnavailable, match="CLI not found"):
         run_mercury_recon("q", profile=profile, transport=lambda *a: "x")
 
 
@@ -178,7 +180,10 @@ def test_run_mercury_recon_raises_on_non_json_response():
     profile = ExecutorProfile(role="recon", model_id=MERCURY_MODEL_ID)
     with pytest.raises(MercuryUnavailable, match="not JSON"):
         run_mercury_recon(
-            "q", profile=profile, transport=lambda *a: "<html>oops</html>", proxy_token="t"
+            "q",
+            profile=profile,
+            transport=lambda *a: "<html>oops</html>",
+            cli_path="fake-cli.js",
         )
 
 
@@ -189,7 +194,7 @@ def test_run_mercury_recon_raises_on_empty_completion():
             "q",
             profile=profile,
             transport=lambda *a: _fake_inception_response("   "),
-            proxy_token="t",
+            cli_path="fake-cli.js",
         )
 
 
@@ -200,100 +205,89 @@ def test_run_mercury_recon_raises_on_missing_content_field():
             "q",
             profile=profile,
             transport=lambda *a: json.dumps({"choices": []}),
-            proxy_token="t",
+            cli_path="fake-cli.js",
         )
 
 
-class _ForwardStub:
-    """A local HTTP server standing in for the secrets proxy's provider forward.
-    Records what it received and answers with a scripted status and body."""
-
-    def __init__(self, status: int, body: str):
-        import http.server
-        import threading
-
-        stub = self
-        self.requests: list[dict] = []
-
-        class Handler(http.server.BaseHTTPRequestHandler):
-            def do_POST(self):
-                length = int(self.headers.get("Content-Length", 0))
-                stub.requests.append(
-                    {
-                        "path": self.path,
-                        "headers": dict(self.headers),
-                        "body": json.loads(self.rfile.read(length)),
-                    }
-                )
-                payload = body.encode("utf-8")
-                self.send_response(status)
-                self.send_header("Content-Type", "application/json")
-                self.send_header("Content-Length", str(len(payload)))
-                self.end_headers()
-                self.wfile.write(payload)
-
-            def log_message(self, *args):
-                pass
-
-        self._server = http.server.HTTPServer(("127.0.0.1", 0), Handler)
-        self.url = f"http://127.0.0.1:{self._server.server_address[1]}"
-        threading.Thread(target=self._server.serve_forever, daemon=True).start()
-
-    def close(self):
-        self._server.shutdown()
+def _write_node_stub(path, *, stdout: str, exit_code: int = 0, stderr: str = ""):
+    """A tiny node script standing in for the secrets-proxy-call CLI: echoes its
+    own argv + stdin to a trace file (so the test can assert on the call), then
+    writes the scripted stdout/stderr and exits with the scripted code."""
+    trace = path.with_suffix(".trace")
+    script = f"""#!/usr/bin/env node
+const fs = require("fs");
+const stdin = fs.readFileSync(0, "utf8");
+fs.writeFileSync({json.dumps(str(trace))}, "ARGV=" + process.argv.slice(2).join(",") + "\\n" + stdin);
+process.stdout.write({json.dumps(stdout)});
+process.stderr.write({json.dumps(stderr)});
+process.exit({exit_code});
+"""
+    path.write_text(script)
+    return trace
 
 
-def test_provider_forward_posts_only_the_body_to_the_route():
-    """The transport names the route and sends the chat body plus the proxy
-    token; no upstream URL, no Infisical coordinates, no key reference."""
-    stub = _ForwardStub(200, _fake_inception_response("ok"))
-    try:
-        body = {"model": MERCURY_MODEL_ID, "messages": [{"role": "user", "content": "hi"}]}
-        raw = ex._proxy_provider_forward(stub.url, "tok-1", body)
-    finally:
-        stub.close()
+def test_provider_forward_pipes_body_into_the_cli_and_returns_stdout(tmp_path):
+    """The transport shells out to `node <cli> forward <route>` with the chat
+    body on stdin and returns stdout verbatim; no token, no upstream URL, no
+    Infisical coordinates cross this boundary."""
+    cli = tmp_path / "cli.js"
+    trace = _write_node_stub(cli, stdout=_fake_inception_response("ok"))
+    body = {"model": MERCURY_MODEL_ID, "messages": [{"role": "user", "content": "hi"}]}
+    raw = ex._proxy_provider_forward(str(cli), body)
     assert json.loads(raw)["choices"][0]["message"]["content"] == "ok"
-    (req,) = stub.requests
-    assert req["path"] == ex.INCEPTION_FORWARD_ROUTE
-    assert req["headers"]["X-Proxy-Token"] == "tok-1"
-    assert req["body"] == body
-    sent = json.dumps(req["body"])
-    for forbidden in ("projectId", "INCEPTION_API_KEY", "api.inceptionlabs.ai", "curl"):
-        assert forbidden not in sent
+    call = trace.read_text()
+    assert call.startswith(f"ARGV=forward,{ex.INCEPTION_FORWARD_ROUTE}\n")
+    assert json.loads(call.split("\n", 1)[1]) == body
+    for forbidden in ("projectId", "INCEPTION_API_KEY", "api.inceptionlabs.ai", "X-Proxy-Token"):
+        assert forbidden not in call
 
 
-def test_provider_forward_http_error_is_mercury_unavailable():
-    """A proxy 502 (key unresolvable) or an upstream error fails loud with the
-    status, so recon falls back to Claude visibly."""
-    stub = _ForwardStub(502, '{"error":"could not resolve the provider key"}')
-    try:
-        with pytest.raises(MercuryUnavailable, match="HTTP 502.*could not resolve"):
-            ex._proxy_provider_forward(stub.url, "tok-1", {"model": "m"})
-    finally:
-        stub.close()
+def test_provider_forward_nonzero_exit_is_mercury_unavailable(tmp_path):
+    """A non-2xx from the proxy (surfaced by the CLI's non-zero exit) fails
+    loud with the CLI's stderr reason, so recon falls back to Claude visibly."""
+    cli = tmp_path / "cli.js"
+    _write_node_stub(cli, stdout="", exit_code=1, stderr="502: could not resolve the provider key")
+    with pytest.raises(MercuryUnavailable, match="exited 1.*could not resolve"):
+        ex._proxy_provider_forward(str(cli), {"model": "m"})
 
 
-def test_provider_forward_unreachable_proxy_is_mercury_unavailable():
-    with pytest.raises(MercuryUnavailable, match="provider forward failed"):
-        ex._proxy_provider_forward("http://127.0.0.1:9", "tok-1", {"model": "m"})
+def test_provider_forward_missing_cli_file_is_mercury_unavailable(tmp_path):
+    """node itself runs fine but cannot find the script: a non-zero exit,
+    surfaced the same way as any other CLI failure."""
+    with pytest.raises(MercuryUnavailable, match="exited 1"):
+        ex._proxy_provider_forward(str(tmp_path / "nope.js"), {"model": "m"})
 
 
-def test_run_mercury_recon_reads_the_token_file(tmp_path, monkeypatch):
-    """The proxy token comes from the 0600 file (the single source of truth),
-    not only from the environment."""
-    tf = tmp_path / "token"
-    tf.write_text("file-token\n")
-    tf.chmod(0o600)
-    monkeypatch.setenv("SECRETS_PROXY_TOKEN_FILE", str(tf))
-    seen = {}
+def test_provider_forward_missing_node_is_mercury_unavailable(monkeypatch, tmp_path):
+    """node itself is not runnable (renamed away, missing PATH entry, ...):
+    subprocess.run raises OSError, which is caught and re-raised loud."""
 
-    def fake_transport(url, token, body):
-        seen["token"] = token
-        return _fake_inception_response("found it")
+    def boom(*a, **k):
+        raise FileNotFoundError("node not found")
 
-    profile = ExecutorProfile(role="recon", model_id=MERCURY_MODEL_ID, provider="inception")
-    run_mercury_recon("q", profile=profile, transport=fake_transport)
-    assert seen["token"] == "file-token"
+    monkeypatch.setattr(ex.subprocess, "run", boom)
+    with pytest.raises(MercuryUnavailable, match="failed to run"):
+        ex._proxy_provider_forward(str(tmp_path / "cli.js"), {"model": "m"})
+
+
+def test_resolve_proxy_cli_missing_file_is_none(monkeypatch, tmp_path):
+    monkeypatch.setenv(ex.PROXY_CLI_ENV, str(tmp_path / "nope" / "cli.js"))
+    assert ex.resolve_proxy_cli() is None
+
+
+def test_resolve_proxy_cli_finds_the_built_cli(monkeypatch, tmp_path):
+    cli = tmp_path / "cli.js"
+    cli.write_text("")
+    monkeypatch.setenv(ex.PROXY_CLI_ENV, str(cli))
+    assert ex.resolve_proxy_cli() == cli
+
+
+def test_resolve_proxy_cli_none_without_node(monkeypatch, tmp_path):
+    cli = tmp_path / "cli.js"
+    cli.write_text("")
+    monkeypatch.setenv(ex.PROXY_CLI_ENV, str(cli))
+    monkeypatch.setattr(ex.shutil, "which", lambda name: None)
+    assert ex.resolve_proxy_cli() is None
 
 
 # --------------------------------------------------------------------------- #
@@ -323,30 +317,32 @@ def test_recon_uses_mercury_when_configured(tmp_path):
     p = tmp_path / "config.toml"
     p.write_text('[executors.recon]\nmodel_id = "mercury-2"\nprovider = "inception"\n')
 
-    def transport(url, token, body):
+    def transport(cli_path, body):
         return _fake_inception_response("mercury findings")
 
     result = recon(
-        "q", config_path=p, transport=transport, proxy_token="tok", claude_recon=lambda q: "x"
+        "q", config_path=p, transport=transport, cli_path="fake-cli.js", claude_recon=lambda q: "x"
     )
     assert result.executor == "mercury"
     assert result.findings == "mercury findings"
 
 
-def test_recon_falls_back_to_claude_when_mercury_unavailable(tmp_path):
-    """Mercury configured but the proxy token is absent: FAIL LOUD into a Claude
-    recon fallback, never a silent skip, never a blocked run."""
+def test_recon_falls_back_to_claude_when_mercury_unavailable(monkeypatch, tmp_path):
+    """Mercury configured but the secrets-proxy-call CLI is not resolvable:
+    FAIL LOUD into a Claude recon fallback, never a silent skip, never a
+    blocked run."""
     p = tmp_path / "config.toml"
     p.write_text('[executors.recon]\nmodel_id = "mercury-2"\nprovider = "inception"\n')
+    monkeypatch.setattr(ex, "resolve_proxy_cli", lambda: None)
 
-    def boom(url, token, body):  # would be the proxy call
-        raise AssertionError("transport should not be reached without a token")
+    def boom(cli_path, body):  # would be the proxy call
+        raise AssertionError("transport should not be reached without a resolvable CLI")
 
     result = recon(
         "q",
         config_path=p,
         transport=boom,
-        proxy_token=None,  # no token => MercuryUnavailable => Claude fallback
+        cli_path=None,  # no CLI resolvable => MercuryUnavailable => Claude fallback
         claude_recon=lambda q: "claude fallback findings",
     )
     assert result.executor == "claude"
@@ -358,14 +354,14 @@ def test_recon_falls_back_to_claude_on_transport_error(tmp_path):
     p = tmp_path / "config.toml"
     p.write_text('[executors.recon]\nmodel_id = "mercury-2"\nprovider = "inception"\n')
 
-    def bad_transport(url, token, body):
+    def bad_transport(cli_path, body):
         raise MercuryUnavailable("proxy 502")
 
     result = recon(
         "q",
         config_path=p,
         transport=bad_transport,
-        proxy_token="tok",
+        cli_path="fake-cli.js",
         claude_recon=lambda q: "fell back",
     )
     assert result.executor == "claude"

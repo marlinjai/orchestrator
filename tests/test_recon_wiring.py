@@ -38,14 +38,18 @@ async def test_run_recon_defaults_to_claude_and_records_telemetry(tmp_path, monk
 
 
 async def test_run_recon_uses_mercury_when_configured(tmp_path, monkeypatch):
-    """recon pinned to Mercury => the non-Claude transport runs, the key never
-    touches this process, and telemetry records the mercury executor."""
+    """recon pinned to Mercury => the non-Claude transport runs, the key (and no
+    token) ever touches this process, and telemetry records the mercury
+    executor."""
     p = tmp_path / "config.toml"
     p.write_text('[executors.recon]\nmodel_id = "mercury-2"\nprovider = "inception"\n')
     state = State(task_id="t", goal="g")
-    monkeypatch.setenv("SECRETS_PROXY_TOKEN", "tok-xyz")
+    # No proxy token anywhere any more; availability is simply "the CLI exists".
+    monkeypatch.setattr(
+        "orchestrator.executor.resolve_proxy_cli", lambda: "fake-secrets-proxy-cli.js"
+    )
 
-    def transport(url, token, body):
+    def transport(cli_path, body):
         assert body["model"] == MERCURY_MODEL_ID
         return _fake_inception("mercury recon: 1 hit")
 
@@ -62,11 +66,13 @@ async def test_run_recon_mercury_failure_falls_back_to_claude(tmp_path, monkeypa
     p = tmp_path / "config.toml"
     p.write_text('[executors.recon]\nmodel_id = "mercury-2"\nprovider = "inception"\n')
     state = State(task_id="t", goal="g")
-    monkeypatch.setenv("SECRETS_PROXY_TOKEN", "tok")
+    monkeypatch.setattr(
+        "orchestrator.executor.resolve_proxy_cli", lambda: "fake-secrets-proxy-cli.js"
+    )
 
     from orchestrator.executor import MercuryUnavailable
 
-    def bad_transport(url, token, body):
+    def bad_transport(cli_path, body):
         raise MercuryUnavailable("proxy down")
 
     async def fake_claude(question):
