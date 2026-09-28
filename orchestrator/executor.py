@@ -38,11 +38,18 @@ which key location are fixed in the proxy's allowlist, never named by this
 process. The key never enters the orchestrator process env or the transcript;
 only the completion text crosses the wire. (An earlier design POSTed a shell
 command to a ``/raw`` endpoint; the proxy refuses that by design, because an
-unredacted shell endpoint would hand out every injected secret.) The transport is a small injectable
-seam (``MercuryTransport``) so tests run with a fake and the production default
-keeps the key server-side. This composes with ``worker.apply_env_contract``'s
-foreign-key scrub rather than fighting it: the orchestrator never holds the key,
-so there is nothing for the scrub to leak.
+unredacted shell endpoint would hand out every injected secret.)
+
+The forward itself goes through the ``secrets-proxy-call`` CLI
+(``mcp/dist/cli.js forward``, shipped alongside the secrets-proxy MCP client),
+not a direct HTTP call with a token: the CLI mints its own short-lived access
+token from the operator's Infisical machine identity in the macOS Keychain, so
+this process never holds a token, only the CLI's path. The transport is a
+small injectable seam (``MercuryTransport``) so tests run with a fake and the
+production default keeps the key and the token both server-side / in the CLI.
+This composes with ``worker.apply_env_contract``'s foreign-key scrub rather
+than fighting it: the orchestrator never holds the key or a token, so there is
+nothing for the scrub to leak.
 """
 
 from __future__ import annotations
@@ -50,15 +57,14 @@ from __future__ import annotations
 import json
 import logging
 import os
+import shutil
+import subprocess
 import time
 import tomllib
-import urllib.error
-import urllib.request
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Callable, Literal, get_args
 
-from orchestrator.proxy_token import resolve_proxy_token
 from orchestrator.worker import AuthMode
 
 logger = logging.getLogger(__name__)
@@ -93,18 +99,27 @@ MERCURY_MODEL_ID = "mercury-2"
 # only names the route.
 INCEPTION_FORWARD_ROUTE = "/forward/inception/chat/completions"
 
+# The secrets-proxy-call CLI (shipped alongside the secrets-proxy MCP client)
+# is what actually reaches the proxy: it mints its own short-lived access
+# token from the operator's Infisical machine identity in the macOS Keychain,
+# so this process names only the CLI's path, never a proxy URL or a token.
+PROXY_CLI_ENV = "SECRETS_PROXY_CLI"
+DEFAULT_PROXY_CLI = Path.home() / "software-dev" / "secrets-proxy" / "mcp" / "dist" / "cli.js"
+
+
+def resolve_proxy_cli() -> Path | None:
+    """The secrets-proxy-call CLI path, or None when it is not built (no node
+    on PATH, or the secrets-proxy repo not built on this machine)."""
+    if not shutil.which("node"):
+        return None
+    cli = Path(os.environ.get(PROXY_CLI_ENV) or DEFAULT_PROXY_CLI)
+    return cli if cli.is_file() else None
+
+
 # Chat-completions forward route per non-Anthropic provider (a literal table,
 # not a registry). A provider missing here has no transport and is refused at
 # startup.
 PROVIDER_FORWARD_ROUTES: dict[str, str] = {"inception": INCEPTION_FORWARD_ROUTE}
-
-# The secrets-proxy coordinates (same Tailscale-only host the Worker MCP +
-# notify already use). The Mercury provider forward goes through this proxy so
-# the Inception key is used server-side and never touches this process. The
-# proxy token itself comes from ``proxy_token.resolve_proxy_token`` (0600 file
-# first), never from a config literal.
-PROXY_URL_ENV = "SECRETS_PROXY_URL"
-DEFAULT_PROXY_URL = "http://100.124.97.31:8765"
 
 
 def _config_home() -> Path:
@@ -290,53 +305,51 @@ class ReconFindings:
 
 
 class MercuryUnavailable(RuntimeError):
-    """Raised when the Mercury path cannot run (no proxy token, proxy error, or a
-    malformed Inception response). The caller catches this and falls back to
-    Claude recon: a loud failure, never a silent skip."""
+    """Raised when the Mercury path cannot run (the secrets-proxy-call CLI is
+    missing, the forward failed, or the Inception response is malformed). The
+    caller catches this and falls back to Claude recon: a loud failure, never a
+    silent skip."""
 
 
-# A transport takes the proxy URL, token, and the JSON request body for the
-# Inception chat-completions call and returns the completion JSON verbatim. The
-# production transport (``_proxy_provider_forward``) has the proxy use the
-# Inception key server-side; tests inject a fake. Keeping this injectable is what
-# lets the orchestrator NEVER hold the key while still getting a usable answer.
-MercuryTransport = Callable[[str, str, dict], str]
+# A transport takes the secrets-proxy-call CLI's path and the JSON request body
+# for the Inception chat-completions call, and returns the completion JSON
+# verbatim. The production transport (``_proxy_provider_forward``) shells out to
+# the CLI, which mints its own token and has the proxy use the Inception key
+# server-side; tests inject a fake. Keeping this injectable is what lets the
+# orchestrator NEVER hold a key or a token while still getting a usable answer.
+MercuryTransport = Callable[[str, dict], str]
 
 
-def _proxy_provider_forward(proxy_url: str, token: str, request_body: dict) -> str:
-    """Production transport: POST the chat request body to the proxy's
-    provider forward and return the completion JSON verbatim.
+def _proxy_provider_forward(cli_path: str, request_body: dict) -> str:
+    """Production transport: pipe the chat request body into the
+    secrets-proxy-call CLI's ``forward`` subcommand and return the completion
+    JSON verbatim.
 
-    The proxy resolves the Inception key from its own allowlisted location and
-    places it only in its outbound request, so nothing but the request body and
-    the completion crosses this boundary. An HTTP error (the proxy's generic 502
-    when it cannot resolve the key, or Inception's own 4xx/5xx passed through)
-    raises ``MercuryUnavailable`` with the status and a short body excerpt, so
-    the caller fails loud and falls back to Claude.
+    The CLI mints its own short-lived Infisical access token from the
+    operator's Keychain identity and the proxy resolves the Inception key from
+    its own allowlisted location, so nothing but the request body and the
+    completion crosses this process. A non-zero exit (the CLI could not reach
+    the proxy, the proxy's generic 502 when it cannot resolve the key, or
+    Inception's own 4xx/5xx passed through) raises ``MercuryUnavailable`` with
+    the CLI's stderr reason, so the caller fails loud and falls back to Claude.
     """
-    req = urllib.request.Request(
-        f"{proxy_url}{INCEPTION_FORWARD_ROUTE}",
-        data=json.dumps(request_body).encode("utf-8"),
-        headers={
-            "Content-Type": "application/json",
-            "Accept": "application/json",
-            "X-Proxy-Token": token,
-        },
-        method="POST",
-    )
     try:
-        with urllib.request.urlopen(req, timeout=120) as resp:
-            return resp.read().decode("utf-8")
-    except urllib.error.HTTPError as e:
-        try:
-            detail = e.read().decode("utf-8", errors="replace")[:300]
-        except OSError:
-            detail = ""
+        result = subprocess.run(
+            ["node", cli_path, "forward", INCEPTION_FORWARD_ROUTE],
+            input=json.dumps(request_body),
+            capture_output=True,
+            text=True,
+            timeout=120,
+            check=False,
+        )
+    except (OSError, subprocess.TimeoutExpired) as e:
+        raise MercuryUnavailable(f"secrets-proxy-call forward failed to run: {e}") from e
+    if result.returncode != 0:
+        reason = (result.stderr or "").strip()[:300]
         raise MercuryUnavailable(
-            f"secrets-proxy provider forward answered HTTP {e.code}: {detail}"
-        ) from e
-    except (urllib.error.URLError, OSError, TimeoutError) as e:
-        raise MercuryUnavailable(f"secrets-proxy provider forward failed: {e}") from e
+            f"secrets-proxy-call forward exited {result.returncode}: {reason}"
+        )
+    return result.stdout
 
 
 def _parse_inception_completion(raw: str) -> str:
@@ -364,8 +377,7 @@ def run_mercury_recon(
     *,
     profile: ExecutorProfile,
     transport: MercuryTransport | None = None,
-    proxy_url: str | None = None,
-    proxy_token: str | None = None,
+    cli_path: str | None = None,
     max_tokens: int = 1024,
 ) -> ReconFindings:
     """Ask Mercury (Inception) a read-only reconnaissance question and return a
@@ -375,22 +387,20 @@ def run_mercury_recon(
     returns the answer text. It runs NO tools, writes NO files, touches NO repo.
 
     The Inception key is used SERVER-SIDE by the transport (default
-    ``_proxy_provider_forward``); the orchestrator never holds it. If the proxy token
-    is absent or the proxy/Inception call fails, this raises ``MercuryUnavailable``
-    so the caller falls back to Claude recon. ``elapsed_ms`` + ``executor`` are
-    recorded for the ``time_to_verified_result`` comparison (logged, never gated).
+    ``_proxy_provider_forward``, which shells out to the secrets-proxy-call
+    CLI); the orchestrator never holds it, nor a proxy token. Availability is
+    simply "the CLI exists": if it is missing or the forward/Inception call
+    fails, this raises ``MercuryUnavailable`` so the caller falls back to
+    Claude recon. ``elapsed_ms`` + ``executor`` are recorded for the
+    ``time_to_verified_result`` comparison (logged, never gated).
     """
-    token = proxy_token if proxy_token is not None else resolve_proxy_token()
-    if not token:
+    resolved = cli_path if cli_path is not None else resolve_proxy_cli()
+    if not resolved:
         raise MercuryUnavailable(
-            "secrets-proxy token absent (~/.config/secrets-proxy/token or "
-            "SECRETS_PROXY_TOKEN); cannot reach the provider forward"
+            f"secrets-proxy-call CLI not found (looked for ${PROXY_CLI_ENV} or "
+            f"{DEFAULT_PROXY_CLI}); cannot reach the provider forward"
         )
-    url = (
-        proxy_url
-        if proxy_url is not None
-        else os.environ.get(PROXY_URL_ENV, DEFAULT_PROXY_URL)
-    ).rstrip("/")
+    path = str(resolved)
     forward = transport or _proxy_provider_forward
 
     request_body = {
@@ -412,7 +422,7 @@ def run_mercury_recon(
         request_body["reasoning_effort"] = profile.reasoning_effort
 
     start = time.monotonic()
-    raw = forward(url, token, request_body)
+    raw = forward(path, request_body)
     findings = _parse_inception_completion(raw)
     elapsed_ms = int((time.monotonic() - start) * 1000)
     return ReconFindings(
@@ -431,16 +441,17 @@ def recon(
     config_path: Path | None = None,
     claude_recon: Callable[[str], str] | None = None,
     transport: MercuryTransport | None = None,
-    proxy_token: str | None = None,
+    cli_path: str | None = None,
 ) -> ReconFindings:
     """Run a read-only reconnaissance question through the resolved ``recon``
     executor, falling back to Claude recon on any Mercury failure.
 
     This is the ONE real call site of the seam: it resolves ``recon`` (Claude by
     default), and ONLY when an operator config points it at Mercury does the
-    non-Claude path run. A ``MercuryUnavailable`` (no proxy token, proxy error,
-    malformed Inception response) FAILS LOUD into a logged warning and a Claude
-    recon fallback -- never a silent skip, never a blocked run.
+    non-Claude path run. A ``MercuryUnavailable`` (the secrets-proxy-call CLI is
+    missing, the forward failed, or the Inception response is malformed) FAILS
+    LOUD into a logged warning and a Claude recon fallback -- never a silent
+    skip, never a blocked run.
 
     ``claude_recon`` is the Claude recon function (question -> findings text). It
     is injected so the orchestrator can wire its own Claude call (the Decision
@@ -452,7 +463,7 @@ def recon(
     if profile.is_mercury:
         try:
             result = run_mercury_recon(
-                question, profile=profile, transport=transport, proxy_token=proxy_token
+                question, profile=profile, transport=transport, cli_path=cli_path
             )
             logger.info(
                 "recon served by mercury (%s) in %dms",

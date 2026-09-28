@@ -62,15 +62,17 @@ def test_worker_options_has_secrets_proxy_mcp(tmp_path: Path):
 def test_worker_options_never_puts_proxy_token_in_mcp_config(
     tmp_path: Path, monkeypatch
 ):
-    """The proxy token must NEVER appear in the MCP server config, even when the
-    environment holds one.
+    """No secret must ever appear in the MCP server config, even when some
+    stray env var of that shape is set.
 
     The SDK serializes `mcp_servers` into a `--mcp-config '{...}'` COMMAND LINE
     ARGUMENT. Argv is world-readable, so a token placed here is printed by
-    `ps aux` to every process on the machine -- which is how it leaked on
-    2026-08-17 and forced a rotation. The MCP server reads the token itself from
-    a 0600 file instead. This test is the regression guard for that leak, so it
-    asserts on the WHOLE serialized config, not just the key we happened to use.
+    `ps aux` to every process on the machine -- which is how a shared proxy
+    token leaked on 2026-08-17 and forced a rotation. There is no shared proxy
+    token any more (the MCP client mints its own short-lived token from the
+    operator's Infisical machine identity in the Keychain), but this test stays
+    as the regression guard: it asserts on the WHOLE serialized config, not
+    just one key, so nothing token-shaped can ever regress into it.
     """
     monkeypatch.setenv("SECRETS_PROXY_TOKEN", "tok-from-cc-sh")
     options = build_worker_options(

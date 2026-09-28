@@ -7,10 +7,9 @@ tool, the command denylist and env scrub, update_state through the shared
 handler, the tool-round cap, and the provider forward's error classification.
 """
 
-import http.server
 import json
+import shutil
 import stat
-import threading
 from pathlib import Path
 
 import pytest
@@ -258,84 +257,88 @@ async def test_update_state_goes_through_the_shared_handler(tmp_path):
 # ---- the provider forward transport ----
 
 
-class _SSEStub:
-    def __init__(self, status: int, body: str, content_type: str = "text/event-stream"):
-        stub = self
-        self.requests: list[dict] = []
-
-        class Handler(http.server.BaseHTTPRequestHandler):
-            def do_POST(self):
-                length = int(self.headers.get("Content-Length", 0))
-                stub.requests.append(
-                    {"path": self.path, "headers": dict(self.headers), "body": json.loads(self.rfile.read(length))}
-                )
-                payload = body.encode()
-                self.send_response(status)
-                self.send_header("Content-Type", content_type)
-                self.send_header("Content-Length", str(len(payload)))
-                self.end_headers()
-                self.wfile.write(payload)
-
-            def log_message(self, *a):
-                pass
-
-        self._srv = http.server.HTTPServer(("127.0.0.1", 0), Handler)
-        self.url = f"http://127.0.0.1:{self._srv.server_address[1]}"
-        threading.Thread(target=self._srv.serve_forever, daemon=True).start()
-
-    def close(self):
-        self._srv.shutdown()
+needs_node = pytest.mark.skipif(shutil.which("node") is None, reason="node is not on PATH")
 
 
-def test_forward_stream_parses_sse_until_done():
+def _cli_stub(path: Path, *, stdout: str, exit_code: int = 0, stderr: str = "") -> Path:
+    """A node script standing in for the secrets-proxy-call CLI: records its argv
+    and stdin to a trace file, then writes the scripted stdout/stderr and exits."""
+    trace = path.with_suffix(".trace")
+    path.write_text(
+        f"""const fs = require("fs");
+const stdin = fs.readFileSync(0, "utf8");
+fs.writeFileSync({json.dumps(str(trace))}, "ARGV=" + process.argv.slice(2).join(",") + "\\n" + stdin);
+process.stdout.write({json.dumps(stdout)});
+process.stderr.write({json.dumps(stderr)});
+process.exit({exit_code});
+"""
+    )
+    return trace
+
+
+@needs_node
+def test_forward_stream_parses_sse_until_done(tmp_path):
     sse = 'data: {"choices":[{"delta":{"content":"hi"}}]}\n\n: keep-alive\n\ndata: [DONE]\n\n'
-    stub = _SSEStub(200, sse)
-    try:
-        stream = forward_chat_stream("inception", proxy_url=stub.url, proxy_token="tok")
-        events = list(stream({"model": "mercury-2"}))
-    finally:
-        stub.close()
+    cli = tmp_path / "cli.js"
+    trace = _cli_stub(cli, stdout=sse)
+    stream = forward_chat_stream("inception", cli_path=str(cli))
+    events = list(stream({"model": "mercury-2"}))
     assert events == [{"choices": [{"delta": {"content": "hi"}}]}]
-    (req,) = stub.requests
-    assert req["path"] == "/forward/inception/chat/completions"
-    assert req["headers"]["Accept"] == "text/event-stream"
-    assert req["headers"]["X-Proxy-Token"] == "tok"
+    argv, body = trace.read_text().split("\n", 1)
+    assert argv == "ARGV=forward,/forward/inception/chat/completions"
+    assert json.loads(body) == {"model": "mercury-2"}
 
 
+@needs_node
 @pytest.mark.parametrize(
-    ("status", "body", "transient"),
+    ("stderr", "transient"),
     [
-        (429, '{"error":"rate limited"}', True),
-        (503, '{"error":"overloaded"}', True),
-        # A terminal error whose body contains "502" inside a token count must
-        # NOT be retried: the explicit flag beats the substring classifier.
-        (400, '{"error":"prompt is 150233 tokens, over the limit"}', False),
+        ("429: rate limited", True),
+        ("HTTP 503 overloaded", True),
+        ("connect ECONNREFUSED 100.124.97.31:8765", True),
+        # A port that looks like an HTTP status must not mask a network failure.
+        ("connect ETIMEDOUT 10.0.0.5:443", True),
+        # Terminal statuses and unclassified failures are not retried.
+        ("400: prompt is too long", False),
+        ("could not resolve the provider key", False),
     ],
 )
-def test_forward_http_errors_carry_an_explicit_transient_flag(status, body, transient):
-    stub = _SSEStub(status, body, "application/json")
-    try:
-        stream = forward_chat_stream("inception", proxy_url=stub.url, proxy_token="tok")
-        with pytest.raises(ProviderError) as info:
-            list(stream({"model": "mercury-2"}))
-    finally:
-        stub.close()
+def test_forward_cli_failures_carry_an_explicit_transient_flag(tmp_path, stderr, transient):
+    cli = tmp_path / "cli.js"
+    _cli_stub(cli, stdout="", exit_code=1, stderr=stderr)
+    stream = forward_chat_stream("inception", cli_path=str(cli))
+    with pytest.raises(ProviderError) as info:
+        list(stream({"model": "mercury-2"}))
     assert info.value.transient is transient
     assert is_transient_sdk_error(info.value) is transient
 
 
-def test_forward_without_a_proxy_token_is_terminal():
-    stream = forward_chat_stream("inception", proxy_url="http://127.0.0.1:9")
-    with pytest.raises(ProviderError, match="token absent") as info:
+@needs_node
+def test_forward_timer_killed_stream_is_a_transient_timeout(tmp_path):
+    cli = tmp_path / "cli.js"
+    cli.write_text("setTimeout(() => {}, 30000);\n")
+    stream = forward_chat_stream("inception", cli_path=str(cli), timeout_s=0.5)
+    with pytest.raises(ProviderError, match="timed out") as info:
+        list(stream({"model": "mercury-2"}))
+    assert info.value.transient is True
+
+
+@needs_node
+def test_forward_malformed_event_is_terminal(tmp_path):
+    cli = tmp_path / "cli.js"
+    _cli_stub(cli, stdout="data: {not json\n\n")
+    stream = forward_chat_stream("inception", cli_path=str(cli))
+    with pytest.raises(ProviderError, match="malformed") as info:
         list(stream({"model": "mercury-2"}))
     assert info.value.transient is False
 
 
-def test_unreachable_forward_is_transient():
-    stream = forward_chat_stream("inception", proxy_url="http://127.0.0.1:9", proxy_token="tok")
-    with pytest.raises(ProviderError) as info:
+def test_forward_without_the_cli_is_terminal(monkeypatch):
+    monkeypatch.setattr("orchestrator.adapters.openai_compat_worker.resolve_proxy_cli", lambda: None)
+    stream = forward_chat_stream("inception")
+    with pytest.raises(ProviderError, match="CLI not found") as info:
         list(stream({"model": "mercury-2"}))
-    assert info.value.transient is True
+    assert info.value.transient is False
 
 
 async def test_every_tool_call_is_audited_next_to_state(tmp_path):

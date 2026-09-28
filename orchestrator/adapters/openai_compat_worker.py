@@ -37,9 +37,8 @@ import os
 import re
 import subprocess
 import tempfile
+import threading
 import time
-import urllib.error
-import urllib.request
 from contextlib import asynccontextmanager
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
@@ -47,14 +46,14 @@ from pathlib import Path
 from typing import Any, AsyncIterator, Callable, Iterator
 
 from orchestrator.executor import (
-    DEFAULT_PROXY_URL,
+    DEFAULT_PROXY_CLI,
     PROVIDER_FORWARD_ROUTES,
-    PROXY_URL_ENV,
+    PROXY_CLI_ENV,
     ExecutorProfile,
+    resolve_proxy_cli,
 )
 from orchestrator.guardrails import bash_allowed
 from orchestrator.ports import OnText, TurnResult
-from orchestrator.proxy_token import resolve_proxy_token
 from orchestrator.state import CallLatency
 from orchestrator.tools import (
     UPDATE_STATE_DESCRIPTION,
@@ -100,74 +99,115 @@ class ProviderError(RuntimeError):
         self.transient = transient
 
 
+_HTTP_STATUS_RE = re.compile(r"\b([45]\d\d)\b")
+_NETWORK_FAILURE_RE = re.compile(
+    r"unreachable|ECONN|ETIMEDOUT|ENOTFOUND|EAI_AGAIN|timed? ?out|socket hang up|fetch failed",
+    re.IGNORECASE,
+)
+
+
+def _cli_failure(returncode: int, stderr: str) -> ProviderError:
+    """Classify a failed ``secrets-proxy-call forward`` run: a retryable HTTP
+    status or a network-level failure is transient, anything else is terminal."""
+    reason = stderr.strip()[:300]
+    if _NETWORK_FAILURE_RE.search(reason):
+        transient = True
+    else:
+        match = _HTTP_STATUS_RE.search(reason)
+        transient = bool(match) and int(match.group(1)) in TRANSIENT_HTTP_STATUSES
+    return ProviderError(
+        f"secrets-proxy-call forward exited {returncode}: {reason}", transient=transient
+    )
+
+
 def forward_chat_stream(
     provider: str,
     *,
-    proxy_url: str | None = None,
-    proxy_token: str | None = None,
+    cli_path: str | None = None,
     timeout_s: float = 300.0,
 ) -> ChatStream:
-    """The production ChatStream: POST to the secrets proxy's provider forward
-    for ``provider`` with ``Accept: text/event-stream`` and yield each SSE
-    ``data:`` event as parsed JSON until ``[DONE]``."""
+    """The production ChatStream: pipe the request body into the
+    secrets-proxy-call CLI's ``forward`` subcommand for ``provider`` and yield
+    each SSE ``data:`` event it relays as parsed JSON until ``[DONE]``.
+
+    The CLI mints its own short-lived token from the operator's machine
+    identity, so this process holds neither the provider key nor a proxy token.
+    """
     route = PROVIDER_FORWARD_ROUTES[provider]
 
     def stream(body: dict) -> Iterator[dict]:
-        token = proxy_token or resolve_proxy_token()
-        if not token:
+        resolved = cli_path if cli_path is not None else resolve_proxy_cli()
+        if not resolved:
             raise ProviderError(
-                "secrets-proxy token absent (~/.config/secrets-proxy/token or "
-                "SECRETS_PROXY_TOKEN); cannot reach the provider forward",
+                f"secrets-proxy-call CLI not found (looked for ${PROXY_CLI_ENV} or "
+                f"{DEFAULT_PROXY_CLI}); cannot reach the provider forward",
                 transient=False,
             )
-        base = (proxy_url or os.environ.get(PROXY_URL_ENV, DEFAULT_PROXY_URL)).rstrip("/")
-        req = urllib.request.Request(
-            base + route,
-            data=json.dumps(body).encode("utf-8"),
-            headers={
-                "Content-Type": "application/json",
-                "Accept": "text/event-stream",
-                "X-Proxy-Token": token,
-            },
-            method="POST",
-        )
         try:
-            resp = urllib.request.urlopen(req, timeout=timeout_s)
-        except urllib.error.HTTPError as e:
+            proc = subprocess.Popen(
+                ["node", str(resolved), "forward", route],
+                stdin=subprocess.PIPE,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+            )
+        except OSError as e:
+            raise ProviderError(f"secrets-proxy-call forward failed to run: {e}", transient=True) from e
+        # The proxy stream ends when the CLI exits; a stalled stream is killed
+        # after timeout_s so a hung forward cannot wedge the run.
+        timed_out = threading.Event()
+
+        def _kill_on_timeout() -> None:
+            timed_out.set()
+            proc.kill()
+
+        timer = threading.Timer(timeout_s, _kill_on_timeout)
+        timer.start()
+        stderr_chunks: list[bytes] = []
+        stderr_thread = threading.Thread(
+            target=lambda: stderr_chunks.append(proc.stderr.read()), daemon=True
+        )
+        stderr_thread.start()
+        try:
             try:
-                detail = e.read().decode("utf-8", errors="replace")[:300]
+                proc.stdin.write(json.dumps(body).encode("utf-8"))
+                proc.stdin.close()
             except OSError:
-                detail = ""
-            raise ProviderError(
-                f"provider forward answered HTTP {e.code}: {detail}",
-                transient=e.code in TRANSIENT_HTTP_STATUSES,
-            ) from e
-        except (urllib.error.URLError, OSError, TimeoutError) as e:
-            raise ProviderError(f"provider forward unreachable: {e}", transient=True) from e
-        with resp:
-            try:
-                while True:
-                    raw = resp.readline(_MAX_SSE_LINE_BYTES + 1)
-                    if not raw:
-                        return
-                    if len(raw) > _MAX_SSE_LINE_BYTES:
-                        raise ProviderError(
-                            "provider stream line exceeds 1 MiB", transient=False
-                        )
-                    line = raw.decode("utf-8", errors="replace").strip()
-                    if not line.startswith("data:"):
-                        continue
-                    data = line[len("data:"):].strip()
-                    if data == "[DONE]":
-                        return
-                    try:
-                        yield json.loads(data)
-                    except json.JSONDecodeError as e:
-                        raise ProviderError(
-                            f"malformed stream event: {data[:200]!r}", transient=False
-                        ) from e
-            except (OSError, TimeoutError) as e:
-                raise ProviderError(f"provider stream interrupted: {e}", transient=True) from e
+                pass  # the CLI died early; its exit status below carries the reason
+            while True:
+                raw = proc.stdout.readline(_MAX_SSE_LINE_BYTES + 1)
+                if not raw:
+                    break
+                if len(raw) > _MAX_SSE_LINE_BYTES:
+                    raise ProviderError("provider stream line exceeds 1 MiB", transient=False)
+                line = raw.decode("utf-8", errors="replace").strip()
+                if not line.startswith("data:"):
+                    continue
+                data = line[len("data:"):].strip()
+                if data == "[DONE]":
+                    return
+                try:
+                    yield json.loads(data)
+                except json.JSONDecodeError as e:
+                    raise ProviderError(
+                        f"malformed stream event: {data[:200]!r}", transient=False
+                    ) from e
+            returncode = proc.wait()
+            stderr_thread.join(timeout=5)
+            if timed_out.is_set():
+                raise ProviderError(
+                    f"provider stream timed out after {timeout_s:g}s", transient=True
+                )
+            if returncode != 0:
+                raise _cli_failure(
+                    returncode, b"".join(stderr_chunks).decode("utf-8", errors="replace")
+                )
+        finally:
+            timer.cancel()
+            if proc.poll() is None:
+                proc.kill()
+            proc.wait()
+            for pipe in (proc.stdin, proc.stdout, proc.stderr):
+                pipe.close()
 
     return stream
 
