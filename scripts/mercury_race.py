@@ -233,6 +233,7 @@ def score(records: list[dict]) -> dict:
     by = {c: {} for c in COHORTS}
     for r in records:
         by[r["cohort"]][r["goal"]] = _goal_outcome(r)
+    ran = [c for c in COHORTS if by[c]]
     goals = sorted(set(by["claude"]) | set(by["mercury"]))
     summary = {}
     for c in COHORTS:
@@ -249,12 +250,33 @@ def score(records: list[dict]) -> dict:
         summary["mercury"]["pass_rate_pct"] >= summary["claude"]["pass_rate_pct"] - PASS_BAND_POINTS
     )
     summary["n_ok"] = len(goals) >= 10
-    summary["mercury_wins"] = bool(faster and within_band and summary["n_ok"])
+    # A verdict needs BOTH cohorts: an absent cohort would otherwise score as 0%
+    # green and infinitely slow, and hand the other one a meaningless win.
+    summary["cohorts_ran"] = ran
+    summary["verdict_possible"] = len(ran) == len(COHORTS)
+    summary["mercury_wins"] = bool(
+        faster and within_band and summary["n_ok"] and summary["verdict_possible"]
+    )
+    summary["attempts"] = {c: _attempt_stats([r for r in records if r["cohort"] == c]) for c in ran}
     summary["per_goal"] = {
         g: {c: {"passed": by[c].get(g, (False, math.inf))[0], "ttv_ms": by[c].get(g, (False, math.inf))[1]} for c in COHORTS}
         for g in goals
     }
     return summary
+
+
+def _attempt_stats(records: list[dict]) -> dict:
+    """Per-attempt view (what best-of-N hides): every attempt, not the best per goal."""
+    atts = [a for r in records for a in (r.get("result") or {}).get("attempts", [])]
+    states = [st for r in records for st in r.get("attempt_states", [])]
+    ttv = [a.get("time_to_verified_ms", 0) / 1000 for a in atts]
+    return {
+        "attempts": len(atts),
+        "green": sum(1 for a in atts if a.get("held_out") == "pass"),
+        "one_iteration": sum(1 for st in states if st.get("iterations") == 1),
+        "median_s": statistics.median(ttv) if ttv else None,
+        "mean_s": statistics.mean(ttv) if ttv else None,
+    }
 
 
 def _fmt_ms(v: float) -> str:
@@ -265,21 +287,26 @@ def cmd_report(args) -> int:
     out = Path(args.out).expanduser()
     records = json.loads((out / "results.json").read_text())
     s = score(records)
-    lines = ["| Goal | Claude | Mercury |", "|---|---|---|"]
+    ran = s["cohorts_ran"]
+    lines = ["| Goal | " + " | ".join(c.capitalize() for c in ran) + " |", "|---|" + "---|" * len(ran)]
     for g, row in s["per_goal"].items():
-        cells = [
-            f"{'pass' if row[c]['passed'] else 'FAIL'} {_fmt_ms(row[c]['ttv_ms'])}" for c in COHORTS
-        ]
-        lines.append(f"| {g} | {cells[0]} | {cells[1]} |")
-    for c in COHORTS:
+        cells = [f"{'pass' if row[c]['passed'] else 'FAIL'} {_fmt_ms(row[c]['ttv_ms'])}" for c in ran]
+        lines.append(f"| {g} | " + " | ".join(cells) + " |")
+    for c in ran:
+        a = s["attempts"][c]
         lines.append(
-            f"\n{c}: {s[c]['passed']}/{s[c]['goals']} held-out green "
-            f"({s[c]['pass_rate_pct']:.0f}%), median time to verified {_fmt_ms(s[c]['median_ttv_ms'])}"
+            f"\n{c}: {s[c]['passed']}/{s[c]['goals']} goals held-out green "
+            f"({s[c]['pass_rate_pct']:.0f}%), median time to verified {_fmt_ms(s[c]['median_ttv_ms'])}; "
+            f"per attempt: {a['green']}/{a['attempts']} green, {a['one_iteration']}/{a['attempts']} in one "
+            f"iteration, median {a['median_s']:.1f}s, mean {a['mean_s']:.1f}s"
         )
-    lines.append(
-        f"\nExit criterion (N >= 10, Mercury median faster, pass rate within "
-        f"{PASS_BAND_POINTS:.0f} points): {'MERCURY WINS' if s['mercury_wins'] else 'Mercury does not win'}"
-    )
+    if s["verdict_possible"]:
+        lines.append(
+            f"\nExit criterion (N >= 10, Mercury median faster, pass rate within "
+            f"{PASS_BAND_POINTS:.0f} points): {'MERCURY WINS' if s['mercury_wins'] else 'Mercury does not win'}"
+        )
+    else:
+        lines.append(f"\nNo verdict: only the {', '.join(ran)} cohort ran (a remeasure, not a race).")
     text = "\n".join(lines)
     (out / "report.md").write_text(text + "\n")
     (out / "score.json").write_text(json.dumps(s, indent=2, default=str))
