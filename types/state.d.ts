@@ -79,6 +79,7 @@ export interface ReconRecord {
   model_id: string;
   elapsed_ms: number;
   ok?: boolean;
+  findings?: string;
   ran_at?: string;
 }
 
