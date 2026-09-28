@@ -76,8 +76,16 @@ ChatStream = Callable[[dict], Iterator[dict]]
 TRANSIENT_HTTP_STATUSES = frozenset({408, 409, 425, 429, 500, 502, 503, 504, 529})
 
 MAX_TOOL_ROUNDS = 60
+# A provider stream that sends nothing for this long is stalled (Mercury answers
+# a call in seconds; the 2026-09-28 remeasures saw calls hang 2 to 4 minutes and
+# then return nothing). The call is retried in place, keeping the conversation.
+STREAM_READ_TIMEOUT_S = 60.0
+CALL_RETRIES = 2
+CALL_RETRY_BACKOFF_S = 2.0
 COMMAND_TIMEOUT_S = 600
 MAX_TOOL_OUTPUT_CHARS = 30_000
+# A shell command that creates a commit (`git commit`, `git -C x commit ...`).
+_GIT_COMMIT = re.compile(r"\bgit\b[^;&|\n]*\bcommit\b")
 TOOL_AUDIT_FILE = "worker-tools.jsonl"
 AUDIT_RESULT_CHARS = 500
 
@@ -124,7 +132,7 @@ def forward_chat_stream(
     provider: str,
     *,
     cli_path: str | None = None,
-    timeout_s: float = 300.0,
+    timeout_s: float = STREAM_READ_TIMEOUT_S,
 ) -> ChatStream:
     """The production ChatStream: pipe the request body into the
     secrets-proxy-call CLI's ``forward`` subcommand for ``provider`` and yield
@@ -162,6 +170,14 @@ def forward_chat_stream(
 
         timer = threading.Timer(timeout_s, _kill_on_timeout)
         timer.start()
+
+        def _rearm() -> None:
+            # The limit is on silence, so every line that arrives restarts it.
+            nonlocal timer
+            timer.cancel()
+            timer = threading.Timer(timeout_s, _kill_on_timeout)
+            timer.start()
+
         stderr_chunks: list[bytes] = []
         stderr_thread = threading.Thread(
             target=lambda: stderr_chunks.append(proc.stderr.read()), daemon=True
@@ -177,6 +193,7 @@ def forward_chat_stream(
                 raw = proc.stdout.readline(_MAX_SSE_LINE_BYTES + 1)
                 if not raw:
                     break
+                _rearm()
                 if len(raw) > _MAX_SSE_LINE_BYTES:
                     raise ProviderError("provider stream line exceeds 1 MiB", transient=False)
                 line = raw.decode("utf-8", errors="replace").strip()
@@ -225,6 +242,16 @@ def build_system_prompt() -> str:
         "inside your assigned work directory; paths outside it are refused. Use\n"
         "run_command for git, tests and builds. Commands that need secrets are not\n"
         "available to you: if the task needs one, say so as your final message and stop.\n"
+        "\n"
+        "Reporting protocol (the orchestrator checks your reports against git, and a\n"
+        "mismatch sends you back to fix it, so follow it exactly):\n"
+        "- Report a commit only AFTER it exists: run `git commit`, then\n"
+        "  `git rev-parse HEAD`, then call update_state with kind \"commit\" and that\n"
+        "  full SHA. Never report the starting commit you found in the repository.\n"
+        "- Call update_state with kind \"file_touched\" for each file you created or\n"
+        "  changed.\n"
+        "- If you are told a commit or file was not self-reported, call update_state\n"
+        "  for it. Do not make new commits or revert files to fix a report.\n"
     )
 
 
@@ -370,7 +397,7 @@ class OpenAICompatWorkerSession:
         self.messages.append({"role": "user", "content": user_message})
         result = TurnResult()
         for _ in range(self._max_tool_rounds):
-            call = await asyncio.to_thread(self._call_model)
+            call = await self._call_model_with_retry()
             # One on_text per model call, not per stream delta: the loop prefixes
             # every on_text with "worker:", and Mercury's delta boundaries fall
             # mid-word, so per-delta output interleaved prefixes into the text.
@@ -436,15 +463,76 @@ class OpenAICompatWorkerSession:
             body["reasoning_effort"] = self._profile.reasoning_effort
         return body
 
+    async def _call_model_with_retry(self) -> _ModelCall:
+        """One model call, retried in place on a transient provider failure or
+        an empty answer (no text and no tool call), up to CALL_RETRIES times.
+        Retrying here keeps the conversation; failing the turn would cost a whole
+        iteration, and a transient error reaching the loop restarts the session."""
+        attempt = 0
+        while True:
+            try:
+                call = await asyncio.to_thread(self._call_model)
+            except ProviderError as e:
+                if not e.transient or attempt >= CALL_RETRIES:
+                    raise
+                logger.warning("openai-compat worker: retrying a failed call (%s)", e)
+            else:
+                if call.content or call.tool_calls:
+                    return call
+                if attempt >= CALL_RETRIES:
+                    raise ProviderError(
+                        f"the provider returned an empty answer {attempt + 1} times in a row",
+                        transient=True,
+                    )
+                logger.warning("openai-compat worker: retrying an empty answer")
+            attempt += 1
+            await asyncio.sleep(CALL_RETRY_BACKOFF_S * attempt)
+
     def _call_model(self) -> _ModelCall:
         """One streamed model call, run in a worker thread (blocking I/O)."""
         call = _ModelCall()
         pending: dict[int, dict] = {}
         parts: list[str] = []
+        marks: dict[str, float] = {}
         sent = self._clock()
-        first: float | None = None
-        last: float | None = None
-        for event in self._chat(self._request_body()):
+        stream = self._chat(self._request_body())
+        try:
+            self._consume(stream, call, pending, parts, marks)
+        finally:
+            close = getattr(stream, "close", None)
+            if close is not None:
+                close()
+        first, last = marks.get("first"), marks.get("last")
+        done = self._clock()
+        call.content = "".join(parts)
+        call.tool_calls = [
+            {
+                "id": slot["id"] or f"call_{index}",
+                "name": slot["name"],
+                "arguments": slot["arguments"] or "{}",
+            }
+            for index, slot in sorted(pending.items())
+        ]
+        if first is not None and last is not None:
+            call.latency.ttft_ms = _ms(first - sent)
+            call.latency.generation_ms = _ms(last - first)
+        # The full wall time of the call, stream close included: a provider that
+        # holds the stream open after its last chunk must show up here.
+        call.latency.response_ms = _ms(done - sent)
+        if call.usage and isinstance(call.usage.get("completion_tokens"), int):
+            call.latency.output_tokens = call.usage["completion_tokens"]
+        return call
+
+    def _consume(self, stream, call: _ModelCall, pending: dict, parts: list, marks: dict) -> None:
+        """Read stream events into ``call`` until the call is complete.
+
+        Complete means a finish reason AND the usage chunk have arrived. The read
+        stops there instead of waiting for ``[DONE]`` or the connection to close:
+        in the 2026-09-28 remeasure Inception sometimes held a finished stream
+        open for about two minutes, which stalled the Worker for that long.
+        """
+        finished = False
+        for event in stream:
             now = self._clock()
             call.model = call.model or event.get("model")
             if isinstance(event.get("usage"), dict):
@@ -471,33 +559,75 @@ class OpenAICompatWorkerSession:
                     if fn.get("arguments"):
                         slot["arguments"] += fn["arguments"]
                     produced = True
+                if choice.get("finish_reason"):
+                    finished = True
             if produced:
-                first = now if first is None else first
-                last = now
-        done = self._clock()
-        call.content = "".join(parts)
-        call.tool_calls = [
-            {
-                "id": slot["id"] or f"call_{index}",
-                "name": slot["name"],
-                "arguments": slot["arguments"] or "{}",
-            }
-            for index, slot in sorted(pending.items())
-        ]
-        if first is not None and last is not None:
-            call.latency.ttft_ms = _ms(first - sent)
-            call.latency.generation_ms = _ms(last - first)
-        call.latency.response_ms = _ms((last if last is not None else done) - sent)
-        if call.usage and isinstance(call.usage.get("completion_tokens"), int):
-            call.latency.output_tokens = call.usage["completion_tokens"]
-        return call
+                marks.setdefault("first", now)
+                marks["last"] = now
+            if finished and call.usage is not None:
+                return
 
     # ---- tools ----
 
     async def _run_tool(self, name: str, raw_args: str) -> str:
         output = await self._dispatch_tool(name, raw_args)
         self._audit(name, raw_args, output)
+        await self._record_observed(name, raw_args, output)
         return output
+
+    async def _record_observed(self, name: str, raw_args: str, output: str) -> None:
+        """Record in state what the Worker's own tool calls observably did.
+
+        Every change this Worker makes goes through its tools, so the harness
+        knows exactly which files it wrote and which commits its `git commit`
+        commands created. Recording them here (through the same update_state
+        handler, so matching and dedupe rules apply) keeps the self-report in
+        step with git without depending on the model remembering to call
+        update_state; in the E4b race and its remeasure that forgetfulness cost
+        Mercury an extra iteration on most goals. The raw record stays in the
+        audit log either way.
+        """
+        try:
+            args = json.loads(raw_args) if raw_args.strip() else {}
+        except json.JSONDecodeError:
+            return
+        if not isinstance(args, dict):
+            return
+        if name in ("write_file", "edit_file") and output.startswith("ok"):
+            try:
+                rel = self._confined(args.get("path")).relative_to(self._root)
+            except (PermissionError, ValueError):
+                return
+            await self._update_state({"kind": "file_touched", "path": str(rel)})
+        elif (
+            name == "run_command"
+            and output.startswith("exit code 0")
+            and _GIT_COMMIT.search(str(args.get("command", "")))
+        ):
+            head = await asyncio.to_thread(self._read_head_commit)
+            if head is None:
+                return
+            sha, message, files = head
+            await self._update_state({"kind": "commit", "sha": sha, "message": message})
+            for f in files:
+                await self._update_state({"kind": "file_touched", "path": f})
+
+    def _read_head_commit(self) -> tuple[str, str, list[str]] | None:
+        """The SHA, subject and changed files of HEAD in the work dir."""
+
+        def git(*argv: str) -> str:
+            return subprocess.run(
+                ["git", *argv], cwd=self._root, capture_output=True, text=True, check=True
+            ).stdout.strip()
+
+        try:
+            sha = git("rev-parse", "HEAD")
+            message = git("log", "-1", "--format=%s")
+            files = [f for f in git("show", "--name-only", "--format=", "HEAD").splitlines() if f]
+        except (subprocess.CalledProcessError, OSError) as e:
+            logger.warning("openai-compat worker: could not read the new commit: %s", e)
+            return None
+        return sha, message, files
 
     def _audit(self, name: str, raw_args: str, output: str) -> None:
         """Append one JSON line per tool call. File contents are recorded by

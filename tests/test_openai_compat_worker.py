@@ -361,3 +361,117 @@ async def test_audit_file_is_secured_even_if_it_pre_existed_world_readable(tmp_p
     session = _session(tmp_path, _ScriptedChat())
     await _tool(session, "write_file", {"path": "a.txt", "content": "x"})
     assert stat.S_IMODE(audit_path.stat().st_mode) == 0o600
+
+
+# ---- observed actions keep the self-report in step with git ----
+
+
+async def test_tool_calls_record_their_files_and_commits(tmp_path):
+    import subprocess
+
+    from orchestrator.reconcile import reconcile
+
+    session = _session(tmp_path, _ScriptedChat())
+    root = tmp_path / "work"
+    git = ["git", "-c", "user.email=t@example.invalid", "-c", "user.name=t"]
+    subprocess.run(["git", "init", "-q", "-b", "main"], cwd=root, check=True)
+    (root / "seed.txt").write_text("seed")
+    subprocess.run([*git, "add", "-A"], cwd=root, check=True)
+    subprocess.run([*git, "commit", "-q", "-m", "seed"], cwd=root, check=True)
+    base = subprocess.run(["git", "rev-parse", "HEAD"], cwd=root, capture_output=True, text=True).stdout.strip()
+    state = load_state(tmp_path / "state.json")
+    state.baseline_ref = base
+    save_state(tmp_path / "state.json", state)
+
+    await _tool(session, "write_file", {"path": "src/a.py", "content": "x = 1\n"})
+    out = await _tool(
+        session,
+        "run_command",
+        {"command": 'git add -A && git -c user.email=t@example.invalid -c user.name=t commit -q -m "feat: a"'},
+    )
+    assert out.startswith("exit code 0")
+
+    state = load_state(tmp_path / "state.json")
+    head = subprocess.run(["git", "rev-parse", "HEAD"], cwd=root, capture_output=True, text=True).stdout.strip()
+    assert [(c.sha, c.message, c.decided_by) for c in state.commits] == [(head, "feat: a", "proxy")]
+    assert [f.path for f in state.files_touched] == ["src/a.py"]
+    # Reconcile finds nothing the Worker did not report.
+    assert reconcile(state, root) == (0, 0)
+
+
+async def test_failed_commit_and_refused_write_record_nothing(tmp_path):
+    session = _session(tmp_path, _ScriptedChat())
+    await _tool(session, "write_file", {"path": "../escape.txt", "content": "x"})
+    await _tool(session, "run_command", {"command": "git commit -m nothing"})  # not a repo: exit != 0
+    state = load_state(tmp_path / "state.json")
+    assert state.commits == [] and state.files_touched == []
+
+
+async def test_read_stops_once_the_call_is_complete(tmp_path):
+    """A provider that holds a finished stream open must not stall the Worker:
+    once a finish reason and the usage chunk are in, reading stops and the
+    stream is closed."""
+    closed = []
+
+    def stalling_chat(body):
+        def gen():
+            try:
+                yield from _text_events("done")
+                raise AssertionError("read past the usage chunk (the provider stall)")
+            finally:
+                closed.append(True)
+
+        return gen()
+
+    session = _session(tmp_path, stalling_chat)
+    result = await session.run_turn("go")
+    assert result.chunks == ["done"]
+    assert closed == [True]
+    # response_ms is the full wall time of the call (clock reads: sent, 4 events, done)
+    assert result.calls[0].response_ms is not None
+
+
+# ---- stalled or empty provider answers are retried in place ----
+
+
+async def test_empty_answer_is_retried_in_place(tmp_path, monkeypatch):
+    import orchestrator.adapters.openai_compat_worker as mod
+
+    monkeypatch.setattr(mod, "CALL_RETRY_BACKOFF_S", 0)
+    empty = [{"choices": [{"delta": {}, "finish_reason": "stop"}]}, {"choices": [], "usage": {"prompt_tokens": 1, "completion_tokens": 0}}]
+    chat = _ScriptedChat(empty, _text_events("real answer"))
+    session = _session(tmp_path, chat)
+    result = await session.run_turn("go")
+    assert result.chunks == ["real answer"]
+    assert len(chat.bodies) == 2
+    # The retry sent the same conversation, not a new turn.
+    assert chat.bodies[0]["messages"] == chat.bodies[1]["messages"]
+
+
+async def test_transient_failure_is_retried_then_surfaces(tmp_path, monkeypatch):
+    import orchestrator.adapters.openai_compat_worker as mod
+
+    monkeypatch.setattr(mod, "CALL_RETRY_BACKOFF_S", 0)
+    calls = []
+
+    def failing_chat(body):
+        calls.append(1)
+        raise ProviderError("stream stalled", transient=True)
+
+    session = _session(tmp_path, failing_chat)
+    with pytest.raises(ProviderError, match="stalled"):
+        await session.run_turn("go")
+    assert len(calls) == 1 + mod.CALL_RETRIES
+
+
+async def test_terminal_failure_is_not_retried(tmp_path):
+    calls = []
+
+    def bad_request(body):
+        calls.append(1)
+        raise ProviderError("HTTP 400", transient=False)
+
+    session = _session(tmp_path, bad_request)
+    with pytest.raises(ProviderError):
+        await session.run_turn("go")
+    assert len(calls) == 1

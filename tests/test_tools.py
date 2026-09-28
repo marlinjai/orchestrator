@@ -111,3 +111,89 @@ async def test_update_state_step_completed_unknown_id_warns(state_path: Path):
     handler = build_update_state_handler(state_path)
     result = await handler({"kind": "step_completed", "step_id": 99})
     assert "warning" in result["content"][0]["text"].lower()
+
+
+# ---- update_state: late reports upgrade reconciled entries (the Mercury tail) ----
+
+
+async def _call(state_path, **args):
+    from orchestrator.tools import build_update_state_handler
+
+    res = await build_update_state_handler(state_path)(args)
+    return res["content"][0]["text"]
+
+
+def _state_with(tmp_path, **fields):
+    from orchestrator.state import State, save_state
+
+    p = tmp_path / "state.json"
+    save_state(p, State(task_id="t", goal="g", **fields))
+    return p
+
+
+async def test_late_commit_report_upgrades_the_reconciled_entry(tmp_path):
+    from orchestrator.state import CommitEntry, load_state
+
+    full = "5cbc341288bb2c5d495024dee9c8b37404432a2f"
+    p = _state_with(tmp_path, commits=[CommitEntry(sha=full, message="fix", decided_by="system")])
+    out = await _call(p, kind="commit", sha="5cbc341", message="fix")
+    assert "now marked as self-reported" in out
+    (entry,) = load_state(p).commits
+    assert entry.decided_by == "proxy" and entry.sha == full
+
+
+async def test_repeated_commit_report_is_not_duplicated(tmp_path):
+    from orchestrator.state import load_state
+
+    p = _state_with(tmp_path)
+    await _call(p, kind="commit", sha="a" * 40)
+    out = await _call(p, kind="commit", sha="a" * 7)
+    assert "already recorded" in out
+    assert len(load_state(p).commits) == 1
+
+
+@pytest.mark.parametrize("sha", ["", "abc", "not-a-sha-at-all"])
+async def test_commit_without_a_real_sha_is_refused_with_guidance(tmp_path, sha):
+    from orchestrator.state import load_state
+
+    p = _state_with(tmp_path)
+    out = await _call(p, kind="commit", sha=sha)
+    assert out.startswith("error:") and "git rev-parse HEAD" in out
+    assert load_state(p).commits == []
+
+
+async def test_reporting_the_baseline_commit_is_refused(tmp_path):
+    base = "b" * 40
+    p = _state_with(tmp_path, baseline_ref=base)
+    out = await _call(p, kind="commit", sha=base[:7])
+    assert out.startswith("error:") and "starting commit" in out
+
+
+async def test_late_file_report_upgrades_and_does_not_duplicate(tmp_path):
+    from orchestrator.state import FileTouched, load_state
+
+    p = _state_with(tmp_path, files_touched=[FileTouched(path="a.py", decided_by="system")])
+    assert "now marked as self-reported" in await _call(p, kind="file_touched", path="a.py")
+    assert "already recorded" in await _call(p, kind="file_touched", path="a.py")
+    (entry,) = load_state(p).files_touched
+    assert entry.decided_by == "proxy"
+
+
+def test_record_commit_rejects_ambiguous_short_sha():
+    from types import SimpleNamespace
+
+    from orchestrator.state import CommitEntry
+    from orchestrator.tools import _record_commit
+
+    state = SimpleNamespace(
+        baseline_ref="",
+        commits=[
+            CommitEntry(sha="abcdef1" + "0" * 33, message="", decided_by="system"),
+            CommitEntry(sha="abcdef1" + "1" * 33, message="", decided_by="system"),
+        ],
+    )
+    import pytest
+
+    with pytest.raises(ValueError, match="ambiguous"):
+        _record_commit(state, "abcdef1", "")
+    assert all(c.decided_by == "system" for c in state.commits)

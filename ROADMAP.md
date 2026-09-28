@@ -102,7 +102,8 @@ Living tracker for orchestrator work. Read top to bottom: shipped at the top, in
 ### Hexagonal executor ports: Mercury worker follow-ups (plan completed 2026-09-28)
 - E1 to E4 shipped; the E4b race verdict is "Mercury wins" on the benchmark (both 10/10 held-out green, median 15.0s against Claude's 28.6s, about 29x cheaper), with a tail of multi-iteration attempts. Details: `docs/plans/2026-07-24-hexagonal-executor-ports.md`, Verdict.
 - [ ] Mercury Worker round two on real repositories before it does real work: pick the repos and their hidden test sets (Marlin), move the hidden tests to a separate OS user so the Worker cannot read them, rerun `scripts/mercury_race.py`-style cohorts, and gate the result on the same 10-point band. (2026-09-28)
-- [ ] Cut the Mercury tail: a Mercury-specific prompt nudge so it calls `update_state` instead of narrating (the cause of its multi-iteration loops in the race), then remeasure single-attempt time. (2026-09-28)
+- [x] DONE 2026-09-28: Cut the Mercury tail. Four causes found and fixed (an `update_state` duplicate bug, self-report bookkeeping, streams held open, stalled calls); 20 of 20 attempts now finish in one iteration, mean 29.2s. Details: the plan's night reality update.
+- [ ] Recover the Mercury per-call overhead the caller-identity CLI added (a Node process and a token mint per model call, about 0.4s on 15 to 45 calls per task): keep one CLI process or its token alive per Worker session, then remeasure. (2026-09-28)
 
 ## Queued (v2 themes, prioritized)
 
