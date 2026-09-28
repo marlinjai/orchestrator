@@ -317,7 +317,17 @@ def _out_of_root_path(tool_input: dict, project_root: Path) -> Path | None:
     """Resolve tool_input's file_path against project_root and return it if it
     escapes project_root, else None. project_root must already be resolved
     (realpath)."""
-    raw = tool_input.get("file_path")
+    return path_outside_root(tool_input.get("file_path"), project_root)
+
+
+def path_outside_root(raw: str | None, project_root: Path) -> Path | None:
+    """The one worktree-confinement check, shared by every worker adapter.
+
+    Resolve ``raw`` (absolute, or relative to ``project_root``) and return the
+    resolved path when it escapes ``project_root``, else None. ``project_root``
+    must already be resolved (realpath). Symlinks are followed, so a link
+    pointing out of the worktree is caught too.
+    """
     if not raw:
         return None
     candidate = Path(raw)

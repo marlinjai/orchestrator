@@ -86,6 +86,10 @@ MODEL_PRICING: dict[str, tuple[float, float, float, float]] = {
     "opus": (15.0, 75.0, 1.5, 18.75),
     "sonnet": (3.0, 15.0, 0.30, 3.75),
     "haiku": (1.0, 5.0, 0.10, 1.25),
+    # Inception Mercury: $0.25/M input, $0.75/M output. Inception publishes no
+    # separate cache prices, so cached input is priced as plain input (an
+    # over-estimate, the safe direction for a cost cap).
+    "mercury": (0.25, 0.75, 0.25, 0.25),
 }
 DEFAULT_PRICING: tuple[float, float, float, float] = (3.0, 15.0, 0.30, 3.75)
 

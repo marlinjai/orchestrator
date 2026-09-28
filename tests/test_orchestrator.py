@@ -770,3 +770,75 @@ async def test_recon_runs_once_and_persists_findings(cfg: OrchestratorConfig, ex
     assert [r.role for r in state.executor_records] == ["recon", "worker"]
     assert state.executor_records[0] == state.last_recon
     assert "mind the migrations" in mock_turn.call_args.kwargs["user_message"]
+
+
+# ---- E4: a Mercury worker end to end, behind the held-out gate ----
+
+
+def _pin_mercury_worker(home: Path) -> None:
+    (home / "config.toml").write_text(
+        '[executors.worker]\nmodel_id = "mercury-2"\nprovider = "inception"\n'
+    )
+
+
+async def test_mercury_worker_refused_without_held_out(cfg: OrchestratorConfig, executor_home: Path):
+    _pin_mercury_worker(executor_home)
+    with patch("orchestrator.orchestrator._run_one_turn") as mock_turn:
+        await run_orchestrator(cfg)
+    state = load_state(cfg.state_dir / "state.json")
+    assert state.status == "stopped"
+    assert "held-out verifier" in (state.exit_reason or "")
+    mock_turn.assert_not_called()
+
+
+def _tool_event(call_id: str, name: str, args: str) -> dict:
+    return {
+        "model": "mercury-2",
+        "choices": [
+            {"delta": {"tool_calls": [{"index": 0, "id": call_id, "function": {"name": name, "arguments": args}}]}}
+        ],
+    }
+
+
+async def test_mercury_worker_runs_a_real_turn_and_completes(tmp_path: Path, executor_home: Path):
+    """The real loop drives the real OpenAI-compatible session (only the provider
+    stream is scripted): the Worker writes a file through its confined tool,
+    the held-out gate passes, and the telemetry names Mercury."""
+    _pin_mercury_worker(executor_home)
+    repo = _repo_with_test(tmp_path)
+    cfg = _cfg_for_repo(tmp_path, repo, verify="true")
+    cfg.held_out_override = "test -f note.txt"
+
+    def scripted(provider, **kw):
+        calls = [
+            [
+                _tool_event("c1", "write_file", '{"path": "note.txt", "content": "hi"}'),
+                {"choices": [], "usage": {"prompt_tokens": 100, "completion_tokens": 5}},
+            ],
+            [
+                {"model": "mercury-2", "choices": [{"delta": {"content": "wrote note.txt"}}]},
+                {"choices": [], "usage": {"prompt_tokens": 120, "completion_tokens": 3}},
+            ],
+        ]
+
+        def stream(body):
+            yield from calls.pop(0)
+
+        return stream
+
+    with patch(
+        "orchestrator.adapters.openai_compat_worker.forward_chat_stream", side_effect=scripted
+    ), patch(
+        "orchestrator.orchestrator.run_proxy_decision",
+        return_value=ProxyDecision(action="stop", text="", reasoning="done"),
+    ):
+        await run_orchestrator(cfg)
+
+    state = load_state(cfg.state_dir / "state.json")
+    assert (repo / "note.txt").read_text() == "hi"
+    assert state.last_held_out is not None and state.last_held_out.status == "pass"
+    assert state.status == "completed"
+    (rec,) = [r for r in state.executor_records if r.role == "worker"]
+    assert rec.executor == "mercury" and rec.provider == "inception"
+    assert rec.call_count == 2
+    assert state.usage[-1].output_tokens == 8

@@ -116,6 +116,12 @@ def resolve_proxy_cli() -> Path | None:
     return cli if cli.is_file() else None
 
 
+# Chat-completions forward route per non-Anthropic provider (a literal table,
+# not a registry). A provider missing here has no transport and is refused at
+# startup.
+PROVIDER_FORWARD_ROUTES: dict[str, str] = {"inception": INCEPTION_FORWARD_ROUTE}
+
+
 def _config_home() -> Path:
     override = os.environ.get("ORCHESTRATOR_CONFIG_HOME")
     if override:
