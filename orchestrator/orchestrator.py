@@ -156,9 +156,19 @@ class OrchestratorConfig:
     # into a real stop. The autonomous-orchestration skill instructs Claude to
     # NEVER self-authorize this for tier 3+ and always surface to Marlin first.
     confirm_stakes: bool = False
+    # Sprint-runner only (orchestrator/sprint.py), never a CLI flag or a goal
+    # field: a slice still resolves the held-out verifier (so the E4 gate admits
+    # a non-Claude Worker) but does not RUN it at stop, because a mid-sprint tree
+    # legitimately fails the final hidden tests. The sprint runs them once on
+    # the finished tree.
+    held_out_deferred: bool = False
 
 
 console = Console()
+
+# How much of the Worker's latest message state.json keeps (the sprint runner
+# builds its handover document from it).
+LAST_WORKER_TEXT_CHARS = 4000
 
 
 def _env_flag(name: str) -> bool:
@@ -910,6 +920,7 @@ async def run_orchestrator(cfg: OrchestratorConfig) -> None:
                         state = load_state(state_path)
                         state.usage.append(usage)
                         state.executor_records.append(worker_record)
+                        state.last_worker_text = "".join(chunks)[-LAST_WORKER_TEXT_CHARS:]
                         commits_added, files_added = reconcile(state, work_dir)
                         if commits_added or files_added:
                             local_console.print(
@@ -1144,7 +1155,11 @@ async def run_orchestrator(cfg: OrchestratorConfig) -> None:
                             # passed (or as the sole gate when there is none). A
                             # FAIL is the reward-hack fingerprint (visible green,
                             # hidden red) and escalates, never a Worker retry.
-                            if state.held_out_verify:
+                            if state.held_out_verify and cfg.held_out_deferred:
+                                local_console.print(
+                                    "[dim]held-out: deferred to the end of the sprint[/dim]"
+                                )
+                            elif state.held_out_verify:
                                 local_console.print(
                                     "[bold]held-out:[/bold] running the operator's "
                                     "out-of-reach test set"

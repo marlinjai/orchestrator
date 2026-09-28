@@ -186,6 +186,63 @@ def start(
 
 
 @app.command()
+def sprint(
+    goal: Path = typer.Option(..., "--goal", help="Path to the sprint goal (its frontmatter `verify` gates every slice)"),
+    project: Path = typer.Option(Path.cwd(), "--project", help="Project git repository"),
+    task_id: str = typer.Option("", "--task-id", help="Task ID (auto-generated if empty); rerun the same ID to resume"),
+    persona: Path = typer.Option(
+        Path(__file__).parent.parent / "personas" / "default.md", "--persona", help="Decision Proxy persona"
+    ),
+    marlin_persona: Path = typer.Option(
+        Path(__file__).parent.parent / "personas" / "marlin.md", "--marlin-persona", help="Marlin Proxy persona"
+    ),
+    max_iterations: int = typer.Option(15, "--max-iterations", help="Iteration cap PER SLICE"),
+    max_hours: float = typer.Option(1.0, "--max-hours", help="Wall-clock cap PER SLICE"),
+    max_slices: int = typer.Option(8, "--max-slices", help="Upper bound on slices the slicer may propose"),
+    handover_dir: Path | None = typer.Option(
+        None,
+        "--handover-dir",
+        help="Where the per-slice handover documents go (default: <task dir>/handover). The Agentic OS passes a folder in the tenant vault.",
+    ),
+    held_out: str = typer.Option(
+        "",
+        "--held-out",
+        help="Operator held-out verify command, run ONCE on the finished sprint (slices defer it). Required for a non-Claude Worker unless the repo registry sets one.",
+    ),
+    confirm_stakes: bool = typer.Option(False, "--confirm-stakes", help="Same operator authorization as `start`"),
+):
+    """Run a goal as a sprint: Claude slices it once, each slice runs as its own
+    orchestrator run in one shared worktree, with a handover document between
+    slices and the held-out verifier once at the end (Agentic OS M9)."""
+    from orchestrator.sprint import run_sprint
+
+    tid = task_id or uuid.uuid4().hex[:8]
+    state_dir = _task_dir(tid)
+    cfg = OrchestratorConfig(
+        task_id=tid,
+        goal_file=goal,
+        persona_file=persona,
+        project_dir=project,
+        state_dir=state_dir,
+        max_iterations=max_iterations,
+        max_seconds=max_hours * 3600,
+        log_path=state_dir / "run.log",
+        marlin_persona_file=marlin_persona,
+        daily_token_cap=_daily_token_cap(),
+        orchestrator_home=_home(),
+        held_out_override=(held_out or None),
+        confirm_stakes=confirm_stakes,
+    )
+    console.print(f"[bold green]starting sprint {tid}[/bold green]")
+    console.print(f"  goal: {goal}")
+    console.print(f"  project: {project}")
+    console.print(f"  state: {state_dir}")
+    result = asyncio.run(run_sprint(cfg, handover_dir=handover_dir, max_slices=max_slices))
+    if result.status != "completed":
+        raise typer.Exit(1)
+
+
+@app.command()
 def stop(task_id: str = typer.Option(..., "--task-id")):
     """Trigger the kill switch for a running task."""
     td = _task_dir(task_id)
@@ -274,6 +331,19 @@ def status(task_id: str = typer.Option(..., "--task-id")):
         )
         table.add_row("wall_ms", f"worker={worker_ms} proxy={proxy_ms}")
         table.add_row("est_cost_usd", f"${state.estimated_cost_usd:.2f}")
+
+    sprint_file = _task_dir(task_id) / "sprint.json"
+    if sprint_file.exists():
+        from orchestrator.sprint import SprintRecord
+
+        sp = SprintRecord.model_validate_json(sprint_file.read_text())
+        done = sum(1 for sl in sp.slices if sl.status == "completed")
+        current = next((sl for sl in sp.slices if sl.status != "completed"), None)
+        table.add_row(
+            "sprint",
+            f"{sp.status}: {done}/{len(sp.slices)} slices"
+            + (f", next or current: {current.plan.title} ({current.status})" if current else ""),
+        )
 
     # Per-role executor telemetry (E3): which executor served each role and
     # where its time went. "?" marks a figure the provider does not expose.

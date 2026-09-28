@@ -224,6 +224,9 @@ class State(BaseModel):
     executor_records: list[ExecutorRecord] = []
     last_recon: ExecutorRecord | None = None
     stagnation_streak: int = 0
+    # The Worker's latest message (tail, capped): what it says it did. The
+    # sprint runner puts it in the handover document for the next slice.
+    last_worker_text: str = ""
     last_progress_key: str | None = None
     transient_retries: int = 0
     # Test files the verify-gate tamper tripwire flagged as weakened (deleted or
