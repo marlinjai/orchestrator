@@ -70,8 +70,11 @@ class _Slicer:
         self.reply = reply
         self.calls = 0
 
-    async def __call__(self, goal, files, max_slices):
+    async def __call__(self, goal, files, max_slices, cwd=None):
         self.calls += 1
+        self.cwd = cwd
+        if isinstance(self.reply, Exception):
+            raise self.reply
         return self.reply
 
 
@@ -276,3 +279,18 @@ async def test_final_held_out_failure_escalates(tmp_path):
     assert result.status == "escalated"
     assert result.held_out is not None and result.held_out.status == "fail"
     assert "not fed back to a Worker" in result.reason
+
+
+async def test_a_crashing_slicer_fails_the_sprint_instead_of_leaving_it_running(tmp_path):
+    repo = _repo(tmp_path)
+    cfg = _cfg(tmp_path, repo)
+    result = await run_sprint(cfg, slicer=_Slicer(RuntimeError("max turns")), run_slice=_Slices())
+    assert result.status == "failed" and "RuntimeError: max turns" in result.reason
+    assert load_state(cfg.state_dir / "state.json").status == "failed"
+
+
+async def test_the_slicer_reads_the_sprint_worktree(tmp_path):
+    repo = _repo(tmp_path)
+    slicer = _Slicer(_plan(1))
+    result = await run_sprint(_cfg(tmp_path, repo), slicer=slicer, run_slice=_Slices())
+    assert slicer.cwd is not None and str(slicer.cwd) == result.worktree

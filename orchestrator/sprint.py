@@ -151,9 +151,10 @@ def parse_slices(raw: str, *, max_slices: int = MAX_SLICES) -> list[SlicePlan]:
         raise SlicingError(f"slicer reply has an invalid slice: {e}") from e
 
 
-async def claude_slicer(goal: str, repo_files: list[str], max_slices: int) -> str:
-    """The production slicer call: one read-only Claude turn, in the style of
-    the Decision Proxy (no hooks, no tools beyond reading the repo)."""
+async def claude_slicer(goal: str, repo_files: list[str], max_slices: int, cwd: Path | None = None) -> str:
+    """The production slicer call: a read-only Claude session in the style of
+    the Decision Proxy (no hooks; Read, Grep and Glob inside the sprint's
+    worktree, so it can look at the code it is slicing)."""
     from claude_agent_sdk import ClaudeAgentOptions, query
 
     from orchestrator.transcript import extract_text
@@ -164,8 +165,9 @@ async def claude_slicer(goal: str, repo_files: list[str], max_slices: int) -> st
     options = ClaudeAgentOptions(
         system_prompt=SLICER_SYSTEM_PROMPT.format(max_slices=max_slices),
         setting_sources=[],
-        allowed_tools=[],
-        max_turns=1,
+        allowed_tools=["Read", "Grep", "Glob"],
+        disallowed_tools=["Write", "Edit", "MultiEdit", "NotebookEdit", "Bash"],
+        cwd=str(cwd) if cwd else None,
     )
     chunks: list[str] = []
     async for msg in query(prompt=prompt, options=options):
@@ -175,7 +177,7 @@ async def claude_slicer(goal: str, repo_files: list[str], max_slices: int) -> st
     return "".join(chunks)
 
 
-Slicer = Callable[[str, list[str], int], Awaitable[str]]
+Slicer = Callable[..., Awaitable[str]]
 
 
 # ---- the handover document ----
@@ -358,10 +360,12 @@ async def run_sprint(
     if not sprint.slices:
         console.print("[cyan]sprint: slicing the goal (Claude)[/cyan]")
         try:
-            raw = await slicer(goal_text, _repo_files(worktree), max_slices)
+            raw = await slicer(goal_text, _repo_files(worktree), max_slices, cwd=worktree)
             plans = parse_slices(raw, max_slices=max_slices)
         except SlicingError as e:
             return finish(sprint, "failed", f"slicing failed: {e}")
+        except Exception as e:  # the model call itself failed: end visibly, never stay "running"
+            return finish(sprint, "failed", f"slicing failed: {type(e).__name__}: {e}")
         sprint.slices = [SliceRecord(index=i, plan=p) for i, p in enumerate(plans)]
         console.print(f"[cyan]sprint: {len(plans)} slice(s)[/cyan]")
     _save_sprint(sprint_path, sprint)
