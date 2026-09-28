@@ -405,3 +405,27 @@ async def test_failed_commit_and_refused_write_record_nothing(tmp_path):
     await _tool(session, "run_command", {"command": "git commit -m nothing"})  # not a repo: exit != 0
     state = load_state(tmp_path / "state.json")
     assert state.commits == [] and state.files_touched == []
+
+
+async def test_read_stops_once_the_call_is_complete(tmp_path):
+    """A provider that holds a finished stream open must not stall the Worker:
+    once a finish reason and the usage chunk are in, reading stops and the
+    stream is closed."""
+    closed = []
+
+    def stalling_chat(body):
+        def gen():
+            try:
+                yield from _text_events("done")
+                raise AssertionError("read past the usage chunk (the provider stall)")
+            finally:
+                closed.append(True)
+
+        return gen()
+
+    session = _session(tmp_path, stalling_chat)
+    result = await session.run_turn("go")
+    assert result.chunks == ["done"]
+    assert closed == [True]
+    # response_ms is the full wall time of the call (clock reads: sent, 4 events, done)
+    assert result.calls[0].response_ms is not None

@@ -453,10 +453,46 @@ class OpenAICompatWorkerSession:
         call = _ModelCall()
         pending: dict[int, dict] = {}
         parts: list[str] = []
+        marks: dict[str, float] = {}
         sent = self._clock()
-        first: float | None = None
-        last: float | None = None
-        for event in self._chat(self._request_body()):
+        stream = self._chat(self._request_body())
+        try:
+            self._consume(stream, call, pending, parts, marks)
+        finally:
+            close = getattr(stream, "close", None)
+            if close is not None:
+                close()
+        first, last = marks.get("first"), marks.get("last")
+        done = self._clock()
+        call.content = "".join(parts)
+        call.tool_calls = [
+            {
+                "id": slot["id"] or f"call_{index}",
+                "name": slot["name"],
+                "arguments": slot["arguments"] or "{}",
+            }
+            for index, slot in sorted(pending.items())
+        ]
+        if first is not None and last is not None:
+            call.latency.ttft_ms = _ms(first - sent)
+            call.latency.generation_ms = _ms(last - first)
+        # The full wall time of the call, stream close included: a provider that
+        # holds the stream open after its last chunk must show up here.
+        call.latency.response_ms = _ms(done - sent)
+        if call.usage and isinstance(call.usage.get("completion_tokens"), int):
+            call.latency.output_tokens = call.usage["completion_tokens"]
+        return call
+
+    def _consume(self, stream, call: _ModelCall, pending: dict, parts: list, marks: dict) -> None:
+        """Read stream events into ``call`` until the call is complete.
+
+        Complete means a finish reason AND the usage chunk have arrived. The read
+        stops there instead of waiting for ``[DONE]`` or the connection to close:
+        in the 2026-09-28 remeasure Inception sometimes held a finished stream
+        open for about two minutes, which stalled the Worker for that long.
+        """
+        finished = False
+        for event in stream:
             now = self._clock()
             call.model = call.model or event.get("model")
             if isinstance(event.get("usage"), dict):
@@ -483,26 +519,13 @@ class OpenAICompatWorkerSession:
                     if fn.get("arguments"):
                         slot["arguments"] += fn["arguments"]
                     produced = True
+                if choice.get("finish_reason"):
+                    finished = True
             if produced:
-                first = now if first is None else first
-                last = now
-        done = self._clock()
-        call.content = "".join(parts)
-        call.tool_calls = [
-            {
-                "id": slot["id"] or f"call_{index}",
-                "name": slot["name"],
-                "arguments": slot["arguments"] or "{}",
-            }
-            for index, slot in sorted(pending.items())
-        ]
-        if first is not None and last is not None:
-            call.latency.ttft_ms = _ms(first - sent)
-            call.latency.generation_ms = _ms(last - first)
-        call.latency.response_ms = _ms((last if last is not None else done) - sent)
-        if call.usage and isinstance(call.usage.get("completion_tokens"), int):
-            call.latency.output_tokens = call.usage["completion_tokens"]
-        return call
+                marks.setdefault("first", now)
+                marks["last"] = now
+            if finished and call.usage is not None:
+                return
 
     # ---- tools ----
 
