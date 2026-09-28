@@ -278,6 +278,7 @@ def test_provider_forward_missing_node_is_mercury_unavailable(monkeypatch, tmp_p
 
 
 def test_resolve_proxy_cli_missing_file_is_none(monkeypatch, tmp_path):
+    monkeypatch.setattr(ex.shutil, "which", lambda name: "/usr/bin/node")
     monkeypatch.setenv(ex.PROXY_CLI_ENV, str(tmp_path / "nope" / "cli.js"))
     assert ex.resolve_proxy_cli() is None
 
@@ -285,6 +286,7 @@ def test_resolve_proxy_cli_missing_file_is_none(monkeypatch, tmp_path):
 def test_resolve_proxy_cli_finds_the_built_cli(monkeypatch, tmp_path):
     cli = tmp_path / "cli.js"
     cli.write_text("")
+    monkeypatch.setattr(ex.shutil, "which", lambda name: "/usr/bin/node")
     monkeypatch.setenv(ex.PROXY_CLI_ENV, str(cli))
     assert ex.resolve_proxy_cli() == cli
 

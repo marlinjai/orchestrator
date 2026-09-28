@@ -110,12 +110,11 @@ def _cli_failure(returncode: int, stderr: str) -> ProviderError:
     """Classify a failed ``secrets-proxy-call forward`` run: a retryable HTTP
     status or a network-level failure is transient, anything else is terminal."""
     reason = stderr.strip()[:300]
-    match = _HTTP_STATUS_RE.search(reason)
-    transient = (
-        int(match.group(1)) in TRANSIENT_HTTP_STATUSES
-        if match
-        else bool(_NETWORK_FAILURE_RE.search(reason))
-    )
+    if _NETWORK_FAILURE_RE.search(reason):
+        transient = True
+    else:
+        match = _HTTP_STATUS_RE.search(reason)
+        transient = bool(match) and int(match.group(1)) in TRANSIENT_HTTP_STATUSES
     return ProviderError(
         f"secrets-proxy-call forward exited {returncode}: {reason}", transient=transient
     )
@@ -155,7 +154,13 @@ def forward_chat_stream(
             raise ProviderError(f"secrets-proxy-call forward failed to run: {e}", transient=True) from e
         # The proxy stream ends when the CLI exits; a stalled stream is killed
         # after timeout_s so a hung forward cannot wedge the run.
-        timer = threading.Timer(timeout_s, proc.kill)
+        timed_out = threading.Event()
+
+        def _kill_on_timeout() -> None:
+            timed_out.set()
+            proc.kill()
+
+        timer = threading.Timer(timeout_s, _kill_on_timeout)
         timer.start()
         stderr_chunks: list[bytes] = []
         stderr_thread = threading.Thread(
@@ -188,6 +193,10 @@ def forward_chat_stream(
                     ) from e
             returncode = proc.wait()
             stderr_thread.join(timeout=5)
+            if timed_out.is_set():
+                raise ProviderError(
+                    f"provider stream timed out after {timeout_s:g}s", transient=True
+                )
             if returncode != 0:
                 raise _cli_failure(
                     returncode, b"".join(stderr_chunks).decode("utf-8", errors="replace")

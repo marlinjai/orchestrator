@@ -296,6 +296,8 @@ def test_forward_stream_parses_sse_until_done(tmp_path):
         ("429: rate limited", True),
         ("HTTP 503 overloaded", True),
         ("connect ECONNREFUSED 100.124.97.31:8765", True),
+        # A port that looks like an HTTP status must not mask a network failure.
+        ("connect ETIMEDOUT 10.0.0.5:443", True),
         # Terminal statuses and unclassified failures are not retried.
         ("400: prompt is too long", False),
         ("could not resolve the provider key", False),
@@ -309,6 +311,16 @@ def test_forward_cli_failures_carry_an_explicit_transient_flag(tmp_path, stderr,
         list(stream({"model": "mercury-2"}))
     assert info.value.transient is transient
     assert is_transient_sdk_error(info.value) is transient
+
+
+@needs_node
+def test_forward_timer_killed_stream_is_a_transient_timeout(tmp_path):
+    cli = tmp_path / "cli.js"
+    cli.write_text("setTimeout(() => {}, 30000);\n")
+    stream = forward_chat_stream("inception", cli_path=str(cli), timeout_s=0.5)
+    with pytest.raises(ProviderError, match="timed out") as info:
+        list(stream({"model": "mercury-2"}))
+    assert info.value.transient is True
 
 
 @needs_node
