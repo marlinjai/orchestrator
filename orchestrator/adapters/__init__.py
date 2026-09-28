@@ -7,7 +7,9 @@ loud at resolve time (startup), never at turn time.
 
 from __future__ import annotations
 
-from orchestrator.executor import ExecutorProfile
+from dataclasses import replace
+
+from orchestrator.executor import CLAUDE_MODEL_ID, ExecutorProfile
 from orchestrator.ports import WorkerAdapter
 
 
@@ -20,10 +22,16 @@ def resolve_worker_adapter(profile: ExecutorProfile, *, claude_options) -> Worke
     startup, before any Worker turn runs. ``claude_options`` is the
     ``ClaudeAgentOptions`` built by ``build_worker_options`` (typed loosely to
     keep this module SDK-import-free until an adapter needs it).
+
+    A non-default Anthropic ``model_id`` is pinned onto the SDK options so the
+    session runs the operator-selected model instead of the SDK default. The
+    default profile leaves the options untouched (byte-for-byte pre-port).
     """
     if profile.provider == "anthropic":
         from orchestrator.adapters.claude_worker import ClaudeWorkerAdapter
 
+        if profile.model_id != CLAUDE_MODEL_ID:
+            claude_options = replace(claude_options, model=profile.model_id)
         return ClaudeWorkerAdapter(claude_options)
     raise ValueError(
         f"no worker adapter for provider {profile.provider!r} (model "

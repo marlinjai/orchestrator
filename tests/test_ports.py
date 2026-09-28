@@ -148,3 +148,51 @@ async def test_run_one_turn_maps_turn_result_to_iteration_usage():
     assert usage.cache_creation_tokens == 2
     assert usage.model == "fake-model"
     assert usage.worker_ms >= 0
+
+
+async def test_run_one_turn_keeps_model_non_null_when_session_omits_it(tmp_path):
+    """A session that reports no model must not persist None into the str
+    field: the state has to survive a save/load round trip."""
+    from orchestrator.state import load_state, save_state
+
+    class _NoModelSession(_FakeSession):
+        async def run_turn(self, user_message, *, on_text=None):
+            return TurnResult(chunks=["x"])
+
+    state = State(task_id="t", goal="g")
+    _, usage = await _run_one_turn(session=_NoModelSession(), user_message="m", state=state)
+    assert usage.model == ""
+    state.usage.append(usage)
+    path = tmp_path / "state.json"
+    save_state(path, state)
+    assert load_state(path).usage[0].model == ""
+
+
+# ---- model pinning / provider model_id requirements ----
+
+
+def test_non_default_anthropic_worker_model_is_pinned_on_options():
+    from claude_agent_sdk import ClaudeAgentOptions
+
+    opts = ClaudeAgentOptions()
+    prof = ExecutorProfile(role="worker", model_id="claude-sonnet-5", provider="anthropic")
+    adapter = resolve_worker_adapter(prof, claude_options=opts)
+    assert adapter._options.model == "claude-sonnet-5"
+    assert opts.model is None  # the caller's options are not mutated
+
+
+def test_default_worker_model_leaves_options_untouched():
+    from claude_agent_sdk import ClaudeAgentOptions
+
+    opts = ClaudeAgentOptions()
+    adapter = resolve_worker_adapter(
+        ExecutorProfile(role="worker", model_id="claude-opus-4-8"), claude_options=opts
+    )
+    assert adapter._options is opts
+
+
+def test_inception_requires_explicit_model_id(tmp_path):
+    p = tmp_path / "config.toml"
+    p.write_text('[executors.recon]\nprovider = "inception"\n')
+    with pytest.raises(ValueError, match="model_id is required for provider 'inception'"):
+        load_executor_config(p)

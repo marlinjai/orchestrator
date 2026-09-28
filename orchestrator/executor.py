@@ -190,6 +190,13 @@ def _coerce_profile(role: str, raw: dict) -> ExecutorProfile:
         raise ValueError(
             f"executor[{role}].provider must be one of {get_args(Provider)}, got {provider!r}"
         )
+    if provider == "inception" and "model_id" not in raw:
+        # The default model id is a Claude id; sending it to Inception would
+        # fail at call time and silently fall back to Claude recon.
+        raise ValueError(
+            f"executor[{role}].model_id is required for provider 'inception' "
+            "(the default is a Claude model id)"
+        )
 
     effort = raw.get("reasoning_effort")
     if effort is not None:
@@ -530,4 +537,5 @@ def record_recon(state, findings: ReconFindings) -> None:
         model_id=findings.model_id,
         elapsed_ms=findings.elapsed_ms,
         ok=findings.ok,
+        findings=findings.findings,
     )

@@ -650,3 +650,109 @@ async def test_worktree_flag_on_non_git_falls_back_in_place(tmp_path: Path, task
     state = load_state(cfg.state_dir / "state.json")
     assert state.status == "completed"
     assert not default_worktree_path(task_dir, "nogit").exists()
+
+
+# ---- executor seam startup (worker profile + config-gated recon) ----
+
+
+@pytest.fixture
+def executor_home(tmp_path: Path, monkeypatch) -> Path:
+    """Point the operator config home at a tmp dir so these tests control the
+    [executors] section and never read the developer's real config."""
+    home = tmp_path / "config-home"
+    home.mkdir()
+    monkeypatch.setenv("ORCHESTRATOR_CONFIG_HOME", str(home))
+    return home
+
+
+def _pin_recon(home: Path) -> None:
+    (home / "config.toml").write_text(
+        '[executors.recon]\nmodel_id = "claude-opus-4-8"\n'
+    )
+
+
+async def test_malformed_executor_config_fails_run(cfg: OrchestratorConfig, executor_home: Path):
+    (executor_home / "config.toml").write_text('[executors.worker]\nmodel_id = ""\n')
+    with patch("orchestrator.orchestrator._run_one_turn") as mock_turn, patch(
+        "orchestrator.orchestrator.notify"
+    ) as mock_notify:
+        await run_orchestrator(cfg)
+    state = load_state(cfg.state_dir / "state.json")
+    assert state.status == "failed"
+    assert "executor config error" in (state.exit_reason or "")
+    mock_turn.assert_not_called()
+    mock_notify.assert_called_once()
+
+
+async def test_recon_error_fails_run(cfg: OrchestratorConfig, executor_home: Path):
+    _pin_recon(executor_home)
+
+    async def boom(*a, **k):
+        raise RuntimeError("recon blew up")
+
+    with patch("orchestrator.orchestrator.run_recon", side_effect=boom), patch(
+        "orchestrator.orchestrator._run_one_turn"
+    ) as mock_turn, patch("orchestrator.orchestrator.notify") as mock_notify:
+        await run_orchestrator(cfg)
+    state = load_state(cfg.state_dir / "state.json")
+    assert state.status == "failed"
+    assert "recon blew up" in (state.exit_reason or "")
+    mock_turn.assert_not_called()
+    mock_notify.assert_called_once()
+
+
+async def test_recon_skipped_when_resumed_past_iteration_cap(
+    cfg: OrchestratorConfig, executor_home: Path
+):
+    from orchestrator.state import State, save_state
+
+    _pin_recon(executor_home)
+    cfg.state_dir.mkdir(parents=True, exist_ok=True)
+    save_state(
+        cfg.state_dir / "state.json",
+        State(task_id=cfg.task_id, goal="test goal", iteration=cfg.max_iterations),
+    )
+    with patch("orchestrator.orchestrator.run_recon") as mock_recon, patch(
+        "orchestrator.orchestrator._run_one_turn"
+    ) as mock_turn:
+        await run_orchestrator(cfg)
+    mock_recon.assert_not_called()
+    mock_turn.assert_not_called()
+    state = load_state(cfg.state_dir / "state.json")
+    assert state.status == "stopped"
+    assert "iteration cap" in (state.exit_reason or "")
+
+
+async def test_recon_findings_reused_on_resume(cfg: OrchestratorConfig, executor_home: Path):
+    from orchestrator.state import ReconRecord, State, save_state
+
+    _pin_recon(executor_home)
+    cfg.state_dir.mkdir(parents=True, exist_ok=True)
+    state = State(task_id=cfg.task_id, goal="test goal")
+    state.last_recon = ReconRecord(
+        executor="claude", model_id="claude-opus-4-8", elapsed_ms=5, findings="watch the lockfile"
+    )
+    save_state(cfg.state_dir / "state.json", state)
+    with patch("orchestrator.orchestrator.run_recon") as mock_recon, _mock_loop(
+        [_turn("done")], [_decision("stop", "", "done")]
+    ) as (mock_turn, _):
+        await run_orchestrator(cfg)
+    mock_recon.assert_not_called()
+    first_message = mock_turn.call_args.kwargs["user_message"]
+    assert "watch the lockfile" in first_message
+
+
+async def test_recon_runs_once_and_persists_findings(cfg: OrchestratorConfig, executor_home: Path):
+    _pin_recon(executor_home)
+
+    async def fake_claude(question):
+        return "mind the migrations"
+
+    with patch("orchestrator.orchestrator._claude_recon", side_effect=fake_claude), _mock_loop(
+        [_turn("done")], [_decision("stop", "", "done")]
+    ) as (mock_turn, _):
+        await run_orchestrator(cfg)
+    state = load_state(cfg.state_dir / "state.json")
+    assert state.last_recon is not None
+    assert state.last_recon.findings == "mind the migrations"
+    assert "mind the migrations" in mock_turn.call_args.kwargs["user_message"]

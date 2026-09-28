@@ -97,6 +97,9 @@ class ReconRecord(BaseModel):
     model_id: str
     elapsed_ms: int
     ok: bool = True
+    # The findings text, persisted so a resumed run reuses it instead of paying
+    # for another recon call.
+    findings: str = ""
     ran_at: datetime = Field(default_factory=lambda: datetime.now(timezone.utc))
 
 

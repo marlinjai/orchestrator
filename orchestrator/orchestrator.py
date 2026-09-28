@@ -261,7 +261,7 @@ async def _run_one_turn(
     usage.output_tokens = result.output_tokens
     usage.cache_read_tokens = result.cache_read_tokens
     usage.cache_creation_tokens = result.cache_creation_tokens
-    usage.model = result.model
+    usage.model = result.model or ""
     usage.worker_ms = int((time.monotonic() - worker_start) * 1000)
     return result.chunks, usage
 
@@ -743,7 +743,18 @@ async def run_orchestrator(cfg: OrchestratorConfig) -> None:
         # [executors.worker] config this resolves to the Claude adapter and is
         # byte-for-byte the pre-port behavior. A non-Claude worker provider is
         # refused loudly here at startup (the E4 gate), before any turn runs.
-        worker_profile = resolve_executor("worker")
+        # A malformed [executors] config is an operator error, not a refusal:
+        # persist it as `failed` (terminal notify fires in `finally`) instead of
+        # leaving the run stuck in `running`.
+        try:
+            worker_profile = resolve_executor("worker")
+            recon_configured = "recon" in load_executor_config()
+        except ValueError as e:
+            state.status = "failed"
+            state.exit_reason = f"executor config error: {e}"
+            save_state(state_path, state)
+            local_console.print(f"[bold red]{state.exit_reason}[/bold red]")
+            return
         try:
             worker_adapter = resolve_worker_adapter(worker_profile, claude_options=options)
         except ValueError as e:
@@ -757,24 +768,45 @@ async def run_orchestrator(cfg: OrchestratorConfig) -> None:
         # pinned the recon role in [executors.recon]. Default runs add zero
         # extra model calls. Findings are prepended to the Worker's first
         # message; telemetry lands on state.last_recon (logged, never gated).
-        if "recon" in load_executor_config():
-            recon_question = (
-                "Reconnaissance before an autonomous coding run. Given this goal, "
-                "list concrete pitfalls, constraints, and context the implementer "
-                "should know. Be terse.\n\n" + state.goal
-            )
-            findings = await run_recon(recon_question, state=state)
-            save_state(state_path, state)
-            local_console.print(
-                f"[dim]recon: executor={findings.executor} model={findings.model_id} "
-                f"ok={findings.ok} in {findings.elapsed_ms}ms[/dim]"
-            )
-            if findings.ok and findings.findings.strip():
-                initial_message = (
-                    initial_message
-                    + "\n\n## Reconnaissance findings (read-only, advisory)\n"
-                    + findings.findings.strip()
+        # Recon is paid, so it runs at most once per task and only when a
+        # Worker turn can actually follow: a run resumed past its iteration cap
+        # makes no call, and a resumed run reuses the persisted findings.
+        recon_text = ""
+        if recon_configured and not iteration_cap_hit(
+            iteration=state.iteration, max_iterations=cfg.max_iterations
+        ):
+            if state.last_recon is not None:
+                recon_text = state.last_recon.findings if state.last_recon.ok else ""
+                local_console.print(
+                    f"[dim]recon: reusing findings from {state.last_recon.ran_at:%Y-%m-%d %H:%M} "
+                    f"(executor={state.last_recon.executor}, ok={state.last_recon.ok})[/dim]"
                 )
+            else:
+                recon_question = (
+                    "Reconnaissance before an autonomous coding run. Given this goal, "
+                    "list concrete pitfalls, constraints, and context the implementer "
+                    "should know. Be terse.\n\n" + state.goal
+                )
+                try:
+                    findings = await run_recon(recon_question, state=state)
+                except Exception as e:
+                    state.status = "failed"
+                    state.exit_reason = f"recon error: {type(e).__name__}: {e}"
+                    save_state(state_path, state)
+                    local_console.print(f"[bold red]{state.exit_reason}[/bold red]")
+                    return
+                save_state(state_path, state)
+                local_console.print(
+                    f"[dim]recon: executor={findings.executor} model={findings.model_id} "
+                    f"ok={findings.ok} in {findings.elapsed_ms}ms[/dim]"
+                )
+                recon_text = findings.findings if findings.ok else ""
+        if recon_text.strip():
+            initial_message = (
+                initial_message
+                + "\n\n## Reconnaissance findings (read-only, advisory)\n"
+                + recon_text.strip()
+            )
 
         next_message = initial_message
         leg = 0
