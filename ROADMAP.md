@@ -96,7 +96,7 @@ Living tracker for orchestrator work. Read top to bottom: shipped at the top, in
 
 ### Hexagonal executor ports (E1 to E4a landed, E4b open)
 - The seam that makes the model or provider behind a Worker exchangeable (ports-and-adapters). E4b is the Claude vs Mercury race that decides whether Mercury may write code by default. The Agentic OS milestone M9 (Mercury sprint worker) is blocked on E4.
-- [ ] E4b: run the Claude vs Mercury race on a 10-goal benchmark (setup decided by Marlin 2026-09-28: vault-held hidden tests, best-of-2, 10-point band; harness on branch `feat/mercury-race`), record the verdict in the plan, then unblock or close M9 in agentic-os-platform; see `docs/plans/2026-07-24-hexagonal-executor-ports.md`. (2026-09-28)
+- [ ] E4b: run the Claude vs Mercury race on the `bench/mercury-race` benchmark (setup decided 2026-09-28: 10 goals, vault-held hidden tests, best-of-2, 10-point band), record the verdict in the plan, then unblock or close M9 in agentic-os-platform; see `docs/plans/2026-07-24-hexagonal-executor-ports.md`. (2026-09-28)
 
 ## Queued (v2 themes, prioritized)
 

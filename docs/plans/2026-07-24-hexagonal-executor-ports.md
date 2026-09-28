@@ -150,7 +150,14 @@ Deliberately not built yet: per-step `reasoning_effort` tuning (apply the profil
 
 **Live E4a smoke, passed 2026-09-28**: `orchestrator start` with `[executors.worker] model_id = "mercury-2", provider = "inception"` and `--held-out` on a throwaway repo (goal: add `multiply` plus a test and commit). One iteration; the Claude Decision Proxy stopped; in-tree verify PASS; held-out PASS; `completed`. Worker record: 16 model calls, 13,332 ms worker time, of which TTFT 12,679 ms (Inception server time 8,017 ms, so roughly 290 ms of network plus proxy overhead per call), generation 50 ms, tools 454 ms; 23,808 input and 1,301 output tokens, about $0.01. The shape confirms the TTFT finding above: per-call latency times call count is the whole cost, and proxy transit is a measurable third of it.
 
-**E4b (open)**: the race itself. No repo in the operator registry has a real `held_out_verify` yet (only a commented placeholder for analytics-platform), and a held-out set must live where the Worker's OS user cannot write it. Which repos and which held-out tests is Marlin's call; it is on the ROADMAP line and a decision page.
+**E4b (in progress)**: the race itself. Setup decided by Marlin on 2026-09-28 (decision page `~/software-dev/decision-pages/2026-09-28-mercury-race.html`, all four recommendations taken):
+
+1. **Goals**: a benchmark, not real backlog tasks: `bench/mercury-race/`, the `textkit` seed project and 10 self-contained goals (features, bug fixes, a new module, a CLI, a data structure), each specified precisely enough that hidden tests judge the spec. Every hidden suite is proven fair by `scripts/mercury_race.py validate` (fails on the seed, passes on a reference solution). If Mercury wins here, a second round on real tasks precedes M9.
+2. **Hidden tests**: installed into `~/.orchestrator/verifier-vault/mercury-race/`, outside every repo. Accepted weakness: a Worker's shell runs as the same OS user and could read them; the logged commands would show it. A separate OS user is required before any real-repo round.
+3. **Band**: Mercury's hidden-test pass rate must be within 10 percentage points of Claude's.
+4. **Spend**: 2 attempts per goal per cohort (`--best-of 2`), about 40 runs.
+
+Scoring (`scripts/mercury_race.py`, unit-tested): per goal and cohort, the fastest held-out-green attempt's `time_to_verified_ms`; a goal with no green attempt counts as infinitely slow; the cohort median is over all goals. Mercury wins only with N >= 10, a lower median, and the pass rate inside the band.
 
 ## Verification
 
