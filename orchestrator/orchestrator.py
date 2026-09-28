@@ -11,6 +11,7 @@ from typing import get_args
 from rich.console import Console
 
 from orchestrator.adapters import resolve_worker_adapter
+from orchestrator.bundled import bundled_persona
 from orchestrator.config import MarlinProxyConfig, apply_task_overrides, load_config
 from orchestrator.executor import (
     ExecutorProfile,
@@ -106,7 +107,7 @@ class _HandoverSignal(Exception):
         self.seed = seed
 
 
-_BUNDLED_MARLIN_PERSONA = Path(__file__).parent.parent / "personas" / "marlin.md"
+_BUNDLED_MARLIN_PERSONA = bundled_persona("marlin.md")
 
 
 @dataclass
