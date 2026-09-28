@@ -15,9 +15,11 @@ Code transcripts:
   per message counted each call once per block.
 - The turn-closing ``ResultMessage`` also carries a ``usage`` total. It is NOT
   added on top of the per-call usage (that counted the turn twice). It is used
-  only as a fallback when no assistant message carried usage at all, so a CLI
-  that stopped emitting per-call usage can never make the token caps and the
-  cost estimate silently read zero (over-counting is the safe direction there).
+  instead of the per-call figures whenever any model call in the turn carried no
+  usage (the SDK types assistant usage as nullable), so a missing call can never
+  make the token caps and the cost estimate silently under-count. The two
+  sources are never mixed: per-call usage when every call reported it, else the
+  result total, else the partial per-call figures as the best available.
 """
 
 from __future__ import annotations
@@ -113,8 +115,11 @@ class ClaudeWorkerSession:
     async def run_turn(self, user_message: str, *, on_text: OnText | None = None) -> TurnResult:
         result = TurnResult()
         tracker = _CallTracker(self._clock())
-        # Last usage seen per model call (every content block repeats it).
+        # Last usage seen per model call (every content block repeats it), and
+        # every call seen at all, so a call that never reported usage is known.
         usage_by_call: dict[str, dict] = {}
+        calls_seen: set[str] = set()
+        anonymous = 0
         result_usage: dict | None = None
         async for msg in run_worker_turn(client=self._client, user_message=user_message):
             now = self._clock()
@@ -125,19 +130,27 @@ class ClaudeWorkerSession:
                     on_text(text)
             if isinstance(msg, AssistantMessage):
                 tracker.on_assistant(msg, now)
+                key = msg.message_id
+                if key is None:
+                    anonymous += 1
+                    key = f"_anonymous-{anonymous}"
+                calls_seen.add(key)
                 if isinstance(msg.usage, dict):
-                    key = msg.message_id or f"_anonymous-usage-{len(usage_by_call)}"
                     usage_by_call[key] = msg.usage
             elif isinstance(msg, UserMessage):
                 tracker.on_user(msg, now)
-            elif isinstance(msg, ResultMessage) and isinstance(msg.usage, dict):
-                result_usage = msg.usage
+            elif isinstance(msg, ResultMessage):
+                result.is_error = bool(msg.is_error)
+                result.error_subtype = msg.subtype if msg.is_error else None
+                if isinstance(msg.usage, dict):
+                    result_usage = msg.usage
             if not result.model:
                 m = extract_model(msg)
                 if m:
                     result.model = m
         usages = list(usage_by_call.values())
-        if not usages and result_usage is not None:
+        complete = calls_seen <= usage_by_call.keys()
+        if not complete and result_usage is not None:
             usages = [result_usage]
         for u in usages:
             result.input_tokens += int(u.get("input_tokens", 0) or 0)

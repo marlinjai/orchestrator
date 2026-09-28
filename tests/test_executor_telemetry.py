@@ -187,6 +187,85 @@ async def test_claude_adapter_falls_back_to_result_usage_when_calls_carry_none()
     assert result.calls[0].output_tokens is None
 
 
+async def test_claude_adapter_uses_result_total_when_any_call_lacks_usage():
+    # Call "a" reported usage, call "b" did not: the per-call figures would
+    # silently drop b, so the complete ResultMessage total wins. Never mixed.
+    bare = AssistantMessage(
+        content=[TextBlock(text="more")], model="claude-opus-4-8", usage=None, message_id="b"
+    )
+    client = _FakeClient(
+        [_assistant("a", [TextBlock(text="hi")], out=50), bare, _result(total_in=700, total_out=90)]
+    )
+    result = await ClaudeWorkerSession(client, clock=_Clock([0.0, 1.0, 2.0, 2.1])).run_turn("go")
+    assert result.input_tokens == 700
+    assert result.output_tokens == 90
+    assert result.cache_read_tokens == 0
+
+
+async def test_claude_adapter_keeps_partial_usage_without_a_result_total():
+    # No result total to fall back on: the partial per-call figures are the
+    # best available, rather than zero.
+    bare = AssistantMessage(
+        content=[TextBlock(text="more")], model="claude-opus-4-8", usage=None, message_id="b"
+    )
+    client = _FakeClient([_assistant("a", [TextBlock(text="hi")], out=50), bare])
+    result = await ClaudeWorkerSession(client, clock=_Clock([0.0, 1.0, 2.0])).run_turn("go")
+    assert result.output_tokens == 50
+    assert result.input_tokens == 100
+
+
+async def test_claude_adapter_carries_the_result_error_outcome():
+    ok_client = _FakeClient([_assistant("a", [TextBlock(text="hi")], out=5), _result(1, 1)])
+    ok = await ClaudeWorkerSession(ok_client, clock=_Clock([0.0, 1.0, 1.1])).run_turn("go")
+    assert ok.is_error is False
+    assert ok.error_subtype is None
+
+    failed = ResultMessage(
+        subtype="error_max_turns",
+        duration_ms=0,
+        duration_api_ms=0,
+        is_error=True,
+        num_turns=1,
+        session_id="s",
+        usage={"input_tokens": 1, "output_tokens": 1},
+    )
+    err_client = _FakeClient([_assistant("a", [TextBlock(text="hi")], out=5), failed])
+    err = await ClaudeWorkerSession(err_client, clock=_Clock([0.0, 1.0, 1.1])).run_turn("go")
+    assert err.is_error is True
+    assert err.error_subtype == "error_max_turns"
+
+
+async def test_errored_turn_is_recorded_as_a_failed_worker_record():
+    import io
+
+    from rich.console import Console
+
+    from orchestrator.executor import ExecutorProfile
+    from orchestrator.orchestrator import _run_one_turn
+    from orchestrator.ports import TurnResult
+
+    class _Session:
+        def __init__(self, result):
+            self._result = result
+
+        async def run_turn(self, user_message, *, on_text=None):
+            return self._result
+
+    profile = ExecutorProfile(role="worker", model_id="claude-opus-4-8")
+    state = State(task_id="t", goal="g", iteration=3)
+    quiet = Console(file=io.StringIO())
+    for is_error, expected_ok in ((False, True), (True, False)):
+        _, _, record = await _run_one_turn(
+            session=_Session(TurnResult(is_error=is_error, error_subtype="error_x")),
+            user_message="go",
+            state=state,
+            profile=profile,
+            out_console=quiet,
+        )
+        assert record.role == "worker"
+        assert record.ok is expected_ok
+
+
 async def test_claude_adapter_turn_without_messages_has_no_calls():
     client = _FakeClient([])
     result = await ClaudeWorkerSession(client, clock=_Clock([0.0])).run_turn("go")
@@ -237,3 +316,39 @@ def test_executor_records_round_trip_through_state_json(tmp_path):
     loaded = load_state(path)
     assert loaded.executor_records == state.executor_records
     assert loaded.last_recon == state.last_recon
+
+
+def test_legacy_recon_record_is_migrated_once_on_load(tmp_path):
+    # A state.json written before E3 holds the old ReconRecord shape: no role,
+    # no provider, no executor_records list. It must still load, and saving and
+    # reloading must not duplicate the migrated record.
+    import json
+
+    from orchestrator.state import load_state, save_state
+
+    path = tmp_path / "state.json"
+    legacy = {
+        "task_id": "t",
+        "goal": "g",
+        "last_recon": {
+            "executor": "mercury",
+            "model_id": "mercury-2",
+            "elapsed_ms": 42,
+            "ok": True,
+            "findings": "f",
+            "ran_at": "2026-09-01T10:00:00Z",
+        },
+    }
+    path.write_text(json.dumps(legacy))
+
+    loaded = load_state(path)
+    rec = loaded.last_recon
+    assert rec.role == "recon"
+    assert rec.provider == "inception"
+    assert rec.findings == "f"
+    assert loaded.executor_records == [rec]
+
+    save_state(path, loaded)
+    again = load_state(path)
+    assert again.executor_records == loaded.executor_records
+    assert again.last_recon == rec

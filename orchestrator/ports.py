@@ -37,7 +37,9 @@ class TurnResult:
     ``IterationUsage``; an adapter fills what its provider exposes and leaves
     the rest at 0/None (best effort, never fabricated). ``calls`` is the E3
     per-model-call latency decomposition, one ``CallLatency`` per top-level
-    model call in the turn, in order.
+    model call in the turn, in order. ``is_error`` is the provider's own verdict
+    that the turn ended in an error (``error_subtype`` says which, when known);
+    it marks the turn's telemetry record failed.
     """
 
     chunks: list[str] = field(default_factory=list)
@@ -47,6 +49,8 @@ class TurnResult:
     cache_creation_tokens: int = 0
     model: str | None = None
     calls: list[CallLatency] = field(default_factory=list)
+    is_error: bool = False
+    error_subtype: str | None = None
 
 
 @runtime_checkable

@@ -5,7 +5,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Literal
 
-from pydantic import BaseModel, Field, ValidationError
+from pydantic import BaseModel, Field, ValidationError, model_validator
 
 
 PlanStatus = Literal["pending", "in_progress", "completed", "skipped"]
@@ -221,6 +221,40 @@ class State(BaseModel):
     confidence: float | None = None
     status: TaskStatus = "running"
     exit_reason: str | None = None
+
+    @model_validator(mode="before")
+    @classmethod
+    def _migrate_legacy_recon(cls, data):
+        """Upgrade a pre-E3 ``last_recon`` (the old ``ReconRecord``, which had
+        no ``role`` or ``provider``) to an ``ExecutorRecord`` and add it to
+        ``executor_records``, so a state.json written before E3 still loads for
+        resume and ``status``. Idempotent: a migrated record carries ``role``,
+        so a later load never converts or appends it again.
+        """
+        if not isinstance(data, dict):
+            return data
+        recon = data.get("last_recon")
+        if not isinstance(recon, dict) or "role" in recon:
+            return data
+        migrated = {
+            **recon,
+            "role": "recon",
+            # Pre-E3 recon only ever ran on these two executors; mirrors
+            # executor._EXECUTOR_PROVIDER, inlined so state.py stays a leaf.
+            "provider": {"claude": "anthropic", "mercury": "inception"}.get(
+                recon.get("executor"), "anthropic"
+            ),
+        }
+        records = list(data.get("executor_records") or [])
+        already = any(
+            isinstance(r, dict)
+            and r.get("role") == "recon"
+            and r.get("ran_at") == recon.get("ran_at")
+            for r in records
+        )
+        if not already:
+            records.append(migrated)
+        return {**data, "last_recon": migrated, "executor_records": records}
 
 
 def ground_truth_summary(state: State) -> str:

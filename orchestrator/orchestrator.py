@@ -272,12 +272,23 @@ async def _run_one_turn(
     usage.cache_creation_tokens = result.cache_creation_tokens
     usage.model = result.model or ""
     usage.worker_ms = int((time.monotonic() - worker_start) * 1000)
+    # An errored turn (the provider's own verdict, e.g. SDK
+    # ResultMessage.is_error) is recorded as a failed worker record. The loop
+    # deliberately carries on: the Decision Proxy judges the turn next, on git
+    # ground truth, and the guardrails (iteration, token and stagnation caps)
+    # bound a Worker that keeps erroring. Telemetry is never a gate input.
+    if result.is_error:
+        out.print(
+            f"\n[yellow]worker: turn ended in an error "
+            f"({result.error_subtype or 'unknown'}); recorded as ok=False[/yellow]"
+        )
     record = ExecutorRecord.build(
         role="worker",
         executor=executor_label(profile),
         provider=profile.provider,
         model_id=result.model or profile.model_id,
         elapsed_ms=usage.worker_ms,
+        ok=not result.is_error,
         iteration=state.iteration,
         calls=result.calls,
     )
