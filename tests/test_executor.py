@@ -8,6 +8,7 @@ Covers the Definition of done:
 """
 
 import json
+import shutil
 
 import pytest
 
@@ -25,6 +26,9 @@ from orchestrator.executor import (
     run_mercury_recon,
 )
 from orchestrator.state import State
+
+# These tests start a real `node`; skip them on a host without one.
+needs_node = pytest.mark.skipif(shutil.which("node") is None, reason="node is not on PATH")
 
 
 # --------------------------------------------------------------------------- #
@@ -226,6 +230,7 @@ process.exit({exit_code});
     return trace
 
 
+@needs_node
 def test_provider_forward_pipes_body_into_the_cli_and_returns_stdout(tmp_path):
     """The transport shells out to `node <cli> forward <route>` with the chat
     body on stdin and returns stdout verbatim; no token, no upstream URL, no
@@ -242,6 +247,7 @@ def test_provider_forward_pipes_body_into_the_cli_and_returns_stdout(tmp_path):
         assert forbidden not in call
 
 
+@needs_node
 def test_provider_forward_nonzero_exit_is_mercury_unavailable(tmp_path):
     """A non-2xx from the proxy (surfaced by the CLI's non-zero exit) fails
     loud with the CLI's stderr reason, so recon falls back to Claude visibly."""
@@ -251,6 +257,7 @@ def test_provider_forward_nonzero_exit_is_mercury_unavailable(tmp_path):
         ex._proxy_provider_forward(str(cli), {"model": "m"})
 
 
+@needs_node
 def test_provider_forward_missing_cli_file_is_mercury_unavailable(tmp_path):
     """node itself runs fine but cannot find the script: a non-zero exit,
     surfaced the same way as any other CLI failure."""
