@@ -429,3 +429,49 @@ async def test_read_stops_once_the_call_is_complete(tmp_path):
     assert closed == [True]
     # response_ms is the full wall time of the call (clock reads: sent, 4 events, done)
     assert result.calls[0].response_ms is not None
+
+
+# ---- stalled or empty provider answers are retried in place ----
+
+
+async def test_empty_answer_is_retried_in_place(tmp_path, monkeypatch):
+    import orchestrator.adapters.openai_compat_worker as mod
+
+    monkeypatch.setattr(mod, "CALL_RETRY_BACKOFF_S", 0)
+    empty = [{"choices": [{"delta": {}, "finish_reason": "stop"}]}, {"choices": [], "usage": {"prompt_tokens": 1, "completion_tokens": 0}}]
+    chat = _ScriptedChat(empty, _text_events("real answer"))
+    session = _session(tmp_path, chat)
+    result = await session.run_turn("go")
+    assert result.chunks == ["real answer"]
+    assert len(chat.bodies) == 2
+    # The retry sent the same conversation, not a new turn.
+    assert chat.bodies[0]["messages"] == chat.bodies[1]["messages"]
+
+
+async def test_transient_failure_is_retried_then_surfaces(tmp_path, monkeypatch):
+    import orchestrator.adapters.openai_compat_worker as mod
+
+    monkeypatch.setattr(mod, "CALL_RETRY_BACKOFF_S", 0)
+    calls = []
+
+    def failing_chat(body):
+        calls.append(1)
+        raise ProviderError("stream stalled", transient=True)
+
+    session = _session(tmp_path, failing_chat)
+    with pytest.raises(ProviderError, match="stalled"):
+        await session.run_turn("go")
+    assert len(calls) == 1 + mod.CALL_RETRIES
+
+
+async def test_terminal_failure_is_not_retried(tmp_path):
+    calls = []
+
+    def bad_request(body):
+        calls.append(1)
+        raise ProviderError("HTTP 400", transient=False)
+
+    session = _session(tmp_path, bad_request)
+    with pytest.raises(ProviderError):
+        await session.run_turn("go")
+    assert len(calls) == 1

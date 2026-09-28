@@ -76,6 +76,12 @@ ChatStream = Callable[[dict], Iterator[dict]]
 TRANSIENT_HTTP_STATUSES = frozenset({408, 409, 425, 429, 500, 502, 503, 504, 529})
 
 MAX_TOOL_ROUNDS = 60
+# A provider stream that sends nothing for this long is stalled (Mercury answers
+# a call in seconds; the 2026-09-28 remeasures saw calls hang 2 to 4 minutes and
+# then return nothing). The call is retried in place, keeping the conversation.
+STREAM_READ_TIMEOUT_S = 60.0
+CALL_RETRIES = 2
+CALL_RETRY_BACKOFF_S = 2.0
 COMMAND_TIMEOUT_S = 600
 MAX_TOOL_OUTPUT_CHARS = 30_000
 # A shell command that creates a commit (`git commit`, `git -C x commit ...`).
@@ -126,7 +132,7 @@ def forward_chat_stream(
     provider: str,
     *,
     cli_path: str | None = None,
-    timeout_s: float = 300.0,
+    timeout_s: float = STREAM_READ_TIMEOUT_S,
 ) -> ChatStream:
     """The production ChatStream: pipe the request body into the
     secrets-proxy-call CLI's ``forward`` subcommand for ``provider`` and yield
@@ -382,7 +388,7 @@ class OpenAICompatWorkerSession:
         self.messages.append({"role": "user", "content": user_message})
         result = TurnResult()
         for _ in range(self._max_tool_rounds):
-            call = await asyncio.to_thread(self._call_model)
+            call = await self._call_model_with_retry()
             # One on_text per model call, not per stream delta: the loop prefixes
             # every on_text with "worker:", and Mercury's delta boundaries fall
             # mid-word, so per-delta output interleaved prefixes into the text.
@@ -447,6 +453,31 @@ class OpenAICompatWorkerSession:
         if self._profile.reasoning_effort is not None:
             body["reasoning_effort"] = self._profile.reasoning_effort
         return body
+
+    async def _call_model_with_retry(self) -> _ModelCall:
+        """One model call, retried in place on a transient provider failure or
+        an empty answer (no text and no tool call), up to CALL_RETRIES times.
+        Retrying here keeps the conversation; failing the turn would cost a whole
+        iteration, and a transient error reaching the loop restarts the session."""
+        attempt = 0
+        while True:
+            try:
+                call = await asyncio.to_thread(self._call_model)
+            except ProviderError as e:
+                if not e.transient or attempt >= CALL_RETRIES:
+                    raise
+                logger.warning("openai-compat worker: retrying a failed call (%s)", e)
+            else:
+                if call.content or call.tool_calls:
+                    return call
+                if attempt >= CALL_RETRIES:
+                    raise ProviderError(
+                        f"the provider returned an empty answer {attempt + 1} times in a row",
+                        transient=True,
+                    )
+                logger.warning("openai-compat worker: retrying an empty answer")
+            attempt += 1
+            await asyncio.sleep(CALL_RETRY_BACKOFF_S * attempt)
 
     def _call_model(self) -> _ModelCall:
         """One streamed model call, run in a worker thread (blocking I/O)."""
