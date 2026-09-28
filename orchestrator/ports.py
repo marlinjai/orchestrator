@@ -8,7 +8,8 @@ Agent SDK session, or an OpenAI-compatible tool loop in a later wave) lives in
 ``orchestrator/adapters/``; the control loop never imports a provider SDK
 through this module.
 
-Leaf module: no SDK import, no adapter import. ``TurnResult`` is deliberately
+Leaf module: no SDK import, no adapter import (it imports only the pydantic
+``CallLatency`` telemetry model from ``state``). ``TurnResult`` is deliberately
 provider-neutral; anything Claude-specific (MCP servers, hook isolation) or
 Inception-specific (reasoning_effort) is configured on the adapter, never
 threaded through the port.
@@ -18,6 +19,8 @@ from __future__ import annotations
 
 from dataclasses import dataclass, field
 from typing import AsyncContextManager, Callable, Protocol, runtime_checkable
+
+from orchestrator.state import CallLatency
 
 
 # Called with each streamed text fragment as it arrives, so the control loop
@@ -32,7 +35,11 @@ class TurnResult:
     ``chunks`` are the assistant's streamed text fragments in order (the
     transcript window the Decision Proxy judges on). Token fields mirror
     ``IterationUsage``; an adapter fills what its provider exposes and leaves
-    the rest at 0/None (best effort, never fabricated).
+    the rest at 0/None (best effort, never fabricated). ``calls`` is the E3
+    per-model-call latency decomposition, one ``CallLatency`` per top-level
+    model call in the turn, in order. ``is_error`` is the provider's own verdict
+    that the turn ended in an error (``error_subtype`` says which, when known);
+    it marks the turn's telemetry record failed.
     """
 
     chunks: list[str] = field(default_factory=list)
@@ -41,6 +48,9 @@ class TurnResult:
     cache_read_tokens: int = 0
     cache_creation_tokens: int = 0
     model: str | None = None
+    calls: list[CallLatency] = field(default_factory=list)
+    is_error: bool = False
+    error_subtype: str | None = None
 
 
 @runtime_checkable

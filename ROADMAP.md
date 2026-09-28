@@ -23,6 +23,11 @@ Living tracker for orchestrator work. Read top to bottom: shipped at the top, in
 - **Typed contract**: `scripts/gen_state_dts.py` now ALSO emits `types/events.d.ts` (the `EventType` alias + `Event` interface, `data` dict as a `{ [key: string]: unknown }` index signature). Same self-contained pure-Python emitter, no node toolchain, no new dependency. A drift test (`tests/test_state_dts.py`) byte-diffs the committed contract and reddens on any `Event` change (verified by prove-then-revert). 433 tests green; ruff clean.
 - **`types/state.d.ts` codegen** (`scripts/gen_state_dts.py`): a self-contained pure-Python emitter walks `State.model_json_schema()` and emits a typed `.d.ts` (one `export interface` per model, named `export type` unions for the four `Literal` aliases, `?` for optional/nullable fields, ISO datetime as `string`, arrays as `T[]`). No node toolchain, no new dependency. A drift test (`tests/test_state_dts.py`) regenerates into memory and byte-diffs the committed file, so `uv run pytest` fails the moment the model changes without a regenerate (verified: a temp field on `State` reddens the test). The future Kanban board reads state.json against this contract and can never silently drift from the source of truth.
 
+### Hexagonal executor ports E3: executor telemetry (2026-09-28)
+- **Per-call latency decomposition**: `ExecutorRecord` (replaces `ReconRecord`) appended to `state.executor_records` per Worker turn and per recon call, with `CallLatency` rows (`response_ms`, `ttft_ms`, `generation_ms`, `tool_ms`, `output_tokens`) and rollups; `None` where a provider does not expose a figure, never a fake zero. The Claude adapter measures response and tool time; `orchestrator status` shows one `executor:<role>` line.
+- **Token over-count fixed**: the Claude CLI emits one assistant message per content block, each repeating the call's usage, and the turn's result total was added on top, inflating recorded tokens, the token caps and the cost estimate. Usage is now deduplicated per model call.
+- **`cost_ceiling_usd` removed** (never enforced), rejected at load with a pointer to `--max-cost-usd`. Tests now isolate the operator config home.
+
 ### Hexagonal executor ports E1+E2 (2026-09-28)
 - **WorkerPort seam** (`ports.py`, `adapters/`): the control loop now talks to the Worker through a provider-neutral `WorkerSession`/`WorkerAdapter` protocol pair; the Claude Agent SDK moved into `adapters/claude_worker.py` (byte-for-byte default behavior, same options/hook isolation/env contract). Adapter selection (`adapters.resolve_worker_adapter`) is a literal table keyed by provider, NOT a plugin registry; a non-Claude worker provider is refused loudly at startup (the E4 best-of-N + held-out gate still guards non-Claude code-writing). Plan: `docs/plans/2026-07-24-hexagonal-executor-ports.md`.
 - **Explicit `provider` + `reasoning_effort` on `ExecutorProfile`**: any non-default model must name `provider = "anthropic" | "inception"` in `[executors.<role>]`; routing is never inferred from model-id strings. `reasoning_effort` (`instant|low|medium|high`) is Inception-only, threaded into the Mercury request body.
@@ -79,9 +84,9 @@ Living tracker for orchestrator work. Read top to bottom: shipped at the top, in
 - Plan: `docs/plans/2026-05-27-marlin-proxy.md` (in-progress).
 - [ ] Continue the Marlin Proxy rollout past Phase 0 (off -> shadow -> live on safe categories -> self-improvement); see `docs/plans/2026-05-27-marlin-proxy.md`. (2026-09-10)
 
-### Hexagonal executor ports (E1+E2 landed, E3+E4 open)
-- The seam that makes the model or provider behind a Worker exchangeable (ports-and-adapters). E3 is per-call latency telemetry plus enforce-or-delete `cost_ceiling_usd`; E4 is the OpenAI-compatible worker adapter and the Claude vs Mercury experiment. The Agentic OS milestone M9 (Mercury sprint worker) is blocked on E4.
-- [ ] Build executor ports E3 (latency telemetry) and E4 (OpenAI-compatible worker adapter + Mercury experiment), one pull request each, then unblock M9 in agentic-os-platform; see `docs/plans/2026-07-24-hexagonal-executor-ports.md`. (2026-09-28)
+### Hexagonal executor ports (E1 to E3 landed, E4 open)
+- The seam that makes the model or provider behind a Worker exchangeable (ports-and-adapters). E4 is the OpenAI-compatible worker adapter and the Claude vs Mercury experiment. The Agentic OS milestone M9 (Mercury sprint worker) is blocked on E4.
+- [ ] Build executor ports E4 (OpenAI-compatible worker adapter + Mercury experiment), then unblock M9 in agentic-os-platform; see `docs/plans/2026-07-24-hexagonal-executor-ports.md`. (2026-09-28)
 
 ## Queued (v2 themes, prioritized)
 

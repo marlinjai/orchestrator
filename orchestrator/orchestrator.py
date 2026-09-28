@@ -13,7 +13,9 @@ from rich.console import Console
 from orchestrator.adapters import resolve_worker_adapter
 from orchestrator.config import MarlinProxyConfig, apply_task_overrides, load_config
 from orchestrator.executor import (
+    ExecutorProfile,
     ReconFindings,
+    executor_label,
     load_executor_config,
     record_recon,
     resolve_executor,
@@ -55,6 +57,7 @@ from orchestrator.stagnation import (
     update_stagnation,
 )
 from orchestrator.state import (
+    ExecutorRecord,
     Handover,
     HeldOutRecord,
     IterationUsage,
@@ -238,10 +241,16 @@ async def _run_one_turn(
     session: WorkerSession,
     user_message: str,
     state: State,
+    profile: ExecutorProfile,
     out_console: Console | None = None,
-) -> tuple[list[str], IterationUsage]:
-    """Run one Worker turn through the WorkerPort and return its text chunks +
-    token usage.
+) -> tuple[list[str], IterationUsage, ExecutorRecord]:
+    """Run one Worker turn through the WorkerPort and return its text chunks,
+    token usage and executor telemetry record (the per-call latency
+    decomposition, see ``ExecutorRecord``).
+
+    The caller appends ``usage`` and the record to state AFTER reloading it,
+    because the Worker rewrites state.json during the turn (``update_state``);
+    anything attached to the in-memory state here would be lost on that reload.
 
     Provider-neutral: the session is whatever adapter ``resolve_worker_adapter``
     picked (Claude SDK today); this function never sees provider message shapes.
@@ -263,7 +272,27 @@ async def _run_one_turn(
     usage.cache_creation_tokens = result.cache_creation_tokens
     usage.model = result.model or ""
     usage.worker_ms = int((time.monotonic() - worker_start) * 1000)
-    return result.chunks, usage
+    # An errored turn (the provider's own verdict, e.g. SDK
+    # ResultMessage.is_error) is recorded as a failed worker record. The loop
+    # deliberately carries on: the Decision Proxy judges the turn next, on git
+    # ground truth, and the guardrails (iteration, token and stagnation caps)
+    # bound a Worker that keeps erroring. Telemetry is never a gate input.
+    if result.is_error:
+        out.print(
+            f"\n[yellow]worker: turn ended in an error "
+            f"({result.error_subtype or 'unknown'}); recorded as ok=False[/yellow]"
+        )
+    record = ExecutorRecord.build(
+        role="worker",
+        executor=executor_label(profile),
+        provider=profile.provider,
+        model_id=result.model or profile.model_id,
+        elapsed_ms=usage.worker_ms,
+        ok=not result.is_error,
+        iteration=state.iteration,
+        calls=result.calls,
+    )
+    return result.chunks, usage, record
 
 
 def _load_marlin(cfg: OrchestratorConfig, goal_text: str) -> tuple[MarlinProxyConfig, str]:
@@ -424,6 +453,7 @@ def _record_marlin_decision(
 async def _execute_handover(
     *,
     session: WorkerSession,
+    worker_profile: ExecutorProfile,
     handover_prompt: str,
     state: State,
     state_path: Path,
@@ -443,10 +473,11 @@ async def _execute_handover(
     state.iteration += 1
     save_state(state_path, state)
 
-    handover_chunks, handover_usage = await _run_one_turn(
+    handover_chunks, handover_usage, handover_record = await _run_one_turn(
         session=session,
         user_message=handover_prompt,
         state=state,
+        profile=worker_profile,
         out_console=local_console,
     )
     worker_output = "".join(handover_chunks)
@@ -454,6 +485,7 @@ async def _execute_handover(
     # Reload + reconcile before checking the doc
     state = load_state(state_path)
     state.usage.append(handover_usage)
+    state.executor_records.append(handover_record)
     # Count the handover turn's tokens toward the fleet-wide daily budget too,
     # so the global cap stays honest across multi-leg runs (the per-run cap
     # already sees it via state.usage).
@@ -846,10 +878,11 @@ async def run_orchestrator(cfg: OrchestratorConfig) -> None:
                         save_state(state_path, state)
                         local_console.print(f"\n[bold cyan]=== iteration {state.iteration} ===[/bold cyan]")
 
-                        chunks, usage = await _run_one_turn(
+                        chunks, usage, worker_record = await _run_one_turn(
                             session=session,
                             user_message=next_message,
                             state=state,
+                            profile=worker_profile,
                             out_console=local_console,
                         )
 
@@ -857,6 +890,7 @@ async def run_orchestrator(cfg: OrchestratorConfig) -> None:
                         # then reconcile against git and append usage. Persist once.
                         state = load_state(state_path)
                         state.usage.append(usage)
+                        state.executor_records.append(worker_record)
                         commits_added, files_added = reconcile(state, work_dir)
                         if commits_added or files_added:
                             local_console.print(
@@ -1136,6 +1170,7 @@ async def run_orchestrator(cfg: OrchestratorConfig) -> None:
                         if decision.action == "handover":
                             seed = await _execute_handover(
                                 session=session,
+                                worker_profile=worker_profile,
                                 handover_prompt=decision.text,
                                 state=state,
                                 state_path=state_path,

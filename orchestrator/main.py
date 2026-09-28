@@ -13,7 +13,7 @@ from orchestrator.events import filter_since, merge_events, project_events
 from orchestrator.guardrails import cumulative_tokens
 from orchestrator.ledger import agreement_by_category, read_entries
 from orchestrator.orchestrator import OrchestratorConfig, run_orchestrator
-from orchestrator.state import load_state
+from orchestrator.state import ExecutorRecord, load_state
 from orchestrator.usage_guard import global_kill_active, tokens_in_window
 
 
@@ -196,6 +196,26 @@ def stop(task_id: str = typer.Option(..., "--task-id")):
     console.print(f"[yellow]kill switch set: {td / 'STOP'}[/yellow]")
 
 
+def _ms_or_unknown(values: list[int | None]) -> str:
+    known = [v for v in values if v is not None]
+    return f"{sum(known)}ms" if known else "?"
+
+
+def _executor_summary(recs: list[ExecutorRecord], last: ExecutorRecord) -> str:
+    """One status line for a role: executor/model, record and call counts, and
+    the summed latency split (response / ttft / generation / tool)."""
+    failed = sum(1 for r in recs if not r.ok)
+    return (
+        f"{last.executor}/{last.model_id} records={len(recs)}"
+        f"{f' failed={failed}' if failed else ''} "
+        f"calls={sum(r.call_count for r in recs)} "
+        f"response={_ms_or_unknown([r.total_response_ms for r in recs])} "
+        f"ttft={_ms_or_unknown([r.total_ttft_ms for r in recs])} "
+        f"gen={_ms_or_unknown([r.total_generation_ms for r in recs])} "
+        f"tool={_ms_or_unknown([r.total_tool_ms for r in recs])}"
+    )
+
+
 @app.command()
 def status(task_id: str = typer.Option(..., "--task-id")):
     """Show current state.json for a task."""
@@ -254,6 +274,13 @@ def status(task_id: str = typer.Option(..., "--task-id")):
         )
         table.add_row("wall_ms", f"worker={worker_ms} proxy={proxy_ms}")
         table.add_row("est_cost_usd", f"${state.estimated_cost_usd:.2f}")
+
+    # Per-role executor telemetry (E3): which executor served each role and
+    # where its time went. "?" marks a figure the provider does not expose.
+    for role in sorted({r.role for r in state.executor_records}):
+        recs = [r for r in state.executor_records if r.role == role]
+        last = recs[-1]
+        table.add_row(f"executor:{role}", _executor_summary(recs, last))
 
     # Fleet-wide usage + kill state (shared across all runs on this home).
     home = _home()

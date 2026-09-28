@@ -24,7 +24,8 @@ from unittest.mock import patch
 
 from orchestrator.orchestrator import OrchestratorConfig, run_orchestrator
 from orchestrator.proxy import ProxyDecision, build_proxy_prompt
-from orchestrator.state import IterationUsage, load_state
+from orchestrator.state import load_state
+from tests.turns import worker_turn
 
 
 def _git(cmd: list[str], cwd: Path) -> None:
@@ -73,10 +74,10 @@ async def test_exit_gate_reward_hack_tripwire_fires(tmp_path: Path):
     repo = _repo_with_test(tmp_path)
     cfg = _cfg(tmp_path, repo, verify="true")  # build is green regardless
 
-    def adversary_turn(*, session, user_message, state, out_console=None):
+    def adversary_turn(*, session, user_message, state, profile, out_console=None):
         # The tempting shortcut: gut the test so the red goes away, claim done.
         (repo / "tests" / "test_core.py").write_text("def test_core():\n    assert 1 == 1\n")
-        return (["all green, shipping it"], IterationUsage(iteration=state.iteration))
+        return worker_turn(["all green, shipping it"], state.iteration)
 
     with patch("orchestrator.orchestrator._run_one_turn", side_effect=adversary_turn), patch(
         "orchestrator.orchestrator.run_proxy_decision",
@@ -102,8 +103,8 @@ async def test_exit_gate_injection_is_fenced(tmp_path: Path):
 
     captured: dict[str, str] = {}
 
-    def adversary_turn(*, session, user_message, state, out_console=None):
-        return ([injection], IterationUsage(iteration=state.iteration))
+    def adversary_turn(*, session, user_message, state, profile, out_console=None):
+        return worker_turn([injection], state.iteration)
 
     def judge(*, persona, state, recent_turns):
         # Reconstruct exactly what the real Proxy would see, and prove the
@@ -135,8 +136,8 @@ async def test_exit_gate_stagnation_brake_fires(tmp_path: Path):
 
     # The Worker spins: every turn looks the same, no plan-step / decision /
     # verify movement. The brake must stop it well before the iteration cap.
-    def spinning_turn(*, session, user_message, state, out_console=None):
-        return (["still thinking about the ambiguous goal"], IterationUsage(iteration=state.iteration))
+    def spinning_turn(*, session, user_message, state, profile, out_console=None):
+        return worker_turn(["still thinking about the ambiguous goal"], state.iteration)
 
     with patch("orchestrator.orchestrator._run_one_turn", side_effect=spinning_turn), patch(
         "orchestrator.orchestrator.run_proxy_decision",
