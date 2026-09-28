@@ -86,21 +86,77 @@ class IterationUsage(BaseModel):
     proxy_ms: int = 0
 
 
-class ReconRecord(BaseModel):
-    """The `time_to_verified_result` hook for the per-role executor seam: which
-    executor served the read-only recon role (`mercury` or `claude`), the model
-    id, and the wall-clock, so a later run can compare a Mercury-recon run
-    against a Claude-recon baseline. LOGGED telemetry only, NEVER a gate input
-    (consistent with Wave 0: self-report/confidence is recorded, never gated)."""
+class CallLatency(BaseModel):
+    """Latency of ONE model call inside an executor turn.
 
+    An agentic turn is many short generations, not one long one, and each pays
+    time-to-first-token, so ``time_to_verified_ms`` is only explainable when it
+    can be split into waiting, generating and tooling. Every field is best
+    effort: an adapter fills what its provider exposes and leaves the rest
+    ``None``, never a fabricated zero.
+
+    ``response_ms``: request boundary (the query, or the last tool result) to
+    the call's message being complete. The one figure every adapter can measure.
+    ``ttft_ms`` + ``generation_ms`` split it further when the provider streams
+    tokens (the Claude SDK does not without partial messages, so it leaves both
+    ``None``). ``tool_ms``: tool execution between this call and the next.
+    """
+
+    response_ms: int | None = None
+    ttft_ms: int | None = None
+    generation_ms: int | None = None
+    tool_ms: int | None = None
+    output_tokens: int | None = None
+
+
+def _sum_known(values: list[int | None]) -> int | None:
+    known = [v for v in values if v is not None]
+    return sum(known) if known else None
+
+
+class ExecutorRecord(BaseModel):
+    """Per-role executor telemetry (the `time_to_verified_result` hook): which
+    executor served a role (`claude` / `mercury`), on which provider and model,
+    the wall-clock, and the per-call latency decomposition with rollups, so a
+    Mercury cohort can be compared against a Claude baseline. One record per
+    Worker turn and per recon call. LOGGED telemetry only, NEVER a gate input
+    (consistent with Wave 0: self-report/confidence is recorded, never gated).
+
+    Rollups sum only the calls that measured a field and stay ``None`` when none
+    did, so "not measurable on this provider" never reads as "took 0 ms".
+    """
+
+    role: str
     executor: str
+    provider: str
     model_id: str
     elapsed_ms: int
     ok: bool = True
-    # The findings text, persisted so a resumed run reuses it instead of paying
-    # for another recon call.
+    # Recon only: the findings text, persisted so a resumed run reuses it
+    # instead of paying for another recon call. Empty for worker records.
     findings: str = ""
+    iteration: int | None = None
     ran_at: datetime = Field(default_factory=lambda: datetime.now(timezone.utc))
+    calls: list[CallLatency] = []
+    call_count: int = 0
+    total_response_ms: int | None = None
+    total_ttft_ms: int | None = None
+    total_generation_ms: int | None = None
+    total_tool_ms: int | None = None
+
+    @classmethod
+    def build(cls, *, calls: list[CallLatency] | None = None, **fields) -> "ExecutorRecord":
+        """Construct a record with its rollups computed from ``calls``."""
+        calls = list(calls or [])
+        return cls(
+            calls=calls,
+            call_count=len(calls),
+            total_response_ms=_sum_known([c.response_ms for c in calls]),
+            total_ttft_ms=_sum_known([c.ttft_ms for c in calls]),
+            total_generation_ms=_sum_known([c.generation_ms for c in calls]),
+            total_tool_ms=_sum_known([c.tool_ms for c in calls]),
+            **fields,
+        )
 
 
 class AutonomyStats(BaseModel):
@@ -142,10 +198,13 @@ class State(BaseModel):
     verify_attempts: int = 0
     last_verify: VerifyRecord | None = None
     last_held_out: HeldOutRecord | None = None
-    # `time_to_verified_result` telemetry for the per-role executor seam: which
-    # executor (mercury/claude) served the read-only recon role and how long it
-    # took. Logged only, NEVER a gate input (see executor.py / ReconRecord).
-    last_recon: ReconRecord | None = None
+    # `time_to_verified_result` telemetry for the per-role executor seam.
+    # `executor_records` holds one ExecutorRecord per Worker turn and per recon
+    # call (with the per-call latency decomposition); `last_recon` is the most
+    # recent recon record, kept as a direct pointer because the live E1 smoke
+    # asserts on it. Logged only, NEVER a gate input (see ExecutorRecord).
+    executor_records: list[ExecutorRecord] = []
+    last_recon: ExecutorRecord | None = None
     stagnation_streak: int = 0
     last_progress_key: str | None = None
     transient_retries: int = 0

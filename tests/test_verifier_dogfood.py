@@ -28,8 +28,9 @@ from unittest.mock import patch
 
 from orchestrator.orchestrator import OrchestratorConfig, run_orchestrator
 from orchestrator.proxy import ProxyDecision
-from orchestrator.state import IterationUsage, load_state
+from orchestrator.state import load_state
 from orchestrator.worktree import default_worktree_path
+from tests.turns import worker_turn
 
 
 def _git(args: list[str], cwd: Path) -> None:
@@ -99,11 +100,11 @@ async def test_held_out_catches_regression_visible_suite_misses(tmp_path: Path):
     )
     wt = default_worktree_path(repo, "dogfood")
 
-    def regressing_turn(*, session, user_message, state, out_console=None):
+    def regressing_turn(*, session, user_message, state, profile, out_console=None):
         # Passes the weak in-tree test (add(1,1)==2) but is wrong everywhere else.
         # Not test-tampering: the tests are untouched, the CODE is subtly broken.
         (wt / "app.py").write_text("def add(a, b):\n    return a + b if a == 1 else 0\n")
-        return (["implemented add"], IterationUsage(iteration=state.iteration))
+        return worker_turn(["implemented add"], state.iteration)
 
     with patch("orchestrator.orchestrator._run_one_turn", side_effect=regressing_turn), patch(
         "orchestrator.orchestrator.run_proxy_decision",
@@ -173,11 +174,11 @@ async def test_held_out_passes_completes_when_code_is_correct(tmp_path: Path):
         worktree_isolation=True,
     )
 
-    def correct_turn(*, session, user_message, state, out_console=None):
+    def correct_turn(*, session, user_message, state, profile, out_console=None):
         # leaves the correct impl in place, commits so the worktree is clean
         wt = default_worktree_path(repo, "dogfood-ok")
         _git(["git", "commit", "-q", "--allow-empty", "-m", "noop"], wt)
-        return (["looks done"], IterationUsage(iteration=state.iteration))
+        return worker_turn(["looks done"], state.iteration)
 
     with patch("orchestrator.orchestrator._run_one_turn", side_effect=correct_turn), patch(
         "orchestrator.orchestrator.run_proxy_decision",

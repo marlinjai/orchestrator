@@ -17,7 +17,11 @@ from orchestrator.adapters.claude_worker import ClaudeWorkerAdapter
 from orchestrator.executor import ExecutorProfile, load_executor_config, resolve_executor
 from orchestrator.orchestrator import _run_one_turn
 from orchestrator.ports import TurnResult, WorkerAdapter, WorkerSession
-from orchestrator.state import State
+from pathlib import Path
+
+from orchestrator.state import CallLatency, State
+
+_NO_CONFIG = Path('/nonexistent/orchestrator-config.toml')
 
 
 # ---- adapter resolution table ----
@@ -129,6 +133,7 @@ class _FakeSession:
             cache_read_tokens=3,
             cache_creation_tokens=2,
             model="fake-model",
+            calls=[CallLatency(response_ms=40, tool_ms=15, output_tokens=7)],
         )
 
 
@@ -136,8 +141,11 @@ async def test_run_one_turn_maps_turn_result_to_iteration_usage():
     session = _FakeSession()
     assert isinstance(session, WorkerSession)  # satisfies the port protocol
     state = State(task_id="t", goal="g", iteration=4)
-    chunks, usage = await _run_one_turn(
-        session=session, user_message="do the thing", state=state
+    chunks, usage, record = await _run_one_turn(
+        session=session,
+        user_message="do the thing",
+        state=state,
+        profile=resolve_executor("worker", config_path=_NO_CONFIG),
     )
     assert chunks == ["hello ", "world"]
     assert session.messages == ["do the thing"]
@@ -148,6 +156,18 @@ async def test_run_one_turn_maps_turn_result_to_iteration_usage():
     assert usage.cache_creation_tokens == 2
     assert usage.model == "fake-model"
     assert usage.worker_ms >= 0
+    # E3: the turn also yields a worker ExecutorRecord carrying the adapter's
+    # per-call latency rows and their rollups.
+    assert record.role == "worker"
+    assert record.executor == "claude"
+    assert record.provider == "anthropic"
+    assert record.model_id == "fake-model"
+    assert record.iteration == 4
+    assert record.elapsed_ms == usage.worker_ms
+    assert record.call_count == 1
+    assert record.total_response_ms == 40
+    assert record.total_tool_ms == 15
+    assert record.total_ttft_ms is None
 
 
 async def test_run_one_turn_keeps_model_non_null_when_session_omits_it(tmp_path):
@@ -160,7 +180,12 @@ async def test_run_one_turn_keeps_model_non_null_when_session_omits_it(tmp_path)
             return TurnResult(chunks=["x"])
 
     state = State(task_id="t", goal="g")
-    _, usage = await _run_one_turn(session=_NoModelSession(), user_message="m", state=state)
+    _, usage, _record = await _run_one_turn(
+        session=_NoModelSession(),
+        user_message="m",
+        state=state,
+        profile=resolve_executor("worker", config_path=_NO_CONFIG),
+    )
     assert usage.model == ""
     state.usage.append(usage)
     path = tmp_path / "state.json"

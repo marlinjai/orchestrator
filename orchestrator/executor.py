@@ -7,8 +7,8 @@ and NOT a set of provider adapters (the roadmap's named #1 scope-creep risk).
 Two pieces:
 
 1. ``ExecutorProfile`` + ``resolve_executor(role)``: an operator-owned mapping
-   from a ROLE (``worker`` / ``recon`` / ``planner`` / ...) to a model + auth
-   mode + optional cost ceiling. Config lives in
+   from a ROLE (``worker`` / ``recon`` / ``planner`` / ...) to a model +
+   provider + auth mode. Config lives in
    ``~/.config/orchestrator/config.toml`` under ``[executors.<role>]``, the same
    operator-owned, never-goal-authored trust posture as the Marlin Proxy config.
    With NO config, every role resolves to Claude (``CLAUDE_MODEL_ID`` +
@@ -115,13 +115,13 @@ def _config_home() -> Path:
 
 @dataclass(frozen=True)
 class ExecutorProfile:
-    """Which model + auth a given ROLE runs on, plus an optional cost ceiling.
+    """Which model, provider and auth a given ROLE runs on.
 
     ``role`` is the routing key (``worker`` / ``recon`` / ``planner`` / ...).
     ``model_id`` is the model string. ``auth_mode`` reuses the Worker's existing
     ``AuthMode`` (``subscription`` keeps Claude on the flat login; ``api_key``
-    bills the metered API -- the same load-bearing billing switch). ``cost_ceiling_usd``
-    is an optional per-role advisory ceiling, ``None`` for "no ceiling".
+    bills the metered API -- the same load-bearing billing switch). Dollar
+    ceilings are run-level (``--max-cost-usd``), not per role.
 
     ``is_claude`` is the judge-path invariant: the Worker and both Proxies must
     keep running Claude (their integrity is the whole trust model), so callers
@@ -131,7 +131,6 @@ class ExecutorProfile:
     role: str
     model_id: str
     auth_mode: AuthMode = "subscription"
-    cost_ceiling_usd: float | None = None
     provider: Provider = "anthropic"
     reasoning_effort: str | None = None
 
@@ -145,7 +144,7 @@ class ExecutorProfile:
 
 
 def _claude_profile(role: str) -> ExecutorProfile:
-    """The default profile for any role: Claude on subscription auth, no ceiling.
+    """The default profile for any role: Claude on subscription auth.
     A config-free run resolves every role to this, so behavior is unchanged."""
     return ExecutorProfile(role=role, model_id=CLAUDE_MODEL_ID, auth_mode="subscription")
 
@@ -164,13 +163,14 @@ def _coerce_profile(role: str, raw: dict) -> ExecutorProfile:
             f"executor[{role}].auth_mode must be one of {get_args(AuthMode)}, got {auth_mode!r}"
         )
 
-    ceiling = raw.get("cost_ceiling_usd")
-    if ceiling is not None:
-        if not isinstance(ceiling, (int, float)) or isinstance(ceiling, bool):
-            raise ValueError(f"executor[{role}].cost_ceiling_usd must be a number")
-        ceiling = float(ceiling)
-        if ceiling <= 0:
-            ceiling = None
+    if "cost_ceiling_usd" in raw:
+        # Removed in E3: a per-role ceiling was parsed but never enforced, and
+        # dead safety-looking config is worse than none. Rejected loudly so an
+        # operator who set it does not believe a ceiling is protecting them.
+        raise ValueError(
+            f"executor[{role}].cost_ceiling_usd is no longer supported (it was never "
+            "enforced); use the run-level `orchestrator start --max-cost-usd` cap"
+        )
 
     model_id = model_id.strip()
 
@@ -215,7 +215,6 @@ def _coerce_profile(role: str, raw: dict) -> ExecutorProfile:
         role=role,
         model_id=model_id,
         auth_mode=auth_mode,  # type: ignore[arg-type]
-        cost_ceiling_usd=ceiling,
         provider=provider,  # type: ignore[arg-type]
         reasoning_effort=effort,
     )
@@ -523,19 +522,44 @@ def recon(
     )
 
 
-def record_recon(state, findings: ReconFindings) -> None:
-    """Write the recon telemetry onto ``state.last_recon`` (the
-    ``time_to_verified_result`` hook). Imported lazily to keep executor.py a leaf
-    that ``state.py`` could import without a cycle. Logged only, never a gate
-    input. No-ops if ``state`` lacks the field (older state schema)."""
-    from orchestrator.state import ReconRecord
+_EXECUTOR_PROVIDER = {"claude": "anthropic", "mercury": "inception"}
+_PROVIDER_EXECUTOR = {v: k for k, v in _EXECUTOR_PROVIDER.items()}
 
-    if not hasattr(state, "last_recon"):
-        return
-    state.last_recon = ReconRecord(
+
+def executor_label(profile: ExecutorProfile) -> str:
+    """The short executor name telemetry records (``claude`` / ``mercury``),
+    derived from the profile's explicit provider, never from the model id."""
+    return _PROVIDER_EXECUTOR[profile.provider]
+
+
+def record_recon(state, findings: ReconFindings) -> None:
+    """Write the recon telemetry onto ``state`` as an ``ExecutorRecord`` (the
+    ``time_to_verified_result`` hook): appended to ``state.executor_records``
+    and pointed at by ``state.last_recon``. Imported lazily to keep executor.py
+    a leaf that ``state.py`` could import without a cycle. Logged only, never a
+    gate input.
+
+    A Mercury recon is exactly one HTTP request, so it carries one call whose
+    ``response_ms`` is the full round trip (secrets-proxy transit included; the
+    non-streaming forward cannot split TTFT from generation). A Claude recon is
+    an SDK query of unknown call count, so it carries no per-call rows rather
+    than a fabricated one.
+    """
+    from orchestrator.state import CallLatency, ExecutorRecord
+
+    calls = (
+        [CallLatency(response_ms=findings.elapsed_ms)] if findings.executor == "mercury" else []
+    )
+    record = ExecutorRecord.build(
+        role="recon",
         executor=findings.executor,
+        provider=_EXECUTOR_PROVIDER.get(findings.executor, "anthropic"),
         model_id=findings.model_id,
         elapsed_ms=findings.elapsed_ms,
         ok=findings.ok,
         findings=findings.findings,
+        iteration=getattr(state, "iteration", None),
+        calls=calls,
     )
+    state.executor_records.append(record)
+    state.last_recon = record

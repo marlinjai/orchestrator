@@ -21,6 +21,14 @@ export interface AutonomyStats {
   escalated?: number;
 }
 
+export interface CallLatency {
+  response_ms?: number | null;
+  ttft_ms?: number | null;
+  generation_ms?: number | null;
+  tool_ms?: number | null;
+  output_tokens?: number | null;
+}
+
 export interface CommitEntry {
   sha: string;
   message?: string;
@@ -34,6 +42,24 @@ export interface Decision {
   answer: string;
   reasoning: string;
   decided_by: DecidedBy;
+}
+
+export interface ExecutorRecord {
+  role: string;
+  executor: string;
+  provider: string;
+  model_id: string;
+  elapsed_ms: number;
+  ok?: boolean;
+  findings?: string;
+  iteration?: number | null;
+  ran_at?: string;
+  calls?: CallLatency[];
+  call_count?: number;
+  total_response_ms?: number | null;
+  total_ttft_ms?: number | null;
+  total_generation_ms?: number | null;
+  total_tool_ms?: number | null;
 }
 
 export interface FileTouched {
@@ -74,15 +100,6 @@ export interface PlanStep {
   status?: PlanStatus;
 }
 
-export interface ReconRecord {
-  executor: string;
-  model_id: string;
-  elapsed_ms: number;
-  ok?: boolean;
-  findings?: string;
-  ran_at?: string;
-}
-
 export interface VerifyRecord {
   iteration: number;
   command: string;
@@ -115,7 +132,8 @@ export interface State {
   verify_attempts?: number;
   last_verify?: VerifyRecord | null;
   last_held_out?: HeldOutRecord | null;
-  last_recon?: ReconRecord | null;
+  executor_records?: ExecutorRecord[];
+  last_recon?: ExecutorRecord | null;
   stagnation_streak?: number;
   last_progress_key?: string | null;
   transient_retries?: number;

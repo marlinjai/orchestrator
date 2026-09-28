@@ -253,14 +253,13 @@ Malformed persona output, a bad/missing choice, or a per-decision timeout all re
 
 ## Per-role executors (Wave 2 seam)
 
-Each ROLE (`worker`, `recon`, `planner`) resolves to an executor profile (model + `auth_mode` + optional `cost_ceiling_usd`) via `resolve_executor(role)`. **The default for every role is Claude (`claude-opus-4-8`, subscription).** With no `[executors.*]` config the orchestrator is the current single-model setup, byte-for-byte. Override a single role in the operator config (operator-owned, same trust as the Marlin Proxy config; never goal frontmatter, never a per-repo registry field):
+Each ROLE (`worker`, `recon`, `planner`) resolves to an executor profile (model + `provider` + `auth_mode`) via `resolve_executor(role)`. **The default for every role is Claude (`claude-opus-4-8`, subscription).** With no `[executors.*]` config the orchestrator is the current single-model setup, byte-for-byte. Override a single role in the operator config (operator-owned, same trust as the Marlin Proxy config; never goal frontmatter, never a per-repo registry field):
 
 ```toml
 [executors.recon]
 model_id = "mercury"        # Inception Mercury, read-only recon ONLY
 provider = "inception"      # REQUIRED for any non-default model; never inferred
 auth_mode = "api_key"
-cost_ceiling_usd = 0.50     # optional, advisory
 reasoning_effort = "low"    # optional, Inception-only: instant | low | medium | high
 ```
 
@@ -268,8 +267,10 @@ Rules:
 - **Defaults are Claude.** A role you do not pin stays on Claude. A malformed `[executors.*]` table fails the run loud.
 - **`provider` is explicit.** Any model other than the default Claude id must name its provider (`anthropic` or `inception`); routing is never inferred from model-id string shapes. `reasoning_effort` is valid only with `provider = "inception"`.
 - **Non-Anthropic keys go through the proxy.** The Mercury/Inception key is injected SERVER-SIDE on the ai-host secrets proxy (a raw-forward that returns the completion verbatim, not the redacting `/execute` path). The orchestrator process and the transcript never see the key. If the proxy/key is unavailable, recon FAILS LOUD and falls back to Claude recon, never silently skipping.
-- **Only `recon` (read-only) can be non-Claude in this slice.** The Worker (code-writing) and BOTH Proxies stay on Claude: their integrity is the trust model. A config that points `worker` at a non-Claude provider is refused loudly at startup. **Code-writing via a non-Claude model is NOT enabled here** (it needs a measured `time_to_verified_result` win and best-of-N via the E4 experiment in `docs/plans/2026-07-24-hexagonal-executor-ports.md`). `state.last_recon` logs which executor served recon + wall-clock for that comparison (logged only, never a gate input).
+- **Only `recon` (read-only) can be non-Claude in this slice.** The Worker (code-writing) and BOTH Proxies stay on Claude: their integrity is the trust model. A config that points `worker` at a non-Claude provider is refused loudly at startup. **Code-writing via a non-Claude model is NOT enabled here** (it needs a measured `time_to_verified_result` win and best-of-N via the E4 experiment in `docs/plans/2026-07-24-hexagonal-executor-ports.md`). Telemetry for that comparison is below (logged only, never a gate input).
 - **Recon is config-gated in the loop.** When `[executors.recon]` exists, the orchestrator runs one read-only recon question about the goal before the first Worker turn and prepends the findings (marked advisory) to the Worker's first message. With no `[executors.recon]` table, zero extra model calls happen.
+- **No per-role dollar ceiling.** `cost_ceiling_usd` was removed (it was parsed but never enforced) and is now REJECTED at load; cap spend per run with `orchestrator start --max-cost-usd`.
+- **Executor telemetry (`state.executor_records`).** One `ExecutorRecord` per Worker turn and per recon call: `role`, `executor` (`claude` / `mercury`), `provider`, `model_id`, `elapsed_ms`, `ok`, `iteration`, plus the per-model-call latency split in `calls` (`response_ms`, `ttft_ms`, `generation_ms`, `tool_ms`, `output_tokens`) and rollups (`call_count`, `total_response_ms`, `total_ttft_ms`, `total_generation_ms`, `total_tool_ms`). A field the provider does not expose stays `null`, never a fake 0: the Claude adapter measures `response_ms` and `tool_ms` but not the TTFT split. `state.last_recon` points at the latest recon record. `orchestrator status` prints one `executor:<role>` line per role (`?` = not measurable on that provider).
 - **Hexagonal seam.** The control loop talks to the Worker through a provider-neutral `WorkerPort` (`orchestrator/ports.py`); the Claude Agent SDK lives in `orchestrator/adapters/claude_worker.py`. Adding a provider later is an adapter entry, not a loop change.
 
 ## Authentication (critical)

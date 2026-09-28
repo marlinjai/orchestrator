@@ -9,14 +9,15 @@ import pytest
 from orchestrator.orchestrator import OrchestratorConfig, run_orchestrator
 from orchestrator.proxy import ProxyDecision
 from orchestrator.repo_registry import RepoPolicy
-from orchestrator.state import IterationUsage, load_state
+from orchestrator.state import load_state
 from orchestrator.worktree import default_worktree_path, worktree_branch
+from tests.turns import worker_turn
 
 
 def _turn(text: str, iteration: int = 1, input_tokens: int = 0):
-    """The (chunks, usage) 2-tuple _run_one_turn now returns (worker turn only;
+    """The (chunks, usage, record) 3-tuple _run_one_turn returns (worker turn only;
     the Decision Proxy is a separate, post-reconcile call in the loop)."""
-    return ([text], IterationUsage(iteration=iteration, input_tokens=input_tokens))
+    return worker_turn([text], iteration, input_tokens)
 
 
 def _decision(action: str, text_out: str = "go", reasoning: str = "r"):
@@ -81,6 +82,10 @@ async def test_orchestrator_iterates_until_proxy_stops(cfg: OrchestratorConfig):
     assert state.iteration == 3
     assert state.status == "completed"
     assert len(state.usage) == 3
+    # E3: one worker ExecutorRecord per turn survives the post-turn reload
+    # (the Worker rewrites state.json mid-turn, so the loop appends it after).
+    assert [r.iteration for r in state.executor_records] == [1, 2, 3]
+    assert {r.role for r in state.executor_records} == {"worker"}
 
 
 async def test_stop_is_honored_even_after_stagnation_streak(cfg: OrchestratorConfig):
@@ -369,10 +374,10 @@ async def test_tamper_trip_escalates_on_weakened_tests(tmp_path: Path):
     repo = _repo_with_test(tmp_path)
     cfg = _cfg_for_repo(tmp_path, repo)
 
-    def fake_turn(*, session, user_message, state, out_console=None):
+    def fake_turn(*, session, user_message, state, profile, out_console=None):
         # The "Worker" guts the test to make a red suite green, then claims done.
         (repo / "tests" / "test_a.py").write_text("def test_a():\n    assert 1 == 1\n")
-        return (["did the thing"], IterationUsage(iteration=state.iteration))
+        return worker_turn(["did the thing"], state.iteration)
 
     with patch("orchestrator.orchestrator._run_one_turn", side_effect=fake_turn), patch(
         "orchestrator.orchestrator.run_proxy_decision",
@@ -483,10 +488,10 @@ async def test_clean_pass_in_git_repo_completes(tmp_path: Path):
     repo = _repo_with_test(tmp_path)
     cfg = _cfg_for_repo(tmp_path, repo)
 
-    def fake_turn(*, session, user_message, state, out_console=None):
+    def fake_turn(*, session, user_message, state, profile, out_console=None):
         # Touches a non-test file only; tests untouched.
         (repo / "feature.py").write_text("x = 1\n")
-        return (["did the thing"], IterationUsage(iteration=state.iteration))
+        return worker_turn(["did the thing"], state.iteration)
 
     with patch("orchestrator.orchestrator._run_one_turn", side_effect=fake_turn), patch(
         "orchestrator.orchestrator.run_proxy_decision",
@@ -510,10 +515,10 @@ async def test_worktree_isolation_runs_in_worktree_original_untouched(tmp_path: 
     cfg.worktree_isolation = True
     wt = default_worktree_path(repo, cfg.task_id)
 
-    def adversary_turn(*, session, user_message, state, out_console=None):
+    def adversary_turn(*, session, user_message, state, profile, out_console=None):
         # The Worker guts the test IN THE WORKTREE (its cwd), not the original.
         (wt / "tests" / "test_a.py").write_text("def test_a():\n    assert 1 == 1\n")
-        return (["all green"], IterationUsage(iteration=state.iteration))
+        return worker_turn(["all green"], state.iteration)
 
     with patch("orchestrator.orchestrator._run_one_turn", side_effect=adversary_turn), patch(
         "orchestrator.orchestrator.run_proxy_decision",
@@ -540,11 +545,11 @@ async def test_worktree_clean_completion_removes_worktree(tmp_path: Path):
     cfg.worktree_isolation = True
     wt = default_worktree_path(repo, cfg.task_id)
 
-    def good_turn(*, session, user_message, state, out_console=None):
+    def good_turn(*, session, user_message, state, profile, out_console=None):
         (wt / "feature.py").write_text("x = 1\n")
         _git(["git", "add", "-A"], wt)
         _git(["git", "commit", "-q", "-m", "feat: add feature"], wt)
-        return (["shipped"], IterationUsage(iteration=state.iteration))
+        return worker_turn(["shipped"], state.iteration)
 
     with patch("orchestrator.orchestrator._run_one_turn", side_effect=good_turn), patch(
         "orchestrator.orchestrator.run_proxy_decision",
@@ -574,8 +579,8 @@ async def test_held_out_override_gates_and_escalates(tmp_path: Path):
     cfg = _cfg_for_repo(tmp_path, repo, verify="true")
     cfg.held_out_override = "false"  # held-out always fails
 
-    def noop_turn(*, session, user_message, state, out_console=None):
-        return (["done"], IterationUsage(iteration=state.iteration))
+    def noop_turn(*, session, user_message, state, profile, out_console=None):
+        return worker_turn(["done"], state.iteration)
 
     with patch("orchestrator.orchestrator._run_one_turn", side_effect=noop_turn), patch(
         "orchestrator.orchestrator.run_proxy_decision",
@@ -617,8 +622,8 @@ async def test_registry_held_out_cannot_be_weakened_by_override(tmp_path: Path):
     cfg.repos_config = repos_toml
     cfg.held_out_override = "false"  # would fail; must be IGNORED
 
-    def noop_turn(*, session, user_message, state, out_console=None):
-        return (["done"], IterationUsage(iteration=state.iteration))
+    def noop_turn(*, session, user_message, state, profile, out_console=None):
+        return worker_turn(["done"], state.iteration)
 
     with patch("orchestrator.orchestrator._run_one_turn", side_effect=noop_turn), patch(
         "orchestrator.orchestrator.run_proxy_decision",
@@ -724,13 +729,18 @@ async def test_recon_skipped_when_resumed_past_iteration_cap(
 
 
 async def test_recon_findings_reused_on_resume(cfg: OrchestratorConfig, executor_home: Path):
-    from orchestrator.state import ReconRecord, State, save_state
+    from orchestrator.state import ExecutorRecord, State, save_state
 
     _pin_recon(executor_home)
     cfg.state_dir.mkdir(parents=True, exist_ok=True)
     state = State(task_id=cfg.task_id, goal="test goal")
-    state.last_recon = ReconRecord(
-        executor="claude", model_id="claude-opus-4-8", elapsed_ms=5, findings="watch the lockfile"
+    state.last_recon = ExecutorRecord.build(
+        role="recon",
+        executor="claude",
+        provider="anthropic",
+        model_id="claude-opus-4-8",
+        elapsed_ms=5,
+        findings="watch the lockfile",
     )
     save_state(cfg.state_dir / "state.json", state)
     with patch("orchestrator.orchestrator.run_recon") as mock_recon, _mock_loop(
@@ -755,4 +765,8 @@ async def test_recon_runs_once_and_persists_findings(cfg: OrchestratorConfig, ex
     state = load_state(cfg.state_dir / "state.json")
     assert state.last_recon is not None
     assert state.last_recon.findings == "mind the migrations"
+    # E3: the recon record is also the first executor record, ahead of the
+    # worker turn's record.
+    assert [r.role for r in state.executor_records] == ["recon", "worker"]
+    assert state.executor_records[0] == state.last_recon
     assert "mind the migrations" in mock_turn.call_args.kwargs["user_message"]

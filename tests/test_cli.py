@@ -62,3 +62,24 @@ def test_status_surfaces_tamper_and_confidence(tmp_path: Path, monkeypatch):
     assert result.exit_code == 0
     assert "tamper_paths" in result.stdout
     assert "confidence" in result.stdout
+
+
+def test_status_surfaces_executor_telemetry(tmp_path: Path, monkeypatch):
+    from orchestrator.state import CallLatency, ExecutorRecord, State, save_state
+    monkeypatch.setenv("ORCHESTRATOR_HOME", str(tmp_path))
+    monkeypatch.setenv("COLUMNS", "250")
+    task_dir = tmp_path / "tasks" / "abc"
+    task_dir.mkdir(parents=True)
+    worker = ExecutorRecord.build(
+        role="worker", executor="claude", provider="anthropic",
+        model_id="claude-opus-4-8", elapsed_ms=900, iteration=1,
+        calls=[CallLatency(response_ms=300, tool_ms=200), CallLatency(response_ms=100)],
+    )
+    save_state(
+        task_dir / "state.json",
+        State(task_id="abc", goal="g", executor_records=[worker]),
+    )
+    result = runner.invoke(app, ["status", "--task-id", "abc"])
+    assert result.exit_code == 0
+    assert "executor:worker" in result.stdout
+    assert "calls=2 response=400ms ttft=? gen=? tool=200ms" in result.stdout

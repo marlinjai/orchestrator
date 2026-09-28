@@ -42,7 +42,6 @@ def test_resolve_executor_defaults_every_role_to_claude(tmp_path):
         assert prof.is_claude is True
         assert prof.is_mercury is False
         assert prof.auth_mode == "subscription"
-        assert prof.cost_ceiling_usd is None
         assert prof.role == role
 
 
@@ -64,14 +63,12 @@ def test_resolve_executor_config_points_recon_at_mercury(tmp_path):
 model_id = "mercury"
 provider = "inception"
 auth_mode = "api_key"
-cost_ceiling_usd = 0.50
 """
     )
     prof = resolve_executor("recon", config_path=p)
     assert prof.model_id == MERCURY_MODEL_ID
     assert prof.is_mercury is True
     assert prof.auth_mode == "api_key"
-    assert prof.cost_ceiling_usd == 0.50
 
     # Roles NOT pinned still default to Claude -- a recon override never leaks.
     assert resolve_executor("worker", config_path=p).is_claude is True
@@ -106,10 +103,13 @@ def test_load_executor_config_malformed_toml_fails_loud(tmp_path):
         load_executor_config(p)
 
 
-def test_nonpositive_cost_ceiling_normalizes_to_none(tmp_path):
+def test_removed_cost_ceiling_is_rejected_loudly(tmp_path):
+    """cost_ceiling_usd was parsed but never enforced; it is now refused at load
+    so an operator never believes a per-role ceiling is protecting them."""
     p = tmp_path / "config.toml"
-    p.write_text("[executors.recon]\ncost_ceiling_usd = 0\n")
-    assert resolve_executor("recon", config_path=p).cost_ceiling_usd is None
+    p.write_text("[executors.recon]\ncost_ceiling_usd = 0.50\n")
+    with pytest.raises(ValueError, match="--max-cost-usd"):
+        load_executor_config(p)
 
 
 # --------------------------------------------------------------------------- #

@@ -114,10 +114,18 @@ PR #14 closed unmerged on 2026-08-09, so none of the above reached main. On 2026
 
 Correction to the M9 note above: M9 is a SUPERSET of E4, not the same thing. The Agentic OS side (`agentic-os-platform/docs/plans/2026-07-28-m9-executor-reconciliation.md`, Corrections 1 to 3) adds the sprint-worker respawn and its handover on top of the adapter.
 
+## Reality update (2026-09-28): E3 shipped
+
+- `CallLatency` + `ExecutorRecord` in `state.py`; `ReconRecord` is gone. `state.executor_records` gets one record per Worker turn (appended after the post-turn state reload, so handover turns count too) and per recon call; `state.last_recon` stays as the pointer the live E1 smoke asserts on. Rollups sum only measured fields and stay `None` otherwise.
+- The TurnResult carries `calls`. The Claude adapter groups the stream by `message_id` and measures `response_ms` (last input to the call's last block) and `tool_ms` (last block to the next tool result); sub-agent messages fold into the parent's tool time. It does not claim a TTFT/generation split: the SDK only exposes that with partial-message streaming, which would change the message stream the loop sees. The OpenAI-compatible adapter (E4) owns its HTTP calls and fills all fields.
+- Deviation from the E3 wording "per-role telemetry only": building the per-call tracker exposed a real accounting bug. The CLI emits one `AssistantMessage` per content block, each repeating the call's full usage, and the adapter also added the `ResultMessage` turn total on top, so recorded tokens (and with them the per-run token cap, the fleet daily cap and the cost estimate) were inflated by roughly the blocks-per-call count plus one. Usage is now deduplicated per `message_id` and the result total is not added. Token figures in new runs are therefore lower than in older runs; they are now correct, not a regression.
+- `cost_ceiling_usd` deleted, and rejected at load with a pointer to `--max-cost-usd` (a per-role ceiling needs per-role price attribution; the run-level cap already exists and is enforced).
+- `orchestrator status` prints an `executor:<role>` line with the latency split; the test suite now isolates `ORCHESTRATOR_CONFIG_HOME` so a developer's real `[executors.recon]` can never make loop tests fire live recon calls.
+
 ## Next steps (ordered, as of 2026-09-28)
 
 1. **Land E1+E2** as a fresh pull request (this plan + the seam), landed by land-pr in the background.
-2. **E3: latency telemetry** (own pull request). Per-call `CallLatency` on a generalized `ExecutorRecord`, plus enforce-or-delete `cost_ceiling_usd`. No experiment is interpretable without it.
+2. **DONE 2026-09-28. E3: latency telemetry** (own pull request). Per-call `CallLatency` on a generalized `ExecutorRecord`, plus enforce-or-delete `cost_ceiling_usd`. No experiment is interpretable without it.
 3. **E4: the OpenAI-compatible worker adapter** (own pull request). `adapters/openai_compat_worker.py`, the non-Claude worker gate (refuse without a held-out verifier), and the experiment rig: Claude vs Mercury via `--best-of` with a held-out verifier, decided on `time_to_verified_ms` with the TTFT decomposition from E3. Running the live cohort needs step 4. Exit criterion in Verification below.
 4. **Operator prerequisite: `INCEPTION_API_KEY`** in Infisical (`/providers`, project id in `executor.INCEPTION_PROJECT_ID`) via the placeholder flow: Claude sets `PLACEHOLDER_REPLACE_ME`, Marlin fills the real value in the Infisical UI. Then the live E1 smoke: `[executors.recon] model_id = "mercury-2", provider = "inception"` on a dogfood goal, asserting `state.last_recon.executor == "mercury"` and Claude fallback when the proxy is down.
 5. **Platform side, after E4**: M9's sprint worker in `agentic-os-platform`, per its reconciliation plan.
