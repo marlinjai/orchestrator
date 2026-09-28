@@ -398,7 +398,9 @@ class OpenAICompatWorkerSession:
         self.audit_path = state_path.parent / TOOL_AUDIT_FILE
         self.messages: list[dict] = [{"role": "system", "content": build_system_prompt()}]
 
-    async def run_turn(self, user_message: str, *, on_text: OnText | None = None) -> TurnResult:
+    async def run_turn(
+        self, user_message: str, *, on_text: OnText | None = None, checkpoint: bool = False
+    ) -> TurnResult:
         self.messages.append({"role": "user", "content": user_message})
         result = TurnResult()
         for _ in range(self._max_tool_rounds):
@@ -430,7 +432,8 @@ class OpenAICompatWorkerSession:
                 )
             call.latency.tool_ms = _ms(self._clock() - tools_started)
             prompt = int((call.usage or {}).get("prompt_tokens") or 0)
-            if self._context_limit and prompt >= self._context_limit:
+            # Never on the checkpoint turn: it must reach HANDOVER_COMPLETE.
+            if not checkpoint and self._context_limit and prompt >= self._context_limit:
                 note = (
                     f"[turn ended by the orchestrator: the context reached {prompt:,} tokens, "
                     f"the handover threshold of {self._context_limit:,}]"

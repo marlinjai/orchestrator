@@ -245,6 +245,7 @@ async def _run_one_turn(
     state: State,
     profile: ExecutorProfile,
     out_console: Console | None = None,
+    checkpoint: bool = False,
 ) -> tuple[list[str], IterationUsage, ExecutorRecord]:
     """Run one Worker turn through the WorkerPort and return its text chunks,
     token usage and executor telemetry record (the per-call latency
@@ -267,6 +268,9 @@ async def _run_one_turn(
     result = await session.run_turn(
         user_message,
         on_text=lambda text: out.print(f"[dim]worker:[/dim] {text}", end=""),
+        # Only the handover turn passes the flag, so ordinary turns keep the
+        # plain two-argument call.
+        **({"checkpoint": True} if checkpoint else {}),
     )
     usage.input_tokens = result.input_tokens
     usage.output_tokens = result.output_tokens
@@ -482,6 +486,7 @@ async def _execute_handover(
         state=state,
         profile=worker_profile,
         out_console=local_console,
+        checkpoint=True,
     )
     worker_output = "".join(handover_chunks)
 

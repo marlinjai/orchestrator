@@ -112,13 +112,19 @@ class ClaudeWorkerSession:
         self._client = client
         self._clock = clock
 
-    async def run_turn(self, user_message: str, *, on_text: OnText | None = None) -> TurnResult:
+    async def run_turn(
+        self, user_message: str, *, on_text: OnText | None = None, checkpoint: bool = False
+    ) -> TurnResult:
         result = TurnResult()
         tracker = _CallTracker(self._clock())
         # Last usage seen per model call (every content block repeats it), and
         # every call seen at all, so a call that never reported usage is known.
         usage_by_call: dict[str, dict] = {}
         calls_seen: set[str] = set()
+        # The same two, for the main Worker session only: subagent calls run in
+        # their own context, so they neither size nor block the measurement.
+        main_usage_by_call: dict[str, dict] = {}
+        main_calls_seen: set[str] = set()
         anonymous = 0
         result_usage: dict | None = None
         async for msg in run_worker_turn(client=self._client, user_message=user_message):
@@ -135,8 +141,13 @@ class ClaudeWorkerSession:
                     anonymous += 1
                     key = f"_anonymous-{anonymous}"
                 calls_seen.add(key)
+                is_main = msg.parent_tool_use_id is None
+                if is_main:
+                    main_calls_seen.add(key)
                 if isinstance(msg.usage, dict):
                     usage_by_call[key] = msg.usage
+                    if is_main:
+                        main_usage_by_call[key] = msg.usage
             elif isinstance(msg, UserMessage):
                 tracker.on_user(msg, now)
             elif isinstance(msg, ResultMessage):
@@ -153,14 +164,15 @@ class ClaudeWorkerSession:
         if not complete and result_usage is not None:
             usages = [result_usage]
         # Context fill = the largest prompt any single call sent (uncached input
-        # plus both cache legs). Only when per-call usage is complete: the
-        # result-message fallback is a turn total, not a context size.
-        if complete and usage_by_call:
+        # plus both cache legs), main session only. Only when its per-call usage
+        # is complete: the result-message fallback is a turn total, not a
+        # context size.
+        if main_usage_by_call and main_calls_seen <= main_usage_by_call.keys():
             result.context_tokens = max(
                 int(u.get("input_tokens", 0) or 0)
                 + int(u.get("cache_read_input_tokens", 0) or 0)
                 + int(u.get("cache_creation_input_tokens", 0) or 0)
-                for u in usage_by_call.values()
+                for u in main_usage_by_call.values()
             )
         for u in usages:
             result.input_tokens += int(u.get("input_tokens", 0) or 0)

@@ -502,3 +502,13 @@ async def test_no_threshold_means_no_early_end(tmp_path):
     session = _session(tmp_path, _ScriptedChat(big, _text_events("finished")))
     result = await session.run_turn("go")
     assert result.chunks[-1] == "finished"
+
+
+async def test_checkpoint_turn_is_not_ended_at_the_threshold(tmp_path):
+    big = _tool_call_events("list_dir", {}, call_id="c1")
+    big[-1]["usage"] = {"prompt_tokens": 90_000, "completion_tokens": 5}
+    chat = _ScriptedChat(big, _text_events("HANDOVER_COMPLETE"))
+    session = _session(tmp_path, chat, context_limit=89_600)
+    result = await session.run_turn("write the handover", checkpoint=True)
+    assert result.chunks[-1] == "HANDOVER_COMPLETE"
+    assert len(chat.bodies) == 2  # the checkpoint turn ran to its final reply
