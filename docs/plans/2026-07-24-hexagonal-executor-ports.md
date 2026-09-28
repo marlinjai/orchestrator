@@ -189,6 +189,24 @@ What the aggregate hides, from the 40 individual attempts (so the verdict is rea
 
 Consequences: the orchestrator's non-Claude Worker path is validated on a benchmark, behind the held-out gate, and stays opt-in (the default Worker is still Claude; an operator enables Mercury per config home). M9 in the Agentic OS Platform may proceed. As the decision page set out, a second round on real repositories (hidden tests owned by a separate OS user) comes before Mercury does real work; that and the prompt nudge are the dated follow-ups on the ROADMAP.
 
+## Reality update (2026-09-28, night): the Mercury tail, diagnosed and cut
+
+Four Mercury-only remeasures (the race harness with `--cohorts mercury`, 20 attempts each) traced the tail to four separate causes, each fixed and remeasured in turn:
+
+1. **An orchestrator bug, not model behavior.** Mercury reported its commit AFTER the end-of-turn reconcile had already recorded it as "not self-reported", and `update_state` appended a duplicate instead of upgrading that entry, so the Decision Proxy kept sending it back until the stagnation guard stopped a finished run. Fixed in the shared handler (every Worker benefits): a late report upgrades the reconciled entry, repeats are ignored, an empty or short SHA and the run's own baseline commit are refused with guidance.
+2. **Mercury skipped `update_state` on first turns anyway.** The adapter now records what the Worker's own tool calls observably did (files written, commits created by `git commit`), through the same handler.
+3. **Provider streams held open after the answer.** Reading now stops once the finish reason and usage are in; `response_ms` became the full call time so such a tail can no longer hide.
+4. **Provider calls that stalled for minutes and returned nothing.** A 60s call timeout plus up to two in-place retries (the conversation is kept).
+
+| Mercury, per attempt (20) | Race | Fix 1 | Fix 2 | Fix 3 | Final (all four, caller-identity transport) |
+|---|---|---|---|---|---|
+| Hidden tests green | 18 | 20 | 20 | 20 | 18 |
+| One iteration | 17 | 13 | 18 | 17 | **20** |
+| Median | 18.5s | 19.8s | 16.4s | 17.0s | 21.2s |
+| Mean | 33.8s | 40.9s | 37.2s | 60.8s | **29.2s** |
+
+The loop tail is gone (20 of 20 attempts in one iteration) and the mean is the lowest of any run. The final median is higher because the transport changed between runs: since secrets-proxy caller identity (orchestrator#32) every model call spawns the `secrets-proxy-call` Node CLI and mints a token, roughly 0.4s more per call on a Worker that makes 15 to 45 short calls per task (a dated ROADMAP line). The two hidden-test misses in the final run are ordinary quality misses, not loops. Remaining outliers (80 to 100s) are provider stalls now bounded by the 60s timeout.
+
 ## Verification
 
 - Existing suite green after E2 with no operator config; golden `state.json` invariance test.

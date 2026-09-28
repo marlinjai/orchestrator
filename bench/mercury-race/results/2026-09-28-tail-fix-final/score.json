@@ -1,0 +1,131 @@
+{
+  "claude": {
+    "goals": 10,
+    "passed": 0,
+    "pass_rate_pct": 0.0,
+    "median_ttv_ms": Infinity
+  },
+  "mercury": {
+    "goals": 10,
+    "passed": 10,
+    "pass_rate_pct": 100.0,
+    "median_ttv_ms": 19719.5
+  },
+  "n_ok": true,
+  "cohorts_ran": [
+    "mercury"
+  ],
+  "verdict_possible": false,
+  "mercury_wins": false,
+  "attempts": {
+    "mercury": {
+      "attempts": 20,
+      "green": 18,
+      "one_iteration": 20,
+      "median_s": 21.177500000000002,
+      "mean_s": 29.15475
+    }
+  },
+  "per_goal": {
+    "01-word-count": {
+      "claude": {
+        "passed": false,
+        "ttv_ms": Infinity
+      },
+      "mercury": {
+        "passed": true,
+        "ttv_ms": 19469.0
+      }
+    },
+    "02-slugify-dashes": {
+      "claude": {
+        "passed": false,
+        "ttv_ms": Infinity
+      },
+      "mercury": {
+        "passed": true,
+        "ttv_ms": 17749.0
+      }
+    },
+    "03-truncate-width": {
+      "claude": {
+        "passed": false,
+        "ttv_ms": Infinity
+      },
+      "mercury": {
+        "passed": true,
+        "ttv_ms": 14775.0
+      }
+    },
+    "04-roman": {
+      "claude": {
+        "passed": false,
+        "ttv_ms": Infinity
+      },
+      "mercury": {
+        "passed": true,
+        "ttv_ms": 19970.0
+      }
+    },
+    "05-csv-quotes": {
+      "claude": {
+        "passed": false,
+        "ttv_ms": Infinity
+      },
+      "mercury": {
+        "passed": true,
+        "ttv_ms": 25697.0
+      }
+    },
+    "06-cli-count": {
+      "claude": {
+        "passed": false,
+        "ttv_ms": Infinity
+      },
+      "mercury": {
+        "passed": true,
+        "ttv_ms": 16504.0
+      }
+    },
+    "07-case-convert": {
+      "claude": {
+        "passed": false,
+        "ttv_ms": Infinity
+      },
+      "mercury": {
+        "passed": true,
+        "ttv_ms": 23875.0
+      }
+    },
+    "08-duration-units": {
+      "claude": {
+        "passed": false,
+        "ttv_ms": Infinity
+      },
+      "mercury": {
+        "passed": true,
+        "ttv_ms": 20015.0
+      }
+    },
+    "09-lru-cache": {
+      "claude": {
+        "passed": false,
+        "ttv_ms": Infinity
+      },
+      "mercury": {
+        "passed": true,
+        "ttv_ms": 15437.0
+      }
+    },
+    "10-wrap": {
+      "claude": {
+        "passed": false,
+        "ttv_ms": Infinity
+      },
+      "mercury": {
+        "passed": true,
+        "ttv_ms": 24378.0
+      }
+    }
+  }
+}
