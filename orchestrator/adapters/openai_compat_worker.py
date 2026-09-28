@@ -34,6 +34,7 @@ import asyncio
 import json
 import logging
 import os
+import re
 import subprocess
 import tempfile
 import time
@@ -41,6 +42,7 @@ import urllib.error
 import urllib.request
 from contextlib import asynccontextmanager
 from dataclasses import dataclass, field
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, AsyncIterator, Callable, Iterator
 
@@ -77,6 +79,8 @@ TRANSIENT_HTTP_STATUSES = frozenset({408, 409, 425, 429, 500, 502, 503, 504, 529
 MAX_TOOL_ROUNDS = 60
 COMMAND_TIMEOUT_S = 600
 MAX_TOOL_OUTPUT_CHARS = 30_000
+TOOL_AUDIT_FILE = "worker-tools.jsonl"
+AUDIT_RESULT_CHARS = 500
 
 # A malformed or unterminated SSE stream must not grow one buffered line without bound.
 _MAX_SSE_LINE_BYTES = 1 << 20
@@ -248,6 +252,34 @@ TOOLS: list[dict] = [
 ]
 
 
+# A `key: value` / `key=value` pair whose key names a credential, and known
+# bare-token prefixes (OpenAI/Anthropic `sk-`, GitHub `gh[a-z]_`, AWS `AKIA`,
+# a JWT's `eyJ` header). Audited tool args/results can carry any of these
+# (a command that curls with a bearer header, a file the model reads that
+# holds a `.env`), so they are redacted before the line is ever written.
+_SECRET_KV_RE = re.compile(
+    r"(?i)\b(api[_-]?key|secret|token|password|passwd|access[_-]?key|"
+    r"authorization|bearer)(\s*[:=]\s*)(['\"]?)([A-Za-z0-9_\-\./+]{6,})\3"
+)
+_SECRET_BARE_RE = re.compile(
+    r"\b(sk-[A-Za-z0-9]{10,}|gh[opsu]_[A-Za-z0-9]{10,}|github_pat_[A-Za-z0-9_]{10,}|"
+    r"AKIA[A-Z0-9]{12,}|eyJ[A-Za-z0-9_\-]{10,}\.[A-Za-z0-9_\-]{10,}\.[A-Za-z0-9_\-]{5,})\b"
+)
+
+
+def _redact_secrets(value: Any) -> Any:
+    """Mask credential-shaped substrings in a string, or recursively in a
+    JSON-like structure. Leaves everything else untouched."""
+    if isinstance(value, str):
+        redacted = _SECRET_KV_RE.sub(lambda m: f"{m.group(1)}{m.group(2)}{m.group(3)}[REDACTED]{m.group(3)}", value)
+        return _SECRET_BARE_RE.sub("[REDACTED]", redacted)
+    if isinstance(value, dict):
+        return {k: _redact_secrets(v) for k, v in value.items()}
+    if isinstance(value, list):
+        return [_redact_secrets(v) for v in value]
+    return value
+
+
 def _truncate(text: str, limit: int = MAX_TOOL_OUTPUT_CHARS) -> str:
     if len(text) <= limit:
         return text
@@ -288,6 +320,10 @@ class OpenAICompatWorkerSession:
         self._max_tool_rounds = max_tool_rounds
         self._command_timeout_s = command_timeout_s
         self._update_state = build_update_state_handler(state_path)
+        # Audit trail of every tool call, next to state.json. The Claude Worker
+        # leaves a full transcript; this is the Mercury Worker's equivalent, so
+        # a command that reached outside its assignment is visible afterwards.
+        self.audit_path = state_path.parent / TOOL_AUDIT_FILE
         self.messages: list[dict] = [{"role": "system", "content": build_system_prompt()}]
 
     async def run_turn(self, user_message: str, *, on_text: OnText | None = None) -> TurnResult:
@@ -419,6 +455,45 @@ class OpenAICompatWorkerSession:
     # ---- tools ----
 
     async def _run_tool(self, name: str, raw_args: str) -> str:
+        output = await self._dispatch_tool(name, raw_args)
+        self._audit(name, raw_args, output)
+        return output
+
+    def _audit(self, name: str, raw_args: str, output: str) -> None:
+        """Append one JSON line per tool call. File contents are recorded by
+        size only (the diff is in git); commands, paths and results are kept,
+        but redacted (``_redact_secrets``): a command or a file the model reads
+        or writes can carry a live credential, and this file is not a secret
+        store."""
+        try:
+            args = json.loads(raw_args) if raw_args.strip() else {}
+        except json.JSONDecodeError:
+            args = {"unparsed": _redact_secrets(raw_args[:500])}
+        if isinstance(args, dict):
+            for size_only_field in ("content", "old_string", "new_string"):
+                value = args.get(size_only_field)
+                if isinstance(value, str):
+                    args[size_only_field] = f"<{len(value)} characters>"
+            args = _redact_secrets(args)
+        entry = {
+            "ts": datetime.now(timezone.utc).isoformat(),
+            "tool": name,
+            "args": args,
+            "result": _redact_secrets(output[:AUDIT_RESULT_CHARS]),
+        }
+        try:
+            fd = os.open(str(self.audit_path), os.O_CREAT | os.O_APPEND | os.O_WRONLY, 0o600)
+            try:
+                os.fchmod(fd, 0o600)
+            except OSError:
+                os.close(fd)
+                raise
+            with os.fdopen(fd, "a", encoding="utf-8") as f:
+                f.write(json.dumps(entry, ensure_ascii=True) + "\n")
+        except OSError as e:
+            logger.warning("could not write the worker tool audit %s: %s", self.audit_path, e)
+
+    async def _dispatch_tool(self, name: str, raw_args: str) -> str:
         try:
             args = json.loads(raw_args) if raw_args.strip() else {}
         except json.JSONDecodeError as e:
