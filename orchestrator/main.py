@@ -15,6 +15,7 @@ from orchestrator.ledger import agreement_by_category, read_entries
 from orchestrator.orchestrator import OrchestratorConfig, run_orchestrator
 from orchestrator.state import ExecutorRecord, load_state
 from orchestrator.usage_guard import global_kill_active, tokens_in_window
+from orchestrator.bundled import bundled_persona
 
 
 app = typer.Typer(help="Autonomous Claude Code orchestrator")
@@ -51,7 +52,7 @@ def _daily_token_cap() -> int | None:
 def start(
     goal: Path = typer.Option(..., "--goal", help="Path to goal markdown file"),
     persona: Path = typer.Option(
-        Path(__file__).parent.parent / "personas" / "default.md",
+        bundled_persona("default.md"),
         "--persona",
         help="Path to persona markdown file",
     ),
@@ -88,7 +89,7 @@ def start(
         ),
     ),
     marlin_persona: Path = typer.Option(
-        Path(__file__).parent.parent / "personas" / "marlin.md",
+        bundled_persona("marlin.md"),
         "--marlin-persona",
         help="Path to the Marlin Proxy persona (used when marlin_proxy mode != off)",
     ),
@@ -191,10 +192,10 @@ def sprint(
     project: Path = typer.Option(Path.cwd(), "--project", help="Project git repository"),
     task_id: str = typer.Option("", "--task-id", help="Task ID (auto-generated if empty); rerun the same ID to resume"),
     persona: Path = typer.Option(
-        Path(__file__).parent.parent / "personas" / "default.md", "--persona", help="Decision Proxy persona"
+        bundled_persona("default.md"), "--persona", help="Decision Proxy persona"
     ),
     marlin_persona: Path = typer.Option(
-        Path(__file__).parent.parent / "personas" / "marlin.md", "--marlin-persona", help="Marlin Proxy persona"
+        bundled_persona("marlin.md"), "--marlin-persona", help="Marlin Proxy persona"
     ),
     max_iterations: int = typer.Option(15, "--max-iterations", help="Iteration cap PER SLICE"),
     max_hours: float = typer.Option(1.0, "--max-hours", help="Wall-clock cap PER SLICE"),
