@@ -29,6 +29,7 @@ from pathlib import Path
 
 from orchestrator.best_of import CohortResult
 from orchestrator.events import EVENT_TYPES, Event
+from orchestrator.sprint import SprintRecord
 from orchestrator.state import State
 
 # Repo-root-relative output paths. The script lives in scripts/, so the repo
@@ -37,11 +38,13 @@ REPO_ROOT = Path(__file__).resolve().parent.parent
 OUTPUT_PATH = REPO_ROOT / "types" / "state.d.ts"
 EVENTS_OUTPUT_PATH = REPO_ROOT / "types" / "events.d.ts"
 COHORT_OUTPUT_PATH = REPO_ROOT / "types" / "cohort.d.ts"
+SPRINT_OUTPUT_PATH = REPO_ROOT / "types" / "sprint.d.ts"
 
 GENERATOR_REL = "scripts/gen_state_dts.py"
 SOURCE_REL = "orchestrator/state.py (State.model_json_schema())"
 EVENTS_SOURCE_REL = "orchestrator/events.py (Event.model_json_schema())"
 COHORT_SOURCE_REL = "orchestrator/best_of.py (CohortResult.model_json_schema())"
+SPRINT_SOURCE_REL = "orchestrator/sprint.py (SprintRecord.model_json_schema())"
 
 # The four Literal aliases from orchestrator/state.py. Pydantic inlines a
 # Literal as a bare `enum` array (no $ref, no title), so the alias name is lost
@@ -88,6 +91,15 @@ EVENTS_HEADER = (
     "// The normalized event-stream contract a Kanban board reads: the typed\n"
     "// projection over State (orchestrator/events.py::project_events). A drift\n"
     "// test (tests/test_state_dts.py) fails the suite if this file is stale.\n"
+)
+
+SPRINT_HEADER = (
+    "// GENERATED FILE: DO NOT EDIT BY HAND.\n"
+    f"// Source: {SPRINT_SOURCE_REL}.\n"
+    f"// Regenerate with: uv run python {GENERATOR_REL}\n"
+    "//\n"
+    "// The sprint contract a board reads (sprint.json next to a sprint's\n"
+    "// state.json): the slices, their status and the final held-out result\n"
 )
 
 COHORT_HEADER = (
@@ -310,6 +322,26 @@ def generate_cohort() -> str:
     return "\n\n".join(blocks) + "\n"
 
 
+def generate_sprint() -> str:
+    """Produce types/sprint.d.ts from SprintRecord.model_json_schema(), in the
+    same self-contained shape as cohort.d.ts."""
+    schema = SprintRecord.model_json_schema()
+    defs: dict = schema.get("$defs", {})
+    blocks: list[str] = [SPRINT_HEADER.rstrip("\n")]
+    blocks.append(
+        "\n".join(
+            emit_literal_alias(name, LITERAL_ALIASES[name]) for name in ("TaskStatus", "VerifyStatus")
+        )
+    )
+    for def_name in sorted(defs):
+        def_schema = defs[def_name]
+        if def_schema.get("type") != "object":
+            raise GeneratorError(f"$def {def_name!r} is not an object schema")
+        blocks.append(emit_interface(def_name, def_schema))
+    blocks.append(emit_interface("SprintRecord", schema))
+    return "\n\n".join(blocks) + "\n"
+
+
 # Each contract: (output path, generator NAME, human label). The generator is
 # stored by NAME and resolved from module globals at call time so the drift
 # tests can monkeypatch `generate` / `generate_events` / `generate_cohort` and
@@ -318,6 +350,7 @@ _CONTRACTS = (
     (OUTPUT_PATH, "generate", "types/state.d.ts"),
     (EVENTS_OUTPUT_PATH, "generate_events", "types/events.d.ts"),
     (COHORT_OUTPUT_PATH, "generate_cohort", "types/cohort.d.ts"),
+    (SPRINT_OUTPUT_PATH, "generate_sprint", "types/sprint.d.ts"),
 )
 
 

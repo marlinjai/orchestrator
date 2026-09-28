@@ -276,6 +276,24 @@ Rules:
 - **Executor telemetry (`state.executor_records`).** One `ExecutorRecord` per Worker turn and per recon call: `role`, `executor` (`claude` / `mercury`), `provider`, `model_id`, `elapsed_ms`, `ok`, `iteration`, `findings` (recon only: the findings text a resumed run reuses instead of paying for recon again; empty for worker records), plus the per-model-call latency split in `calls` (`response_ms`, `ttft_ms`, `generation_ms`, `tool_ms`, `output_tokens`) and rollups (`call_count`, `total_response_ms`, `total_ttft_ms`, `total_generation_ms`, `total_tool_ms`). A field the provider does not expose stays `null`, never a fake 0: the Claude adapter measures `response_ms` and `tool_ms` but not the TTFT split. `state.last_recon` points at the latest recon record. `orchestrator status` prints one `executor:<role>` line per role (`?` = not measurable on that provider).
 - **Hexagonal seam.** The control loop talks to the Worker through a provider-neutral `WorkerPort` (`orchestrator/ports.py`); the Claude Agent SDK lives in `orchestrator/adapters/claude_worker.py`. Adding a provider later is an adapter entry, not a loop change.
 
+## Sprint mode (`orchestrator sprint`, the Agentic OS M9 sprint worker)
+
+For a goal too big for one Worker session, run it as a sprint:
+
+```bash
+orchestrator sprint --goal goals/<id>.md --project <repo> --task-id <id>
+```
+
+Optional flags: `--handover-dir <dir>`, `--held-out "<cmd>"`, `--max-slices 8`, `--max-iterations 15`, `--max-hours 1`.
+
+- **Claude slices the goal once** (the `planner` role, which must stay Claude) into at most `--max-slices` small, file-scoped slices, each naming its files and the tests it adds and each leaving the suite green on its own. A malformed plan fails the sprint.
+- **Every slice is a full orchestrator run** inside ONE worktree (branch `orchestrator/<task-id>`), with the goal's frontmatter `verify` as its gate and the Decision Proxy on every iteration. The goal MUST have a `verify` command, or the sprint is refused. `--max-iterations` / `--max-hours` are per slice.
+- **Handover documents**: after each slice the runner writes a note (commits, files, decisions, open points, the Worker's closing message) to `--handover-dir` (default `<task dir>/handover`), and the cumulative `HANDOVER.md` goes into the next slice's goal.
+- **Hidden tests once**: slices defer the held-out verifier; the sprint runs it once on the finished tree. A non-Claude Worker needs one (registry or `--held-out`), or the sprint is refused before slicing.
+- **State**: `state.json` (status, `iteration` = slices done) plus `sprint.json` (per slice: status, attempts, task id, commits, handover path; typed in `types/sprint.d.ts`). Slice runs live in sibling task dirs `<task-id>-slice-NN-a<attempt>`. `orchestrator status --task-id <id>` shows a sprint line. `orchestrator stop --task-id <id>` halts between slices and forwards the stop into the running slice.
+- **Resume / retry**: rerun the same command with the same `--task-id`: it continues at the first slice not completed (a failed or stopped slice gets a fresh attempt; the slice plan is reused, never resliced). A completed sprint started again does nothing.
+- **Per-run Worker model**: `ORCHESTRATOR_EXECUTORS_FILE=<toml>` overlays `[executors.<role>]` tables for that process only (config.toml's other sections and repos.toml stay in force). Operator-set environment, never goal frontmatter; the Agentic OS uses it to apply a company's `sprint` routing rule.
+
 ## Authentication (critical)
 
 **The Worker uses the user's Claude Code login subscription by default**, not API billing. The orchestrator strips `ANTHROPIC_API_KEY` from its own env before spawning the SDK subprocess (see `orchestrator/worker.py::_scrub_anthropic_api_key`).

@@ -431,3 +431,25 @@ def test_record_recon_survives_round_trip(tmp_path):
     assert reloaded.last_recon is not None
     assert reloaded.last_recon.executor == "claude"
     assert reloaded.last_recon.elapsed_ms == 5
+
+
+
+def test_executors_file_overlays_one_role_per_run(tmp_path, monkeypatch):
+    home = tmp_path / "home"
+    home.mkdir()
+    (home / "config.toml").write_text(
+        '[executors.recon]\nmodel_id = "mercury-2"\nprovider = "inception"\n'
+    )
+    overlay = tmp_path / "run-executors.toml"
+    overlay.write_text('[executors.worker]\nmodel_id = "mercury-2.5"\nprovider = "inception"\n')
+    monkeypatch.setenv("ORCHESTRATOR_CONFIG_HOME", str(home))
+    monkeypatch.setenv("ORCHESTRATOR_EXECUTORS_FILE", str(overlay))
+    assert resolve_executor("worker").model_id == "mercury-2.5"
+    assert resolve_executor("recon").model_id == "mercury-2"  # config.toml still applies
+    assert resolve_executor("planner").is_claude
+
+
+def test_missing_executors_file_fails_loud(tmp_path, monkeypatch):
+    monkeypatch.setenv("ORCHESTRATOR_EXECUTORS_FILE", str(tmp_path / "nope.toml"))
+    with pytest.raises(ValueError, match="missing file"):
+        resolve_executor("worker")

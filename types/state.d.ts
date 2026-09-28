@@ -138,6 +138,7 @@ export interface State {
   executor_records?: ExecutorRecord[];
   last_recon?: ExecutorRecord | null;
   stagnation_streak?: number;
+  last_worker_text?: string;
   last_progress_key?: string | null;
   transient_retries?: number;
   tamper_paths?: string[];
