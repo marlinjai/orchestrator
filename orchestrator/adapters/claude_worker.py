@@ -14,7 +14,10 @@ Code transcripts:
   ``usage``. Token usage is therefore deduplicated by ``message_id``; summing it
   per message counted each call once per block.
 - The turn-closing ``ResultMessage`` also carries a ``usage`` total. It is NOT
-  added on top of the per-call usage (that counted the turn twice).
+  added on top of the per-call usage (that counted the turn twice). It is used
+  only as a fallback when no assistant message carried usage at all, so a CLI
+  that stopped emitting per-call usage can never make the token caps and the
+  cost estimate silently read zero (over-counting is the safe direction there).
 """
 
 from __future__ import annotations
@@ -27,6 +30,7 @@ from claude_agent_sdk import (
     AssistantMessage,
     ClaudeAgentOptions,
     ClaudeSDKClient,
+    ResultMessage,
     ToolUseBlock,
     UserMessage,
 )
@@ -111,6 +115,7 @@ class ClaudeWorkerSession:
         tracker = _CallTracker(self._clock())
         # Last usage seen per model call (every content block repeats it).
         usage_by_call: dict[str, dict] = {}
+        result_usage: dict | None = None
         async for msg in run_worker_turn(client=self._client, user_message=user_message):
             now = self._clock()
             text = extract_text(msg)
@@ -125,11 +130,16 @@ class ClaudeWorkerSession:
                     usage_by_call[key] = msg.usage
             elif isinstance(msg, UserMessage):
                 tracker.on_user(msg, now)
+            elif isinstance(msg, ResultMessage) and isinstance(msg.usage, dict):
+                result_usage = msg.usage
             if not result.model:
                 m = extract_model(msg)
                 if m:
                     result.model = m
-        for u in usage_by_call.values():
+        usages = list(usage_by_call.values())
+        if not usages and result_usage is not None:
+            usages = [result_usage]
+        for u in usages:
             result.input_tokens += int(u.get("input_tokens", 0) or 0)
             result.output_tokens += int(u.get("output_tokens", 0) or 0)
             result.cache_read_tokens += int(u.get("cache_read_input_tokens", 0) or 0)

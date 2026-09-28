@@ -173,6 +173,20 @@ async def test_claude_adapter_decomposes_calls_and_dedupes_usage():
     assert result.cache_creation_tokens == 3
 
 
+async def test_claude_adapter_falls_back_to_result_usage_when_calls_carry_none():
+    # A CLI that stopped emitting per-call usage must not make the token caps
+    # read zero: the ResultMessage total is then the turn's usage.
+    bare = AssistantMessage(
+        content=[TextBlock(text="hi")], model="claude-opus-4-8", usage=None, message_id="a"
+    )
+    client = _FakeClient([bare, _result(total_in=300, total_out=40)])
+    result = await ClaudeWorkerSession(client, clock=_Clock([0.0, 1.0, 1.1])).run_turn("go")
+    assert result.input_tokens == 300
+    assert result.output_tokens == 40
+    assert len(result.calls) == 1
+    assert result.calls[0].output_tokens is None
+
+
 async def test_claude_adapter_turn_without_messages_has_no_calls():
     client = _FakeClient([])
     result = await ClaudeWorkerSession(client, clock=_Clock([0.0])).run_turn("go")
