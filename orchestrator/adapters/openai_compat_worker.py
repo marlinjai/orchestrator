@@ -35,6 +35,7 @@ import json
 import logging
 import os
 import subprocess
+import tempfile
 import time
 import urllib.error
 import urllib.request
@@ -51,7 +52,7 @@ from orchestrator.executor import (
 )
 from orchestrator.guardrails import bash_allowed
 from orchestrator.ports import OnText, TurnResult
-from orchestrator.proxy_token import PROXY_TOKEN_ENV, TOKEN_FILE_ENV, resolve_proxy_token
+from orchestrator.proxy_token import resolve_proxy_token
 from orchestrator.state import CallLatency
 from orchestrator.tools import (
     UPDATE_STATE_DESCRIPTION,
@@ -59,7 +60,6 @@ from orchestrator.tools import (
     build_update_state_handler,
 )
 from orchestrator.worker import (
-    CROSS_PROVIDER_KEY_DENYLIST,
     WORKER_SYSTEM_PROMPT,
     path_outside_root,
 )
@@ -78,11 +78,13 @@ MAX_TOOL_ROUNDS = 60
 COMMAND_TIMEOUT_S = 600
 MAX_TOOL_OUTPUT_CHARS = 30_000
 
-# Never handed to a command the model runs: provider keys, the Anthropic
-# credentials, and the secrets-proxy token.
-_SCRUBBED_ENV = frozenset(
-    {*CROSS_PROVIDER_KEY_DENYLIST, "ANTHROPIC_API_KEY", PROXY_TOKEN_ENV, TOKEN_FILE_ENV}
-)
+# A malformed or unterminated SSE stream must not grow one buffered line without bound.
+_MAX_SSE_LINE_BYTES = 1 << 20
+
+# A denylist can't keep up with whatever secret the orchestrator's own launch
+# environment happens to carry (DATABASE_URL, a notify webhook, ...); only these
+# non-secret runtime variables are handed to a command the model runs.
+_COMMAND_ENV_ALLOWLIST = frozenset({"PATH", "LANG", "LC_ALL", "TMPDIR", "HOME"})
 
 
 class ProviderError(RuntimeError):
@@ -140,7 +142,14 @@ def forward_chat_stream(
             raise ProviderError(f"provider forward unreachable: {e}", transient=True) from e
         with resp:
             try:
-                for raw in resp:
+                while True:
+                    raw = resp.readline(_MAX_SSE_LINE_BYTES + 1)
+                    if not raw:
+                        return
+                    if len(raw) > _MAX_SSE_LINE_BYTES:
+                        raise ProviderError(
+                            "provider stream line exceeds 1 MiB", transient=False
+                        )
                     line = raw.decode("utf-8", errors="replace").strip()
                     if not line.startswith("data:"):
                         continue
@@ -500,19 +509,24 @@ class OpenAICompatWorkerSession:
         if not allowed:
             return f"refused by the orchestrator's command denylist: {reason}"
         timeout = min(int(args.get("timeout_s") or self._command_timeout_s), self._command_timeout_s)
-        env = {k: v for k, v in os.environ.items() if k not in _SCRUBBED_ENV}
-        try:
-            proc = subprocess.run(
-                ["/bin/bash", "-c", command],
-                cwd=self._root,
-                env=env,
-                capture_output=True,
-                text=True,
-                timeout=timeout,
-            )
-        except subprocess.TimeoutExpired:
-            return f"error: command timed out after {timeout}s"
-        output = (proc.stdout or "") + (proc.stderr or "")
+        env = {k: v for k, v in os.environ.items() if k in _COMMAND_ENV_ALLOWLIST}
+        # Output goes to disk, not a pipe: a model-chosen command (`yes`, `cat` on
+        # a huge file) can otherwise buffer gigabytes in this process before the
+        # timeout fires, since capture_output holds the whole thing in memory.
+        with tempfile.TemporaryFile() as out:
+            try:
+                proc = subprocess.run(
+                    ["/bin/bash", "-c", command],
+                    cwd=self._root,
+                    env=env,
+                    stdout=out,
+                    stderr=subprocess.STDOUT,
+                    timeout=timeout,
+                )
+            except subprocess.TimeoutExpired:
+                return f"error: command timed out after {timeout}s"
+            out.seek(0)
+            output = out.read(MAX_TOOL_OUTPUT_CHARS * 4).decode("utf-8", errors="replace")
         return f"exit code {proc.returncode}\n{_truncate(output)}"
 
 
