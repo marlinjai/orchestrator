@@ -170,6 +170,14 @@ def forward_chat_stream(
 
         timer = threading.Timer(timeout_s, _kill_on_timeout)
         timer.start()
+
+        def _rearm() -> None:
+            # The limit is on silence, so every line that arrives restarts it.
+            nonlocal timer
+            timer.cancel()
+            timer = threading.Timer(timeout_s, _kill_on_timeout)
+            timer.start()
+
         stderr_chunks: list[bytes] = []
         stderr_thread = threading.Thread(
             target=lambda: stderr_chunks.append(proc.stderr.read()), daemon=True
@@ -185,6 +193,7 @@ def forward_chat_stream(
                 raw = proc.stdout.readline(_MAX_SSE_LINE_BYTES + 1)
                 if not raw:
                     break
+                _rearm()
                 if len(raw) > _MAX_SSE_LINE_BYTES:
                     raise ProviderError("provider stream line exceeds 1 MiB", transient=False)
                 line = raw.decode("utf-8", errors="replace").strip()

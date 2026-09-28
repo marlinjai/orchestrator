@@ -33,21 +33,29 @@ def _record_commit(state, sha: str, message: str) -> str:
             f"sha {sha!r} is not a commit SHA: report a commit only AFTER `git commit`, "
             "passing the full SHA printed by `git rev-parse HEAD`"
         )
-    if state.baseline_ref and _same_commit(sha, state.baseline_ref):
+    matches = [e for e in state.commits if _same_commit(e.sha, sha)]
+    on_baseline = bool(state.baseline_ref) and _same_commit(sha, state.baseline_ref)
+    candidates = [e.sha for e in matches] + ([state.baseline_ref] if on_baseline else [])
+    if any(not _same_commit(candidates[0], other) for other in candidates[1:]):
+        raise ValueError(
+            f"sha {sha!r} is ambiguous: it matches more than one known commit; "
+            "report the full SHA printed by `git rev-parse HEAD`"
+        )
+    if on_baseline:
         raise ValueError(
             "that SHA is the run's starting commit, not your work: report the commit "
             "you created (`git rev-parse HEAD` right after your `git commit`)"
         )
-    for entry in state.commits:
-        if _same_commit(entry.sha, sha):
-            if entry.decided_by == "system":
-                entry.decided_by = "proxy"
-                if len(sha) > len(entry.sha):
-                    entry.sha = sha
-                if message and not entry.message:
-                    entry.message = message
-                return f"ok: commit {sha[:12]} was already in git; now marked as self-reported"
-            return f"ok: commit {sha[:12]} was already recorded"
+    if matches:
+        entry = matches[0]
+        if entry.decided_by == "system":
+            entry.decided_by = "proxy"
+            if len(sha) > len(entry.sha):
+                entry.sha = sha
+            if message and not entry.message:
+                entry.message = message
+            return f"ok: commit {sha[:12]} was already in git; now marked as self-reported"
+        return f"ok: commit {sha[:12]} was already recorded"
     state.commits.append(CommitEntry(sha=sha, message=message, decided_by="proxy"))
     return "ok: applied commit"
 

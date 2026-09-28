@@ -279,6 +279,22 @@ def _attempt_stats(records: list[dict]) -> dict:
     }
 
 
+def _json_safe(v):
+    """Non-finite floats (the internal 'infinitely slow' marker) become null: a
+    bare Infinity is not valid JSON."""
+    if isinstance(v, float) and not math.isfinite(v):
+        return None
+    if isinstance(v, dict):
+        return {k: _json_safe(x) for k, x in v.items()}
+    if isinstance(v, (list, tuple)):
+        return [_json_safe(x) for x in v]
+    return v
+
+
+def _fmt_s(v: float | None) -> str:
+    return "none" if v is None else f"{v:.1f}s"
+
+
 def _fmt_ms(v: float) -> str:
     return "none" if math.isinf(v) else f"{v / 1000:.1f}s"
 
@@ -298,7 +314,7 @@ def cmd_report(args) -> int:
             f"\n{c}: {s[c]['passed']}/{s[c]['goals']} goals held-out green "
             f"({s[c]['pass_rate_pct']:.0f}%), median time to verified {_fmt_ms(s[c]['median_ttv_ms'])}; "
             f"per attempt: {a['green']}/{a['attempts']} green, {a['one_iteration']}/{a['attempts']} in one "
-            f"iteration, median {a['median_s']:.1f}s, mean {a['mean_s']:.1f}s"
+            f"iteration, median {_fmt_s(a['median_s'])}, mean {_fmt_s(a['mean_s'])}"
         )
     if s["verdict_possible"]:
         lines.append(
@@ -309,7 +325,7 @@ def cmd_report(args) -> int:
         lines.append(f"\nNo verdict: only the {', '.join(ran)} cohort ran (a remeasure, not a race).")
     text = "\n".join(lines)
     (out / "report.md").write_text(text + "\n")
-    (out / "score.json").write_text(json.dumps(s, indent=2, default=str))
+    (out / "score.json").write_text(json.dumps(_json_safe(s), indent=2, default=str))
     print(text)
     return 0
 

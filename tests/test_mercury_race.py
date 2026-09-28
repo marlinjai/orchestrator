@@ -110,3 +110,14 @@ def test_attempt_stats_count_every_attempt():
     recs[0]["attempt_states"] = [{"iterations": 1}, {"iterations": 4}]
     a = race.score(recs)["attempts"]["mercury"]
     assert a == {"attempts": 2, "green": 1, "one_iteration": 1, "median_s": 20.0, "mean_s": 20.0}
+
+
+def test_score_json_has_no_infinity_and_report_handles_missing_timings():
+    import json
+
+    s = race.score([_rec("g00", "mercury", ("pass", 5000))])
+    text = json.dumps(race._json_safe(s), allow_nan=False)
+    assert "Infinity" not in text
+    assert json.loads(text)["claude"]["median_ttv_ms"] is None
+    assert race._fmt_s(None) == "none"
+    assert race._fmt_s(2.0) == "2.0s"

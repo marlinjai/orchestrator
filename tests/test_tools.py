@@ -177,3 +177,23 @@ async def test_late_file_report_upgrades_and_does_not_duplicate(tmp_path):
     assert "already recorded" in await _call(p, kind="file_touched", path="a.py")
     (entry,) = load_state(p).files_touched
     assert entry.decided_by == "proxy"
+
+
+def test_record_commit_rejects_ambiguous_short_sha():
+    from types import SimpleNamespace
+
+    from orchestrator.state import CommitEntry
+    from orchestrator.tools import _record_commit
+
+    state = SimpleNamespace(
+        baseline_ref="",
+        commits=[
+            CommitEntry(sha="abcdef1" + "0" * 33, message="", decided_by="system"),
+            CommitEntry(sha="abcdef1" + "1" * 33, message="", decided_by="system"),
+        ],
+    )
+    import pytest
+
+    with pytest.raises(ValueError, match="ambiguous"):
+        _record_commit(state, "abcdef1", "")
+    assert all(c.decided_by == "system" for c in state.commits)
