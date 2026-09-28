@@ -23,6 +23,11 @@ Living tracker for orchestrator work. Read top to bottom: shipped at the top, in
 - **Typed contract**: `scripts/gen_state_dts.py` now ALSO emits `types/events.d.ts` (the `EventType` alias + `Event` interface, `data` dict as a `{ [key: string]: unknown }` index signature). Same self-contained pure-Python emitter, no node toolchain, no new dependency. A drift test (`tests/test_state_dts.py`) byte-diffs the committed contract and reddens on any `Event` change (verified by prove-then-revert). 433 tests green; ruff clean.
 - **`types/state.d.ts` codegen** (`scripts/gen_state_dts.py`): a self-contained pure-Python emitter walks `State.model_json_schema()` and emits a typed `.d.ts` (one `export interface` per model, named `export type` unions for the four `Literal` aliases, `?` for optional/nullable fields, ISO datetime as `string`, arrays as `T[]`). No node toolchain, no new dependency. A drift test (`tests/test_state_dts.py`) regenerates into memory and byte-diffs the committed file, so `uv run pytest` fails the moment the model changes without a regenerate (verified: a temp field on `State` reddens the test). The future Kanban board reads state.json against this contract and can never silently drift from the source of truth.
 
+### Hexagonal executor ports E4b: the Claude vs Mercury race, Mercury wins (2026-09-28)
+- **`bench/mercury-race` + `scripts/mercury_race.py`**: 10 precisely specified goals on a seed project, hidden tests proven fair against reference solutions, installed into a verifier vault outside every repo; each goal run as a Claude and a Mercury cohort (best-of-2), scored against the pre-registered criterion (unit-tested).
+- **Verdict**: both cohorts 10/10 held-out green; median time to verified Mercury 15.0s, Claude 28.6s; Mercury about 29x cheaper; Mercury has a multi-iteration tail (2 of 20 attempts failed hidden tests). Plan completed.
+- **Audit trail**: the Mercury Worker now writes every tool call to `worker-tools.jsonl` next to `state.json`.
+
 ### Hexagonal executor ports E4a: the Mercury worker adapter behind the gate (2026-09-28)
 - **`adapters/openai_compat_worker.py`**: an OpenAI-shaped tool loop over the secrets-proxy provider forward (streaming), with confined `read_file` / `write_file` / `edit_file` / `list_dir` / `run_command` / `update_state` tools. One shared path check (`worker.path_outside_root`) for both adapters; `run_command` under the denylist with a scrubbed env.
 - **The E4 gate**: an `inception` worker is refused at startup unless the run has a held-out verifier (registry or `--held-out`). A provider failure fails the run; it never falls back to Claude.
@@ -94,9 +99,10 @@ Living tracker for orchestrator work. Read top to bottom: shipped at the top, in
 - Plan: `docs/plans/2026-05-27-marlin-proxy.md` (in-progress).
 - [ ] Continue the Marlin Proxy rollout past Phase 0 (off -> shadow -> live on safe categories -> self-improvement); see `docs/plans/2026-05-27-marlin-proxy.md`. (2026-09-10)
 
-### Hexagonal executor ports (E1 to E4a landed, E4b open)
-- The seam that makes the model or provider behind a Worker exchangeable (ports-and-adapters). E4b is the Claude vs Mercury race that decides whether Mercury may write code by default. The Agentic OS milestone M9 (Mercury sprint worker) is blocked on E4.
-- [ ] E4b: run the Claude vs Mercury race on the `bench/mercury-race` benchmark (setup decided 2026-09-28: 10 goals, vault-held hidden tests, best-of-2, 10-point band), record the verdict in the plan, then unblock or close M9 in agentic-os-platform; see `docs/plans/2026-07-24-hexagonal-executor-ports.md`. (2026-09-28)
+### Hexagonal executor ports: Mercury worker follow-ups (plan completed 2026-09-28)
+- E1 to E4 shipped; the E4b race verdict is "Mercury wins" on the benchmark (both 10/10 held-out green, median 15.0s against Claude's 28.6s, about 29x cheaper), with a tail of multi-iteration attempts. Details: `docs/plans/2026-07-24-hexagonal-executor-ports.md`, Verdict.
+- [ ] Mercury Worker round two on real repositories before it does real work: pick the repos and their hidden test sets (Marlin), move the hidden tests to a separate OS user so the Worker cannot read them, rerun `scripts/mercury_race.py`-style cohorts, and gate the result on the same 10-point band. (2026-09-28)
+- [ ] Cut the Mercury tail: a Mercury-specific prompt nudge so it calls `update_state` instead of narrating (the cause of its multi-iteration loops in the race), then remeasure single-attempt time. (2026-09-28)
 
 ## Queued (v2 themes, prioritized)
 

@@ -1,9 +1,9 @@
 ---
 type: plan
 title: Hexagonal executor ports (ports-and-adapters seam for exchangeable models)
-status: in-progress
+status: completed
 date: 2026-07-24
-revised: 2026-09-28 (revived after PR #14 closed unmerged; E1+E2 rebased onto main)
+revised: 2026-09-28 (revived after PR #14 closed unmerged; E1 to E4 shipped the same day, E4b verdict: Mercury wins)
 owner: marlin
 supersedes: none
 related:
@@ -135,7 +135,7 @@ The live recon smoke found the secrets proxy answering `/raw` with HTTP 501. `/r
 
 1. **DONE 2026-09-28. E1+E2** landed as #28 (this plan + the seam).
 2. **DONE 2026-09-28. E3: latency telemetry** (own pull request). Per-call `CallLatency` on a generalized `ExecutorRecord`, plus enforce-or-delete `cost_ceiling_usd`. No experiment is interpretable without it.
-3. **E4a DONE 2026-09-28 (the adapter and the gate), E4b OPEN (the race).** **E4: the OpenAI-compatible worker adapter** (own pull request). `adapters/openai_compat_worker.py`, the non-Claude worker gate (refuse without a held-out verifier), and the experiment rig: Claude vs Mercury via `--best-of` with a held-out verifier, decided on `time_to_verified_ms` with the TTFT decomposition from E3. Running the live cohort needs step 4. Exit criterion in Verification below.
+3. **DONE 2026-09-28. E4a (the adapter and the gate) and E4b (the race, Mercury wins; see the verdict).** **E4: the OpenAI-compatible worker adapter** (own pull request). `adapters/openai_compat_worker.py`, the non-Claude worker gate (refuse without a held-out verifier), and the experiment rig: Claude vs Mercury via `--best-of` with a held-out verifier, decided on `time_to_verified_ms` with the TTFT decomposition from E3. Running the live cohort needs step 4. Exit criterion in Verification below.
 4. **DONE 2026-09-28. Inception key + transport**: see the transport update above; no step for Marlin was needed. Live E1 smoke PASSED 2026-09-28 after secrets-proxy#21 deployed: the loop's `run_recon` with `[executors.recon] model_id = "mercury-2", provider = "inception", reasoning_effort = "low"` gave `state.last_recon.executor == "mercury"`, `ok`, one call, 2312 ms, a 695-character answer; with the proxy unreachable the transport raised `MercuryUnavailable`, the signal `run_recon` falls back to Claude on. The first Mercury completion this path has ever returned.
 5. **Platform side, after E4**: M9's sprint worker in `agentic-os-platform`, per its reconciliation plan.
 6. **MacBook**: after merge, pull the orchestrator checkout there and add `[executors.*]` entries to its own `~/.config/orchestrator/config.toml` to enable Mercury recon from the Mac (the secrets proxy is reachable over Tailscale).
@@ -150,7 +150,7 @@ Deliberately not built yet: per-step `reasoning_effort` tuning (apply the profil
 
 **Live E4a smoke, passed 2026-09-28**: `orchestrator start` with `[executors.worker] model_id = "mercury-2", provider = "inception"` and `--held-out` on a throwaway repo (goal: add `multiply` plus a test and commit). One iteration; the Claude Decision Proxy stopped; in-tree verify PASS; held-out PASS; `completed`. Worker record: 16 model calls, 13,332 ms worker time, of which TTFT 12,679 ms (Inception server time 8,017 ms, so roughly 290 ms of network plus proxy overhead per call), generation 50 ms, tools 454 ms; 23,808 input and 1,301 output tokens, about $0.01. The shape confirms the TTFT finding above: per-call latency times call count is the whole cost, and proxy transit is a measurable third of it.
 
-**E4b (in progress)**: the race itself. Setup decided by Marlin on 2026-09-28 (decision page `~/software-dev/decision-pages/2026-09-28-mercury-race.html`, all four recommendations taken):
+**E4b (done, verdict below)**: the race itself. Setup decided by Marlin on 2026-09-28 (decision page `~/software-dev/decision-pages/2026-09-28-mercury-race.html`, all four recommendations taken):
 
 1. **Goals**: a benchmark, not real backlog tasks: `bench/mercury-race/`, the `textkit` seed project and 10 self-contained goals (features, bug fixes, a new module, a CLI, a data structure), each specified precisely enough that hidden tests judge the spec. Every hidden suite is proven fair by `scripts/mercury_race.py validate` (fails on the seed, passes on a reference solution). If Mercury wins here, a second round on real tasks precedes M9.
 2. **Hidden tests**: installed into `~/.orchestrator/verifier-vault/mercury-race/`, outside every repo. Accepted weakness: a Worker's shell runs as the same OS user and could read them; the logged commands would show it. A separate OS user is required before any real-repo round.
@@ -158,6 +158,36 @@ Deliberately not built yet: per-step `reasoning_effort` tuning (apply the profil
 4. **Spend**: 2 attempts per goal per cohort (`--best-of 2`), about 40 runs.
 
 Scoring (`scripts/mercury_race.py`, unit-tested): per goal and cohort, the fastest held-out-green attempt's `time_to_verified_ms`; a goal with no green attempt counts as infinitely slow; the cohort median is over all goals. Mercury wins only with N >= 10, a lower median, and the pass rate inside the band.
+
+## Verdict (2026-09-28): Mercury wins the E4b race
+
+Run `~/.orchestrator/mercury-race/2026-09-28` (`scripts/mercury_race.py run`, 10 goals, best-of-2 per cohort, 3 runs in parallel), scored against the pre-registered exit criterion:
+
+| Goal | Claude | Mercury |
+|---|---|---|
+| 01-word-count | pass 23.6s | pass 33.7s |
+| 02-slugify-dashes | pass 24.8s | pass 13.9s |
+| 03-truncate-width | pass 27.7s | pass 14.9s |
+| 04-roman | pass 30.2s | pass 18.9s |
+| 05-csv-quotes | pass 31.5s | pass 41.6s |
+| 06-cli-count | pass 31.3s | pass 13.4s |
+| 07-case-convert | pass 29.0s | pass 14.9s |
+| 08-duration-units | pass 28.3s | pass 15.1s |
+| 09-lru-cache | pass 29.3s | pass 14.6s |
+| 10-wrap | pass 27.0s | pass 19.7s |
+
+Both cohorts: 10/10 goals held-out green. Median time to a verified result: **Claude 28.6s, Mercury 15.0s**. Exit criterion (N >= 10, Mercury faster, pass rate within 10 points): **met, Mercury wins.**
+
+What the aggregate hides, from the 40 individual attempts (so the verdict is read correctly):
+
+- Per attempt, Mercury's median is 18.5s against Claude's 30.4s, and its Worker-only median 13.5s against 25.2s: typically about 1.6x faster. But the MEANS are equal (Mercury 33.8s, Claude 32.3s): Mercury has a tail. 17 of 20 Mercury attempts finished in one iteration (Claude 20 of 20); the rest drifted into multi-iteration loops, and 2 of 20 Mercury attempts failed the hidden tests (Claude 0 of 20). Best-of-2 absorbs that tail, which is why the cohort result is clean. Mercury as a single-attempt Worker would be faster on average only if the tail is fixed.
+- The tail has one visible cause (seen live in the dry run): Mercury narrates progress instead of calling `update_state`, the Claude Decision Proxy keeps asking it to reconcile, and the stagnation guard eventually stops it; once it "reverted unrelated seed files" in response. A Mercury-specific prompt nudge toward `update_state` is the obvious first fix.
+- Cost over all 20 attempts: Mercury about $0.31, Claude about $8.89 (notional on the subscription, real on metered credit): about 29x cheaper.
+- Mercury's model time is almost all time-to-first-token (345s TTFT over 310 calls, 260s of it Inception server time, generation under 1s total), so its per-call latency times call count is its whole cost, as predicted.
+- Integrity: no attempt's commits mention the vault or the reference solutions, and no solution file is byte-identical to a reference. Caveat for this run: the Mercury adapter did not yet record its tool calls, so a read-only peek could not be ruled out from logs; it now writes `worker-tools.jsonl` next to `state.json` (every tool call, commands verbatim, file contents by size).
+- No context handover fired in any of the 40 runs, so the handover-trigger question above stays open and unmeasured at this goal size.
+
+Consequences: the orchestrator's non-Claude Worker path is validated on a benchmark, behind the held-out gate, and stays opt-in (the default Worker is still Claude; an operator enables Mercury per config home). M9 in the Agentic OS Platform may proceed. As the decision page set out, a second round on real repositories (hidden tests owned by a separate OS user) comes before Mercury does real work; that and the prompt nudge are the dated follow-ups on the ROADMAP.
 
 ## Verification
 

@@ -335,3 +335,16 @@ def test_unreachable_forward_is_transient():
     with pytest.raises(ProviderError) as info:
         list(stream({"model": "mercury-2"}))
     assert info.value.transient is True
+
+
+async def test_every_tool_call_is_audited_next_to_state(tmp_path):
+    session = _session(tmp_path, _ScriptedChat())
+    await _tool(session, "write_file", {"path": "a.txt", "content": "secret-ish body"})
+    await _tool(session, "run_command", {"command": "cat ../state.json"})
+    await _tool(session, "read_file", {"path": "/etc/hosts"})
+    lines = [json.loads(line) for line in session.audit_path.read_text().splitlines()]
+    assert session.audit_path == tmp_path / "worker-tools.jsonl"
+    assert [e["tool"] for e in lines] == ["write_file", "run_command", "read_file"]
+    assert lines[0]["args"]["content"] == "<15 characters>"
+    assert lines[1]["args"]["command"] == "cat ../state.json"
+    assert lines[2]["result"].startswith("refused")

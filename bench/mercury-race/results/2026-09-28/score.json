@@ -1,0 +1,118 @@
+{
+  "claude": {
+    "goals": 10,
+    "passed": 10,
+    "pass_rate_pct": 100.0,
+    "median_ttv_ms": 28630.5
+  },
+  "mercury": {
+    "goals": 10,
+    "passed": 10,
+    "pass_rate_pct": 100.0,
+    "median_ttv_ms": 15002.5
+  },
+  "n_ok": true,
+  "mercury_wins": true,
+  "per_goal": {
+    "01-word-count": {
+      "claude": {
+        "passed": true,
+        "ttv_ms": 23564.0
+      },
+      "mercury": {
+        "passed": true,
+        "ttv_ms": 33666.0
+      }
+    },
+    "02-slugify-dashes": {
+      "claude": {
+        "passed": true,
+        "ttv_ms": 24781.0
+      },
+      "mercury": {
+        "passed": true,
+        "ttv_ms": 13902.0
+      }
+    },
+    "03-truncate-width": {
+      "claude": {
+        "passed": true,
+        "ttv_ms": 27699.0
+      },
+      "mercury": {
+        "passed": true,
+        "ttv_ms": 14893.0
+      }
+    },
+    "04-roman": {
+      "claude": {
+        "passed": true,
+        "ttv_ms": 30223.0
+      },
+      "mercury": {
+        "passed": true,
+        "ttv_ms": 18894.0
+      }
+    },
+    "05-csv-quotes": {
+      "claude": {
+        "passed": true,
+        "ttv_ms": 31504.0
+      },
+      "mercury": {
+        "passed": true,
+        "ttv_ms": 41585.0
+      }
+    },
+    "06-cli-count": {
+      "claude": {
+        "passed": true,
+        "ttv_ms": 31317.0
+      },
+      "mercury": {
+        "passed": true,
+        "ttv_ms": 13372.0
+      }
+    },
+    "07-case-convert": {
+      "claude": {
+        "passed": true,
+        "ttv_ms": 28972.0
+      },
+      "mercury": {
+        "passed": true,
+        "ttv_ms": 14928.0
+      }
+    },
+    "08-duration-units": {
+      "claude": {
+        "passed": true,
+        "ttv_ms": 28289.0
+      },
+      "mercury": {
+        "passed": true,
+        "ttv_ms": 15077.0
+      }
+    },
+    "09-lru-cache": {
+      "claude": {
+        "passed": true,
+        "ttv_ms": 29312.0
+      },
+      "mercury": {
+        "passed": true,
+        "ttv_ms": 14582.0
+      }
+    },
+    "10-wrap": {
+      "claude": {
+        "passed": true,
+        "ttv_ms": 27042.0
+      },
+      "mercury": {
+        "passed": true,
+        "ttv_ms": 19693.0
+      }
+    }
+  }
+}

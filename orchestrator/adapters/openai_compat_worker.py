@@ -41,6 +41,7 @@ import urllib.error
 import urllib.request
 from contextlib import asynccontextmanager
 from dataclasses import dataclass, field
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, AsyncIterator, Callable, Iterator
 
@@ -77,6 +78,8 @@ TRANSIENT_HTTP_STATUSES = frozenset({408, 409, 425, 429, 500, 502, 503, 504, 529
 MAX_TOOL_ROUNDS = 60
 COMMAND_TIMEOUT_S = 600
 MAX_TOOL_OUTPUT_CHARS = 30_000
+TOOL_AUDIT_FILE = "worker-tools.jsonl"
+AUDIT_RESULT_CHARS = 500
 
 # A malformed or unterminated SSE stream must not grow one buffered line without bound.
 _MAX_SSE_LINE_BYTES = 1 << 20
@@ -288,6 +291,10 @@ class OpenAICompatWorkerSession:
         self._max_tool_rounds = max_tool_rounds
         self._command_timeout_s = command_timeout_s
         self._update_state = build_update_state_handler(state_path)
+        # Audit trail of every tool call, next to state.json. The Claude Worker
+        # leaves a full transcript; this is the Mercury Worker's equivalent, so
+        # a command that reached outside its assignment is visible afterwards.
+        self.audit_path = state_path.parent / TOOL_AUDIT_FILE
         self.messages: list[dict] = [{"role": "system", "content": build_system_prompt()}]
 
     async def run_turn(self, user_message: str, *, on_text: OnText | None = None) -> TurnResult:
@@ -419,6 +426,32 @@ class OpenAICompatWorkerSession:
     # ---- tools ----
 
     async def _run_tool(self, name: str, raw_args: str) -> str:
+        output = await self._dispatch_tool(name, raw_args)
+        self._audit(name, raw_args, output)
+        return output
+
+    def _audit(self, name: str, raw_args: str, output: str) -> None:
+        """Append one JSON line per tool call. File contents are recorded by
+        size only (the diff is in git); commands, paths and results are kept."""
+        try:
+            args = json.loads(raw_args) if raw_args.strip() else {}
+        except json.JSONDecodeError:
+            args = {"unparsed": raw_args[:500]}
+        if isinstance(args, dict) and isinstance(args.get("content"), str):
+            args = {**args, "content": f"<{len(args['content'])} characters>"}
+        entry = {
+            "ts": datetime.now(timezone.utc).isoformat(),
+            "tool": name,
+            "args": args,
+            "result": output[:AUDIT_RESULT_CHARS],
+        }
+        try:
+            with self.audit_path.open("a", encoding="utf-8") as f:
+                f.write(json.dumps(entry, ensure_ascii=False) + "\n")
+        except OSError as e:
+            logger.warning("could not write the worker tool audit %s: %s", self.audit_path, e)
+
+    async def _dispatch_tool(self, name: str, raw_args: str) -> str:
         try:
             args = json.loads(raw_args) if raw_args.strip() else {}
         except json.JSONDecodeError as e:
