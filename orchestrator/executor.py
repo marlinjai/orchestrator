@@ -30,11 +30,15 @@ document): a Mercury completion is CONTENT, not a secret, so the secrets-proxy
 SUMMARIZES it through a local Ollama model -- is the WRONG transport for getting
 a usable completion back (a long token / UUID in the answer would be
 ``[REDACTED]``, and the Ollama summary discards the verbatim text entirely). So
-the Mercury path uses a dedicated RAW-FORWARD transport: the orchestrator POSTs
-the chat request to a forward endpoint that injects the Inception key
-server-side (``INCEPTION_API_KEY`` from Infisical) and streams back the RAW
-completion. The key never enters the orchestrator process env or the transcript;
-only the completion text crosses the wire. The transport is a small injectable
+the Mercury path uses the secrets proxy's PROVIDER FORWARD
+(``POST /forward/inception/chat/completions``): the orchestrator sends only the
+chat request body; the proxy fetches ``INCEPTION_API_KEY`` from Infisical,
+calls Inception itself and returns the completion verbatim. Which upstream and
+which key location are fixed in the proxy's allowlist, never named by this
+process. The key never enters the orchestrator process env or the transcript;
+only the completion text crosses the wire. (An earlier design POSTed a shell
+command to a ``/raw`` endpoint; the proxy refuses that by design, because an
+unredacted shell endpoint would hand out every injected secret.) The transport is a small injectable
 seam (``MercuryTransport``) so tests run with a fake and the production default
 keeps the key server-side. This composes with ``worker.apply_env_contract``'s
 foreign-key scrub rather than fighting it: the orchestrator never holds the key,
@@ -54,6 +58,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Callable, Literal, get_args
 
+from orchestrator.proxy_token import resolve_proxy_token
 from orchestrator.worker import AuthMode
 
 logger = logging.getLogger(__name__)
@@ -81,28 +86,19 @@ KNOWN_ROLES: frozenset[str] = frozenset({"worker", "recon", "planner"})
 
 # Mercury (Inception) model id used for the read-only recon path. Only relevant
 # when an operator config explicitly points the `recon` role at it.
-MERCURY_MODEL_ID = "mercury"
+MERCURY_MODEL_ID = "mercury-2"
 
-# The Infisical coordinates the secrets proxy uses to inject the Inception key
-# server-side. Operator-owned and env-overridable; the orchestrator never reads
-# the value, only names the location so the proxy can resolve it. The project id
-# defaults to the providers location used across the fleet; scaffold the actual
-# key per the report (see INCEPTION_KEY_NAME).
-INCEPTION_KEY_NAME = "INCEPTION_API_KEY"
-INCEPTION_PROJECT_ID = os.environ.get(
-    "ORCHESTRATOR_INCEPTION_PROJECT_ID", "7a3a1f4e-6e0e-4b6a-9d3a-0b9b9c8d7e6f"
-)
-INCEPTION_SECRET_PATH = os.environ.get("ORCHESTRATOR_INCEPTION_PATH", "/providers")
-INCEPTION_SECRET_ENV = os.environ.get("ORCHESTRATOR_INCEPTION_ENV", "production")
-INCEPTION_ENDPOINT = os.environ.get(
-    "ORCHESTRATOR_INCEPTION_ENDPOINT", "https://api.inceptionlabs.ai/v1/chat/completions"
-)
+# The secrets-proxy provider-forward route for Inception chat completions. The
+# proxy owns the upstream URL and the key's Infisical location; this process
+# only names the route.
+INCEPTION_FORWARD_ROUTE = "/forward/inception/chat/completions"
 
 # The secrets-proxy coordinates (same Tailscale-only host the Worker MCP +
-# notify already use). The Mercury raw-forward goes through this proxy so the
-# Inception key is injected server-side and never touches this process.
+# notify already use). The Mercury provider forward goes through this proxy so
+# the Inception key is used server-side and never touches this process. The
+# proxy token itself comes from ``proxy_token.resolve_proxy_token`` (0600 file
+# first), never from a config literal.
 PROXY_URL_ENV = "SECRETS_PROXY_URL"
-PROXY_TOKEN_ENV = "SECRETS_PROXY_TOKEN"
 DEFAULT_PROXY_URL = "http://100.124.97.31:8765"
 
 
@@ -295,76 +291,47 @@ class MercuryUnavailable(RuntimeError):
 
 
 # A transport takes the proxy URL, token, and the JSON request body for the
-# Inception chat-completions call and returns the RAW completion text. The
-# production transport (``_proxy_raw_forward``) injects the Inception key
-# server-side on ai-host; tests inject a fake. Keeping this injectable is what
+# Inception chat-completions call and returns the completion JSON verbatim. The
+# production transport (``_proxy_provider_forward``) has the proxy use the
+# Inception key server-side; tests inject a fake. Keeping this injectable is what
 # lets the orchestrator NEVER hold the key while still getting a usable answer.
 MercuryTransport = Callable[[str, str, dict], str]
 
 
-def _build_inception_curl(request_body: dict) -> str:
-    """Build the curl command the proxy runs server-side. The Inception key is
-    referenced as ``$INCEPTION_API_KEY`` and expands ONLY from the proxy-injected
-    env (Infisical), never from this process. The request body is passed via
-    stdin (a heredoc) so the JSON -- which may contain the recon question -- can
-    never break out into the shell command. stdout is the raw Inception JSON
-    response; the proxy returns it verbatim (see _proxy_raw_forward)."""
-    body = json.dumps(request_body)
-    # The body goes on stdin via a quoted heredoc: no shell expansion inside it,
-    # and the only env ref ($INCEPTION_API_KEY) is in the curl args, expanded by
-    # the proxy-injected env server-side.
-    return (
-        "curl -s -X POST "
-        f"{INCEPTION_ENDPOINT} "
-        '-H "Authorization: Bearer $INCEPTION_API_KEY" '
-        '-H "Content-Type: application/json" '
-        "--data-binary @- <<'ORCH_MERCURY_EOF'\n"
-        f"{body}\n"
-        "ORCH_MERCURY_EOF"
-    )
+def _proxy_provider_forward(proxy_url: str, token: str, request_body: dict) -> str:
+    """Production transport: POST the chat request body to the proxy's
+    provider forward and return the completion JSON verbatim.
 
-
-def _proxy_raw_forward(proxy_url: str, token: str, request_body: dict) -> str:
-    """Production transport: POST the Inception chat request through the secrets
-    proxy with the key injected server-side, returning the RAW completion JSON.
-
-    Critically this targets the proxy's RAW-FORWARD endpoint (``/raw``), NOT
-    ``/execute``: ``/execute`` redacts and Ollama-summarizes its output, which
-    would corrupt a completion (a long token in the answer becomes ``[REDACTED]``
-    and the verbatim text is lost). The raw-forward path injects the key the same
-    way (``infisical run``) but returns stdout verbatim, so the orchestrator gets
-    a usable completion while the key stays server-side.
+    The proxy resolves the Inception key from its own allowlisted location and
+    places it only in its outbound request, so nothing but the request body and
+    the completion crosses this boundary. An HTTP error (the proxy's generic 502
+    when it cannot resolve the key, or Inception's own 4xx/5xx passed through)
+    raises ``MercuryUnavailable`` with the status and a short body excerpt, so
+    the caller fails loud and falls back to Claude.
     """
-    body = json.dumps(
-        {
-            "command": _build_inception_curl(request_body),
-            "workingDir": "/tmp",
-            "env": INCEPTION_SECRET_ENV,
-            "projectId": INCEPTION_PROJECT_ID,
-            "path": INCEPTION_SECRET_PATH,
-        }
-    ).encode("utf-8")
     req = urllib.request.Request(
-        f"{proxy_url}/raw",
-        data=body,
-        headers={"Content-Type": "application/json", "X-Proxy-Token": token},
+        f"{proxy_url}{INCEPTION_FORWARD_ROUTE}",
+        data=json.dumps(request_body).encode("utf-8"),
+        headers={
+            "Content-Type": "application/json",
+            "Accept": "application/json",
+            "X-Proxy-Token": token,
+        },
         method="POST",
     )
     try:
-        with urllib.request.urlopen(req, timeout=60) as resp:
-            payload = resp.read().decode("utf-8")
+        with urllib.request.urlopen(req, timeout=120) as resp:
+            return resp.read().decode("utf-8")
+    except urllib.error.HTTPError as e:
+        try:
+            detail = e.read().decode("utf-8", errors="replace")[:300]
+        except OSError:
+            detail = ""
+        raise MercuryUnavailable(
+            f"secrets-proxy provider forward answered HTTP {e.code}: {detail}"
+        ) from e
     except (urllib.error.URLError, OSError, TimeoutError) as e:
-        raise MercuryUnavailable(f"secrets-proxy raw-forward failed: {e}") from e
-
-    # The proxy's raw-forward returns the command's stdout (the Inception JSON)
-    # under "stdout"; tolerate a bare-string body too for a minimal forward shim.
-    try:
-        data = json.loads(payload)
-    except json.JSONDecodeError:
-        return payload
-    if isinstance(data, dict) and "stdout" in data:
-        return str(data["stdout"])
-    return payload
+        raise MercuryUnavailable(f"secrets-proxy provider forward failed: {e}") from e
 
 
 def _parse_inception_completion(raw: str) -> str:
@@ -402,24 +369,24 @@ def run_mercury_recon(
     Read-only by construction: this builds one chat-completions request and
     returns the answer text. It runs NO tools, writes NO files, touches NO repo.
 
-    The Inception key is injected SERVER-SIDE by the transport (default
-    ``_proxy_raw_forward``); the orchestrator never holds it. If the proxy token
+    The Inception key is used SERVER-SIDE by the transport (default
+    ``_proxy_provider_forward``); the orchestrator never holds it. If the proxy token
     is absent or the proxy/Inception call fails, this raises ``MercuryUnavailable``
     so the caller falls back to Claude recon. ``elapsed_ms`` + ``executor`` are
     recorded for the ``time_to_verified_result`` comparison (logged, never gated).
     """
-    token = proxy_token if proxy_token is not None else os.environ.get(PROXY_TOKEN_ENV)
+    token = proxy_token if proxy_token is not None else resolve_proxy_token()
     if not token:
         raise MercuryUnavailable(
-            "secrets-proxy token absent (SECRETS_PROXY_TOKEN); cannot inject the "
-            "Inception key server-side"
+            "secrets-proxy token absent (~/.config/secrets-proxy/token or "
+            "SECRETS_PROXY_TOKEN); cannot reach the provider forward"
         )
     url = (
         proxy_url
         if proxy_url is not None
         else os.environ.get(PROXY_URL_ENV, DEFAULT_PROXY_URL)
     ).rstrip("/")
-    forward = transport or _proxy_raw_forward
+    forward = transport or _proxy_provider_forward
 
     request_body = {
         "model": profile.model_id,

@@ -60,7 +60,7 @@ def test_resolve_executor_config_points_recon_at_mercury(tmp_path):
     p.write_text(
         """
 [executors.recon]
-model_id = "mercury"
+model_id = "mercury-2"
 provider = "inception"
 auth_mode = "api_key"
 """
@@ -121,7 +121,7 @@ def test_judges_stay_claude_even_with_a_mercury_recon_config(tmp_path):
     """A config that points recon at Mercury must NOT move the Worker or either
     Proxy off Claude. Their integrity is the whole trust model."""
     p = tmp_path / "config.toml"
-    p.write_text('[executors.recon]\nmodel_id = "mercury"\nprovider = "inception"\n')
+    p.write_text('[executors.recon]\nmodel_id = "mercury-2"\nprovider = "inception"\n')
     # Worker (code-writing) and the two judge roles the orchestrator routes by
     # all resolve to Claude regardless of the recon override.
     for judge_role in ("worker", "decision_proxy", "marlin_proxy"):
@@ -204,16 +204,96 @@ def test_run_mercury_recon_raises_on_missing_content_field():
         )
 
 
-def test_curl_passes_body_on_stdin_and_references_only_the_env_key():
-    """The Inception curl references the key only as the proxy-injected env var,
-    and carries the request body on stdin (heredoc), so neither the key nor a
-    crafted question can break out into the shell command."""
-    body = {"model": "mercury", "messages": [{"role": "user", "content": "hi"}]}
-    cmd = ex._build_inception_curl(body)
-    assert "$INCEPTION_API_KEY" in cmd
-    assert "--data-binary @-" in cmd
-    assert "ORCH_MERCURY_EOF" in cmd
-    assert json.dumps(body) in cmd
+class _ForwardStub:
+    """A local HTTP server standing in for the secrets proxy's provider forward.
+    Records what it received and answers with a scripted status and body."""
+
+    def __init__(self, status: int, body: str):
+        import http.server
+        import threading
+
+        stub = self
+        self.requests: list[dict] = []
+
+        class Handler(http.server.BaseHTTPRequestHandler):
+            def do_POST(self):
+                length = int(self.headers.get("Content-Length", 0))
+                stub.requests.append(
+                    {
+                        "path": self.path,
+                        "headers": dict(self.headers),
+                        "body": json.loads(self.rfile.read(length)),
+                    }
+                )
+                payload = body.encode("utf-8")
+                self.send_response(status)
+                self.send_header("Content-Type", "application/json")
+                self.send_header("Content-Length", str(len(payload)))
+                self.end_headers()
+                self.wfile.write(payload)
+
+            def log_message(self, *args):
+                pass
+
+        self._server = http.server.HTTPServer(("127.0.0.1", 0), Handler)
+        self.url = f"http://127.0.0.1:{self._server.server_address[1]}"
+        threading.Thread(target=self._server.serve_forever, daemon=True).start()
+
+    def close(self):
+        self._server.shutdown()
+
+
+def test_provider_forward_posts_only_the_body_to_the_route():
+    """The transport names the route and sends the chat body plus the proxy
+    token; no upstream URL, no Infisical coordinates, no key reference."""
+    stub = _ForwardStub(200, _fake_inception_response("ok"))
+    try:
+        body = {"model": MERCURY_MODEL_ID, "messages": [{"role": "user", "content": "hi"}]}
+        raw = ex._proxy_provider_forward(stub.url, "tok-1", body)
+    finally:
+        stub.close()
+    assert json.loads(raw)["choices"][0]["message"]["content"] == "ok"
+    (req,) = stub.requests
+    assert req["path"] == ex.INCEPTION_FORWARD_ROUTE
+    assert req["headers"]["X-Proxy-Token"] == "tok-1"
+    assert req["body"] == body
+    sent = json.dumps(req["body"])
+    for forbidden in ("projectId", "INCEPTION_API_KEY", "api.inceptionlabs.ai", "curl"):
+        assert forbidden not in sent
+
+
+def test_provider_forward_http_error_is_mercury_unavailable():
+    """A proxy 502 (key unresolvable) or an upstream error fails loud with the
+    status, so recon falls back to Claude visibly."""
+    stub = _ForwardStub(502, '{"error":"could not resolve the provider key"}')
+    try:
+        with pytest.raises(MercuryUnavailable, match="HTTP 502.*could not resolve"):
+            ex._proxy_provider_forward(stub.url, "tok-1", {"model": "m"})
+    finally:
+        stub.close()
+
+
+def test_provider_forward_unreachable_proxy_is_mercury_unavailable():
+    with pytest.raises(MercuryUnavailable, match="provider forward failed"):
+        ex._proxy_provider_forward("http://127.0.0.1:9", "tok-1", {"model": "m"})
+
+
+def test_run_mercury_recon_reads_the_token_file(tmp_path, monkeypatch):
+    """The proxy token comes from the 0600 file (the single source of truth),
+    not only from the environment."""
+    tf = tmp_path / "token"
+    tf.write_text("file-token\n")
+    tf.chmod(0o600)
+    monkeypatch.setenv("SECRETS_PROXY_TOKEN_FILE", str(tf))
+    seen = {}
+
+    def fake_transport(url, token, body):
+        seen["token"] = token
+        return _fake_inception_response("found it")
+
+    profile = ExecutorProfile(role="recon", model_id=MERCURY_MODEL_ID, provider="inception")
+    run_mercury_recon("q", profile=profile, transport=fake_transport)
+    assert seen["token"] == "file-token"
 
 
 # --------------------------------------------------------------------------- #
@@ -241,7 +321,7 @@ def test_recon_defaults_to_claude_when_no_config(tmp_path):
 
 def test_recon_uses_mercury_when_configured(tmp_path):
     p = tmp_path / "config.toml"
-    p.write_text('[executors.recon]\nmodel_id = "mercury"\nprovider = "inception"\n')
+    p.write_text('[executors.recon]\nmodel_id = "mercury-2"\nprovider = "inception"\n')
 
     def transport(url, token, body):
         return _fake_inception_response("mercury findings")
@@ -257,7 +337,7 @@ def test_recon_falls_back_to_claude_when_mercury_unavailable(tmp_path):
     """Mercury configured but the proxy token is absent: FAIL LOUD into a Claude
     recon fallback, never a silent skip, never a blocked run."""
     p = tmp_path / "config.toml"
-    p.write_text('[executors.recon]\nmodel_id = "mercury"\nprovider = "inception"\n')
+    p.write_text('[executors.recon]\nmodel_id = "mercury-2"\nprovider = "inception"\n')
 
     def boom(url, token, body):  # would be the proxy call
         raise AssertionError("transport should not be reached without a token")
@@ -276,7 +356,7 @@ def test_recon_falls_back_to_claude_when_mercury_unavailable(tmp_path):
 
 def test_recon_falls_back_to_claude_on_transport_error(tmp_path):
     p = tmp_path / "config.toml"
-    p.write_text('[executors.recon]\nmodel_id = "mercury"\nprovider = "inception"\n')
+    p.write_text('[executors.recon]\nmodel_id = "mercury-2"\nprovider = "inception"\n')
 
     def bad_transport(url, token, body):
         raise MercuryUnavailable("proxy 502")
