@@ -404,6 +404,19 @@ async def run_sprint(
         watcher = asyncio.create_task(_forward_stop(stop_file, slice_dir, done))
         try:
             await run_slice(slice_cfg)
+        except Exception as e:
+            record.status, record.finished_at = "failed", _now()
+            record.exit_reason = f"{type(e).__name__}: {e}"
+            result = finish(
+                sprint,
+                "failed",
+                f"slice {record.index + 1} ({record.plan.title}) raised {type(e).__name__}: {e}",
+            )
+            try:
+                _remove_untracked_handover(worktree)
+            except Exception as cleanup_error:
+                console.print(f"[yellow]handover cleanup failed: {cleanup_error}[/yellow]")
+            return result
         finally:
             done.set()
             await watcher

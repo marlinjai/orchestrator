@@ -281,9 +281,10 @@ Rules:
 For a goal too big for one Worker session, run it as a sprint:
 
 ```bash
-orchestrator sprint --goal goals/<id>.md --project <repo> --task-id <id> \
-  [--handover-dir <dir>] [--held-out "<cmd>"] [--max-slices 8] [--max-iterations 15] [--max-hours 1]
+orchestrator sprint --goal goals/<id>.md --project <repo> --task-id <id>
 ```
+
+Optional flags: `--handover-dir <dir>`, `--held-out "<cmd>"`, `--max-slices 8`, `--max-iterations 15`, `--max-hours 1`.
 
 - **Claude slices the goal once** (the `planner` role, which must stay Claude) into at most `--max-slices` small, file-scoped slices, each naming its files and the tests it adds and each leaving the suite green on its own. A malformed plan fails the sprint.
 - **Every slice is a full orchestrator run** inside ONE worktree (branch `orchestrator/<task-id>`), with the goal's frontmatter `verify` as its gate and the Decision Proxy on every iteration. The goal MUST have a `verify` command, or the sprint is refused. `--max-iterations` / `--max-hours` are per slice.

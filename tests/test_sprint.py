@@ -185,6 +185,26 @@ async def test_escalated_slice_stops_the_sprint_and_a_rerun_retries_only_it(tmp_
     assert [c.task_id for c in second.cfgs] == ["sp-slice-02-a2", "sp-slice-03-a1"]
 
 
+async def test_a_raising_slice_fails_the_sprint_and_a_rerun_retries_it(tmp_path):
+    repo = _repo(tmp_path)
+    cfg = _cfg(tmp_path, repo)
+    slicer = _Slicer(_plan(2))
+
+    async def boom(_cfg):
+        raise RuntimeError("worker exploded")
+
+    result = await run_sprint(cfg, slicer=slicer, run_slice=boom)
+    assert result.status == "failed"
+    assert "RuntimeError: worker exploded" in result.reason
+    assert [s.status for s in result.slices] == ["failed", "pending"]
+    assert load_state(cfg.state_dir / "state.json").status == "failed"
+
+    again = _Slices()
+    result = await run_sprint(cfg, slicer=slicer, run_slice=again)
+    assert result.status == "completed"
+    assert [c.task_id for c in again.cfgs] == ["sp-slice-01-a2", "sp-slice-02-a1"]
+
+
 async def test_resume_after_a_crash_mid_slice(tmp_path):
     repo = _repo(tmp_path)
     cfg = _cfg(tmp_path, repo)

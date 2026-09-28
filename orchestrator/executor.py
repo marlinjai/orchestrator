@@ -296,7 +296,7 @@ def load_executor_config(path: Path | None = None) -> dict[str, ExecutorProfile]
 
 def _read_executors(cfg_path: Path) -> dict[str, ExecutorProfile]:
     try:
-        data = tomllib.loads(cfg_path.read_text())
+        data = tomllib.loads(cfg_path.read_text(encoding="utf-8"))
     except tomllib.TOMLDecodeError as e:
         raise ValueError(f"config file malformed: {cfg_path}: {e}") from e
 
