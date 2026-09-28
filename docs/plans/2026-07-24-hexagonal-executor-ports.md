@@ -1,8 +1,9 @@
 ---
+type: plan
 title: Hexagonal executor ports (ports-and-adapters seam for exchangeable models)
-status: decided (E1+E2 implemented 2026-07-24; E3+E4 open)
+status: in-progress
 date: 2026-07-24
-revised: 2026-07-24 (v2 after reading the Inception Labs docs + OpenAPI spec)
+revised: 2026-09-28 (revived after PR #14 closed unmerged; E1+E2 rebased onto main)
 owner: marlin
 supersedes: none
 related:
@@ -107,14 +108,20 @@ E1 + E2 implemented and shipped on PR #14 (branch `plan/hexagonal-executor-ports
 
 Downstream consumers of this seam (recorded here because the knowledge-base backlog is not available on hermes): the autonomous-orchestration skill on the MacBook (picks everything up via git pull; needs its own `~/.config/orchestrator/config.toml` entries and Tailscale reach to the secrets proxy), and the Lumitra Agentic OS Platform (`~/workspace/lumitra/agentic-os-platform`), whose open milestone **M9 "Mercury sprint worker" IS this plan's E4** (design doc `docs/plans/2026-07-17-agentic-os-saas-design.md`, M9 row). M9 is therefore blocked on: (1) PR #14 review + merge, (2) E3 telemetry, (3) E4 adapter + experiment, (4) the INCEPTION_API_KEY scaffold in Infisical `/providers` (placeholder flow).
 
-## Next steps (ordered, as of 2026-07-24)
+## Reality update (2026-09-28): revived
 
-1. **Marlin: review + merge PR #14** (`plan/hexagonal-executor-ports`). Everything below waits on it. Contents: this plan + E1/E2, 461 tests green, default behavior unchanged. NOTE: until this merges, this plan file exists only on the branch, not in the main checkout.
-2. **E3: latency telemetry** (small slice, can run autonomously). Per-call `CallLatency` on a generalized `ExecutorRecord`, plus enforce-or-delete `cost_ceiling_usd`. No experiment is interpretable without it.
-3. **Operator prerequisite: scaffold `INCEPTION_API_KEY`** in Infisical (`/providers`, project id in `executor.INCEPTION_PROJECT_ID`) via the placeholder flow (Claude sets `PLACEHOLDER_REPLACE_ME`, Marlin fills the real value in the UI). Then a live E1 smoke: `[executors.recon] model_id = "mercury-2", provider = "inception"` on a dogfood goal, asserting `state.last_recon.executor == "mercury"` and Claude fallback when the proxy is down.
-4. **E4: the experiment** (large slice, needs its own goal file). `adapters/openai_compat_worker.py`, then Claude vs Mercury via `--best-of` with a held-out verifier, decided on `time_to_verified_ms` with the TTFT decomposition from E3. Exit criterion in Verification below.
-5. **Platform side, after E4**: wire M9's sprint-worker respawn (handover doc for the 128K window) in `~/workspace/lumitra/agentic-os-platform`. That repo's other open items are out of this plan's scope: the AgentOS/Paperclip sunset decision (needs Marlin's explicit go) and the Uptime Kuma monitors.
-6. **MacBook**: after merge, `git pull` the orchestrator checkout there; add `[executors.*]` entries to its own `~/.config/orchestrator/config.toml` to enable Mercury recon from the Mac (the secrets proxy is already reachable over Tailscale).
+PR #14 closed unmerged on 2026-08-09, so none of the above reached main. On 2026-09-28 Marlin decided to revive the work rather than archive it: executor ports first, then M9 in the Agentic OS Platform. The six branch commits were rebased onto main (clean, no conflicts) and re-verified: 470 tests green, ruff clean. The seam carries main's later Worker changes unchanged, because `ClaudeWorkerAdapter` receives options already built by `build_worker_options`: the worktree path guard (the `can_use_tool` hard-deny on edits outside the attempt worktree) and the proxy-token-out-of-argv MCP config both apply exactly as before.
+
+Correction to the M9 note above: M9 is a SUPERSET of E4, not the same thing. The Agentic OS side (`agentic-os-platform/docs/plans/2026-07-28-m9-executor-reconciliation.md`, Corrections 1 to 3) adds the sprint-worker respawn and its handover on top of the adapter.
+
+## Next steps (ordered, as of 2026-09-28)
+
+1. **Land E1+E2** as a fresh pull request (this plan + the seam), landed by land-pr in the background.
+2. **E3: latency telemetry** (own pull request). Per-call `CallLatency` on a generalized `ExecutorRecord`, plus enforce-or-delete `cost_ceiling_usd`. No experiment is interpretable without it.
+3. **E4: the OpenAI-compatible worker adapter** (own pull request). `adapters/openai_compat_worker.py`, the non-Claude worker gate (refuse without a held-out verifier), and the experiment rig: Claude vs Mercury via `--best-of` with a held-out verifier, decided on `time_to_verified_ms` with the TTFT decomposition from E3. Running the live cohort needs step 4. Exit criterion in Verification below.
+4. **Operator prerequisite: `INCEPTION_API_KEY`** in Infisical (`/providers`, project id in `executor.INCEPTION_PROJECT_ID`) via the placeholder flow: Claude sets `PLACEHOLDER_REPLACE_ME`, Marlin fills the real value in the Infisical UI. Then the live E1 smoke: `[executors.recon] model_id = "mercury-2", provider = "inception"` on a dogfood goal, asserting `state.last_recon.executor == "mercury"` and Claude fallback when the proxy is down.
+5. **Platform side, after E4**: M9's sprint worker in `agentic-os-platform`, per its reconciliation plan.
+6. **MacBook**: after merge, pull the orchestrator checkout there and add `[executors.*]` entries to its own `~/.config/orchestrator/config.toml` to enable Mercury recon from the Mac (the secrets proxy is reachable over Tailscale).
 
 ## Verification
 
