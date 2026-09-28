@@ -482,11 +482,14 @@ class OpenAICompatWorkerSession:
             "result": _redact_secrets(output[:AUDIT_RESULT_CHARS]),
         }
         try:
-            is_new = not self.audit_path.exists()
-            with self.audit_path.open("a", encoding="utf-8") as f:
+            fd = os.open(str(self.audit_path), os.O_CREAT | os.O_APPEND | os.O_WRONLY, 0o600)
+            try:
+                os.fchmod(fd, 0o600)
+            except OSError:
+                os.close(fd)
+                raise
+            with os.fdopen(fd, "a", encoding="utf-8") as f:
                 f.write(json.dumps(entry, ensure_ascii=True) + "\n")
-            if is_new:
-                self.audit_path.chmod(0o600)
         except OSError as e:
             logger.warning("could not write the worker tool audit %s: %s", self.audit_path, e)
 

@@ -9,6 +9,7 @@ handler, the tool-round cap, and the provider forward's error classification.
 
 import http.server
 import json
+import stat
 import threading
 from pathlib import Path
 
@@ -348,3 +349,12 @@ async def test_every_tool_call_is_audited_next_to_state(tmp_path):
     assert lines[0]["args"]["content"] == "<15 characters>"
     assert lines[1]["args"]["command"] == "cat ../state.json"
     assert lines[2]["result"].startswith("refused")
+
+
+async def test_audit_file_is_secured_even_if_it_pre_existed_world_readable(tmp_path):
+    audit_path = tmp_path / "worker-tools.jsonl"
+    audit_path.write_text("")
+    audit_path.chmod(0o644)
+    session = _session(tmp_path, _ScriptedChat())
+    await _tool(session, "write_file", {"path": "a.txt", "content": "x"})
+    assert stat.S_IMODE(audit_path.stat().st_mode) == 0o600
