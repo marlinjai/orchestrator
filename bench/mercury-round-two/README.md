@@ -40,7 +40,7 @@ that is meant to count needs new hidden tests, or a Worker environment without a
 
 ## How the hidden tests stay hidden
 
-The race runs on hermes. Three things together keep a Worker away from the hidden tests:
+The race runs on hermes. Four things together keep a Worker away from the hidden tests:
 
 1. **Another OS user owns them.** `orch-verifier` owns the vault (mode 700).
 2. **A service runs them.** `orch-verify-client <bench> <goal> <tree>` sends one line to the socket
@@ -55,10 +55,11 @@ The race runs on hermes. Three things together keep a Worker away from the hidde
 
 The scripts, the two systemd units and their runbook are in `agentic-os-platform/deploy/orch-verifier/`.
 
-What this does not cover: the tests of an attempt run the Worker's own code as `orch-verifier`, so
-code written to read the vault during verification could do so. That needs intent the goals give no
-reason for, it would be visible in the attempt's diff, and every attempt's tool log is checked after
-the race for the words `orch-verif`, `sudo`, `docker` and `/var/lib`.
+4. **The tests run as a second user.** They execute the Worker's own code, so they run as
+   `orch-runner` in a unit with no network, a read-only file system apart from its work folder and
+   no vault access. (Added after the race of 2026-10-02, in which they still ran as `orch-verifier`;
+   every attempt's tool log was searched for `orch-verif`, `sudo`, `docker` and `/var/lib` after
+   that race, without a hit.)
 
 ## Proving the hidden tests fair
 

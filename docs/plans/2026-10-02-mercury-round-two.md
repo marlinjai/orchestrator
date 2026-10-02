@@ -61,9 +61,14 @@ and was not done. Instead:
 So within the race the hidden tests are out of reach by prevention, not only by ownership. This is
 also the first working piece of decision 5: the same launcher can wrap the platform's Worker runs.
 
-Remaining exposure, stated plainly: an attempt's tests execute the Worker's own code as
-`orch-verifier`, so code written to read the vault during verification could. The verifier answers
-only PASS or FAIL, and every attempt's tool log is checked after the race.
+Remaining exposure during the race, stated plainly: an attempt's tests execute the Worker's own
+code, and in the race of 2026-10-02 they ran as `orch-verifier`, the user that owns the vault, so
+code written to read the vault during verification could have. The verifier answered only PASS or
+FAIL, and every attempt's tool log was checked afterwards (no hit). Closed after the race, on a
+review finding: the tests now run as a second user, `orch-runner`, in a unit with no network, a
+read-only file system apart from its work folder and no vault access, so such code can neither
+reach other goals' tests nor keep or send the ones it is run against. All ten goals were re-proven
+fair through the split verifier.
 
 ## How it is built
 
