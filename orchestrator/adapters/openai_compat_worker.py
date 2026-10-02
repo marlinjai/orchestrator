@@ -794,6 +794,10 @@ class OpenAICompatWorkerSession:
                 rel = self._confined(args.get("path")).relative_to(self._root)
             except (PermissionError, ValueError):
                 return
+            if self._checkpoint and str(rel) == HANDOVER_FILE:
+                # The loop's own document, removed again once the fresh
+                # session is seeded: not a file the task changed.
+                return
             await self._update_state({"kind": "file_touched", "path": str(rel)})
         elif (
             name == "run_command"

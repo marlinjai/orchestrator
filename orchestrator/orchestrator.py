@@ -574,11 +574,13 @@ async def _execute_handover(
     # carry across a successful handover (which is itself evidence of progress).
     state.stagnation_streak = 0
     state.last_progress_key = None
-    save_state(state_path, state)
     seed = seed_fresh_session_message(doc_path, state, discrepancies)
     # The seed carries the document in full. Left in the tree, the next leg's
-    # `git add -A` would commit it into the work.
-    remove_untracked_handover(work_dir)
+    # `git add -A` would commit it into the work; and it is the loop's document,
+    # not a file the task changed (the reconcile above saw it as one).
+    if remove_untracked_handover(work_dir):
+        state.files_touched = [f for f in state.files_touched if f.path != HANDOVER_FILE]
+    save_state(state_path, state)
     return seed, state
 
 

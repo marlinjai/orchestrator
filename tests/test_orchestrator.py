@@ -911,4 +911,6 @@ async def test_handover_survives_into_the_fresh_leg(tmp_path: Path, executor_hom
     assert len(state.usage) == 3
     # The seed carried the document; it must not stay in the tree to be committed.
     assert not (repo / "HANDOVER.md").exists()
+    # Nor is it a file the task touched.
+    assert [f.path for f in state.files_touched] == ["note.txt"]
 
