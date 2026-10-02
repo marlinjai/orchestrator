@@ -71,6 +71,17 @@ def is_handover_complete(worker_output: str) -> bool:
     return _HANDOVER_COMPLETE_MARKER in worker_output
 
 
+def remove_untracked_handover(root: Path) -> None:
+    """Delete the Worker's HANDOVER.md from the tree once it has been read,
+    unless the repo tracks a file of that name (then it is the project's own)."""
+    doc = root / HANDOVER_FILE
+    tracked = subprocess.run(
+        ["git", "ls-files", "--error-unmatch", HANDOVER_FILE], cwd=root, capture_output=True
+    ).returncode == 0
+    if doc.exists() and not tracked:
+        doc.unlink()
+
+
 def _git_log_shas(project_dir: Path, baseline_ref: str) -> set[str]:
     """Return the set of full SHAs in baseline_ref..HEAD."""
     try:

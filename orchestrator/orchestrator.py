@@ -36,6 +36,7 @@ from orchestrator.guardrails import (
 )
 from orchestrator.handover import (
     HANDOVER_FILE,
+    remove_untracked_handover,
     build_handover_prompt,
     is_handover_complete,
     seed_fresh_session_message,
@@ -481,11 +482,17 @@ async def _execute_handover(
     persona: str,
     mp_config: MarlinProxyConfig,
     local_console: Console,
-) -> str | None:
+) -> tuple[str | None, State]:
     """Send the handover prompt to the Worker, verify HANDOVER.md against git,
-    record the handover in state, and return the fresh-session seed message.
+    record the handover in state, and return the fresh-session seed message
+    together with the state as it now is.
 
-    Returns None and sets state.status = "escalated" if the Worker fails to
+    The state is reloaded here (the Worker writes it through update_state
+    during the turn), so the caller MUST go on with the returned one: keeping
+    its own copy would write the pre-handover state back over the handover
+    record, the turn's usage and the stagnation reset on its next save.
+
+    The seed is None, and state.status "escalated", if the Worker fails to
     produce HANDOVER.md within one turn.
     """
     local_console.print("[bold yellow]handover:[/bold yellow] sending checkpoint prompt to Worker")
@@ -539,7 +546,7 @@ async def _execute_handover(
         local_console.print(
             f"[bold red]HANDOVER FAILED:[/bold red] {state.exit_reason}"
         )
-        return None
+        return None, state
 
     discrepancies = verify_handover_doc(doc_path.read_text(), state, work_dir)
     if discrepancies:
@@ -568,7 +575,11 @@ async def _execute_handover(
     state.stagnation_streak = 0
     state.last_progress_key = None
     save_state(state_path, state)
-    return seed_fresh_session_message(doc_path, state, discrepancies)
+    seed = seed_fresh_session_message(doc_path, state, discrepancies)
+    # The seed carries the document in full. Left in the tree, the next leg's
+    # `git add -A` would commit it into the work.
+    remove_untracked_handover(work_dir)
+    return seed, state
 
 
 async def run_orchestrator(cfg: OrchestratorConfig) -> None:
@@ -1204,7 +1215,7 @@ async def run_orchestrator(cfg: OrchestratorConfig) -> None:
                             return
 
                         if decision.action == "handover":
-                            seed = await _execute_handover(
+                            seed, state = await _execute_handover(
                                 session=session,
                                 worker_profile=worker_profile,
                                 handover_prompt=decision.text,

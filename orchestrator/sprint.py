@@ -45,7 +45,7 @@ from pydantic import BaseModel, Field, ValidationError
 from rich.console import Console
 
 from orchestrator.executor import resolve_executor
-from orchestrator.handover import HANDOVER_FILE
+from orchestrator.handover import HANDOVER_FILE, remove_untracked_handover
 from orchestrator.parse import parse_frontmatter
 from orchestrator.repo_registry import resolve_repo_policy
 from orchestrator.state import HeldOutRecord, State, TaskStatus, load_state, save_state
@@ -254,17 +254,6 @@ def _repo_files(root: Path) -> list[str]:
     return out.stdout.splitlines() if out.returncode == 0 else []
 
 
-def _remove_untracked_handover(root: Path) -> None:
-    """The in-slice context handover asks the Worker for a HANDOVER.md at the
-    repo root; never let it leak into the next slice as an untracked file."""
-    doc = root / HANDOVER_FILE
-    tracked = subprocess.run(
-        ["git", "ls-files", "--error-unmatch", HANDOVER_FILE], cwd=root, capture_output=True
-    ).returncode == 0
-    if doc.exists() and not tracked:
-        doc.unlink()
-
-
 async def _forward_stop(sprint_stop: Path, slice_dir: Path, done: asyncio.Event) -> None:
     """Mirror the sprint's STOP into the running slice's task dir."""
     while not done.is_set():
@@ -413,14 +402,14 @@ async def run_sprint(
                 f"slice {record.index + 1} ({record.plan.title}) raised {type(e).__name__}: {e}",
             )
             try:
-                _remove_untracked_handover(worktree)
+                remove_untracked_handover(worktree)
             except Exception as cleanup_error:
                 console.print(f"[yellow]handover cleanup failed: {cleanup_error}[/yellow]")
             return result
         finally:
             done.set()
             await watcher
-        _remove_untracked_handover(worktree)
+        remove_untracked_handover(worktree)
 
         slice_state = load_state(slice_dir / "state.json")
         record.finished_at = _now()
