@@ -76,9 +76,13 @@ def remove_untracked_handover(root: Path) -> bool:
     unless the repo tracks a file of that name (then it is the project's own).
     Returns whether a file was removed."""
     doc = root / HANDOVER_FILE
-    tracked = subprocess.run(
-        ["git", "ls-files", "--error-unmatch", HANDOVER_FILE], cwd=root, capture_output=True
-    ).returncode == 0
+    try:
+        tracked = subprocess.run(
+            ["git", "ls-files", "--error-unmatch", HANDOVER_FILE], cwd=root, capture_output=True
+        ).returncode == 0
+    except OSError:
+        # No git executable (in-place run on a non-git project): nothing is tracked.
+        tracked = False
     if doc.exists() and not tracked:
         doc.unlink()
         return True
