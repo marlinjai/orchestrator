@@ -25,10 +25,18 @@ AND a hidden-test pass rate within 10 percentage points of Claude's.
 | `<bench>/bench.toml` | Where the base clone is, how a fresh attempt tree is prepared, and the hidden-test command. |
 | `<bench>/goals/NN-*.md` | One goal per file: a small, precisely specified change, so the hidden tests judge the spec and not a guess. The frontmatter `verify` runs the package's visible tests. |
 
-The hidden tests and the reference solutions are NOT in this repository while the race is open: the
-Workers run with GitHub access and could clone it. They live on hermes under
-`/var/lib/orch-verifier/vault/<bench>/<goal>/`, readable only by the `orch-verifier` user, and are
-added here as the record once the race has concluded.
+| `<bench>/heldout/NN-*/` | The hidden tests of a goal: `files/` (test files as paths relative to the repo root) and `cmd` (the command that runs them). This is the layout of the verifier's vault. |
+| `<bench>/reference/NN-*.py` | A correct solution per goal, as a script that patches a tree (`python3 NN-*.py <tree>`), used only to prove the hidden tests fair. |
+| `results/` | Report and score of the race of 2026-10-02. |
+
+**Result: Mercury does not pass.** Claude 10 of 10 goals hidden-test green, Mercury 7 of 10; the band
+is 10 points. Details and what the misses were: the plan's Result section.
+
+While a race is open the hidden tests and the reference solutions must NOT be in a checkout the
+Workers can reach: they run with GitHub access and could clone this repository. They were added here
+only after the race of 2026-10-02 had concluded. During a race they live on hermes under
+`/var/lib/orch-verifier/vault/<bench>/<goal>/`, readable only by the `orch-verifier` user. A rerun
+that is meant to count needs new hidden tests, or a Worker environment without access to this repo.
 
 ## How the hidden tests stay hidden
 
@@ -57,6 +65,7 @@ the race for the words `orch-verif`, `sudo`, `docker` and `/var/lib`.
 On hermes, as root, `orch-prove <bench> <base> '<setup>' <goals-dir> <reference-dir>` checks every
 goal: the hidden tests FAIL on an untouched clone, and with the reference solution applied the goal's
 visible suite passes and the hidden tests PASS. All ten goals passed this on 2026-10-02.
+`<reference-dir>` is `<bench>/reference`, and the vault is filled from `<bench>/heldout`.
 
 ## Running it
 

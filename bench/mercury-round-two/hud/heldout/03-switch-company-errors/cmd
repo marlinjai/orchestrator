@@ -1,0 +1,1 @@
+cd apps/hud && ./node_modules/.bin/vitest run src/lib/hidden-switch-company-errors.test.ts

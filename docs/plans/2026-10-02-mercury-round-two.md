@@ -6,8 +6,8 @@ summary: >
   a toy benchmark. Before Mercury does real work, the same race runs on two real repositories with
   hidden tests owned by a separate OS user on hermes. This plan records Marlin's five decisions, how
   the hidden tests are kept out of a Worker's reach on a host where the platform user may sudo, and
-  the result.
-status: in-progress
+  the result: Mercury does not pass (7 of 10 goals hidden-test green against Claude's 10 of 10).
+status: completed
 date: 2026-10-02
 owner: marlin
 tags: [mercury, executor, race, held-out, hermes]
@@ -69,9 +69,9 @@ only PASS or FAIL, and every attempt's tool log is checked after the race.
 
 - **Goals**: `bench/mercury-round-two/<bench>/goals/`. Each is a small change in a pure-logic module
   (an operator, a parser rule, an option, an error case), specified precisely.
-- **Hidden tests and reference solutions**: on hermes only while the race is open
+- **Hidden tests and reference solutions**: on hermes only while the race was open
   (`/var/lib/orch-verifier/vault`, root's reference folder), because Workers have GitHub access and
-  could clone this repository. Committed here once the race has concluded.
+  could clone this repository. Committed here after the race (`<bench>/heldout`, `<bench>/reference`).
 - **Fairness proof**: `orch-prove` (root, hermes): hidden tests fail on an untouched clone; with the
   reference solution the visible suite passes and the hidden tests pass. 10 of 10 on 2026-10-02.
 - **Harness**: `scripts/mercury_race.py run --bench <dir>`. A repo bench runs its own attempts (a
@@ -90,6 +90,69 @@ only PASS or FAIL, and every attempt's tool log is checked after the race.
   for `orch-verif`, `sudo`, `docker` and `/var/lib`; a hit outside the orchestrator's own gate
   invalidates that attempt.
 
-## Result
+## Result (race of 2026-10-02): Mercury does not pass
 
-Recorded here when the race has run.
+Run on hermes inside the sandbox, 10 goals, 2 attempts per goal per cohort, 40 attempts in all. Data:
+`bench/mercury-round-two/results/` (report and score) and, in full, `~/.orchestrator/mercury-race/2026-10-02-round-two/`.
+
+| Goal | Claude | Mercury |
+|---|---|---|
+| email-editor-01-segment-numeric | pass 68.0s | pass 31.8s |
+| email-editor-02-merge-fallback | pass 66.3s | pass 28.2s |
+| email-editor-03-condition-operators | pass 77.8s | pass 34.8s |
+| email-editor-04-engagement-clock | pass 45.5s | pass 96.1s |
+| email-editor-05-csv-edges | pass 62.2s | FAIL |
+| hud-01-notes-under-options | pass 49.6s | pass 33.2s |
+| hud-02-notion-cover-roundtrip | pass 43.2s | FAIL |
+| hud-03-switch-company-errors | pass 46.7s | pass 27.6s |
+| hud-04-number-and-duration | pass 76.9s | FAIL |
+| hud-05-youtube-start | pass 68.6s | pass 33.0s |
+
+| | Claude | Mercury |
+|---|---|---|
+| Goals hidden-test green | 10 of 10 | 7 of 10 |
+| Attempts hidden-test green | 20 of 20 | 14 of 20 |
+| Median time to a verified result (best attempt per goal, a failed goal counts as infinitely slow) | 64.2s | 34.0s |
+| Attempt time, median | 65.1s | 66.5s |
+| Attempt time, mean | 63.7s | 78.4s |
+| Attempts finished in one iteration | 20 of 20 | 20 of 20 |
+| Estimated cost, all 20 attempts | 12.42 USD | 1.57 USD |
+
+**Verdict by the pre-registered criterion: Mercury does not win.** Its median time to a verified
+result is lower, but its hidden-test pass rate is 30 points below Claude's, and the band is 10.
+
+What the misses are. Each of the three failed goals failed the same single hidden test in both
+attempts, and each time it is an edge case the goal states in so many words:
+
+- `email-editor-05-csv-edges`: a field ending in a quoted part must keep the whitespace inside the
+  quotes (` a "b " ` is `a b `, example-level rule 3 of the goal); Mercury trimmed it. 13 of 14 pass.
+- `hud-02-notion-cover-roundtrip`: the upload name must normalise the extension (surrounding
+  whitespace, leading dots, case, `jpeg` to `jpg`); one of the listed normalisations was missed.
+  7 of 8 pass.
+- `hud-04-number-and-duration`: a signed value inside accounting parentheses, or parentheses that do
+  not wrap the whole value, must give `null`; Mercury returned a number. 42 of 43 pass.
+
+So Mercury gets the main behavior right every time and drops one stated rule in a longer spec.
+Its own visible tests passed in all 20 attempts, which is exactly the case the hidden tests exist
+for: green by its own account, wrong by the spec. On round one's toy library this did not show.
+
+Speed. Per attempt Mercury was no faster than Claude on real repositories (median 66.5s against
+65.1s). The time is the provider: a median of 30s of Inception server time per attempt over a median
+of 23.5 model calls, with a wide spread (28s to 193s per attempt). The "faster" half of the criterion
+is met only because best-of-2 picks the quicker attempt.
+
+Integrity. No attempt of either cohort touched `sudo`, `docker`, the verifier or `/var/lib` (all 20
+Mercury tool logs and all 20 Claude transcripts searched). The verifier answered every request.
+
+## Consequence
+
+Mercury is not cleared for real work as a coding Worker. It stays available behind the held-out
+gate (which is what caught these misses), and the orchestrator's default Worker stays Claude. The
+Agentic OS line "Mercury as the sprint Worker on hermes" does not proceed on this result; whether to
+try again under other conditions (a higher `reasoning_effort`, a spec-checklist step before the
+Worker stops, a newer Mercury model) is Marlin's call and is recorded under the platform's
+"Decisions needed".
+
+The hidden tests and the reference solutions are in `bench/mercury-round-two/<bench>/heldout` and
+`reference` now that the race is closed, so the round can be rerun with
+`scripts/mercury_race.py run --bench ...` after `orch-prove`.
