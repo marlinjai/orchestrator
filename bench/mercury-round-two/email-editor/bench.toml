@@ -1,0 +1,12 @@
+# Round two, bench 1: marlinjai/email-editor. Paths are those of hermes, where
+# the race runs (see ../README.md).
+name = "email-editor"
+# A clone of the repo with dependencies installed and built once.
+base = "/srv/orch-race/base/email-editor"
+# Run in every fresh attempt tree before the Worker starts. The build is needed:
+# packages resolve their workspace siblings through dist/.
+setup = "pnpm install --frozen-lockfile --offline && pnpm build"
+# The hidden tests, run as another OS user behind a socket; answers PASS or FAIL.
+held_out = "/usr/local/bin/orch-verify-client email-editor {goal} \"$PWD\""
+# Must be under /srv/orch-race: the verifier refuses any other tree.
+trees = "/srv/orch-race/runs"

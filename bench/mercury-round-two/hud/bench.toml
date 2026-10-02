@@ -1,0 +1,8 @@
+# Round two, bench 2: the heads-up display app (apps/hud) of
+# marlinjai/agentic-os-platform. Paths are those of hermes, where the race runs
+# (see ../README.md). The base is a separate clone, never the deployed checkout.
+name = "hud"
+base = "/srv/orch-race/base/agentic-os-platform"
+setup = "pnpm install --frozen-lockfile --offline"
+held_out = "/usr/local/bin/orch-verify-client hud {goal} \"$PWD\""
+trees = "/srv/orch-race/runs"
