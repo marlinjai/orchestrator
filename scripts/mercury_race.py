@@ -265,7 +265,7 @@ def _run_repo_goal(
             if not _prepare_tree(bench, tree, log):
                 attempt_records.append(
                     {"attempt_index": i, "task_id": task_id, "status": "setup-failed",
-                     "held_out": None, "time_to_verified_ms": 0}
+                     "held_out": None, "time_to_verified_ms": None}
                 )
                 continue
             cmd = [
@@ -357,6 +357,13 @@ def cmd_run(args) -> int:
         except ValueError as e:
             print(e, file=sys.stderr)
             return 2
+        # Attempt trees are cloned into bench.trees/<out name>; a leftover one
+        # would make the clone fail and be scored as a setup failure.
+        for b in benches:
+            root = b.trees / out.name
+            if root.exists() and any(root.iterdir()):
+                print(f"{root} is not empty; pick a fresh --out", file=sys.stderr)
+                return 2
         # (goal id, cohort, runner): a repo bench runs its own attempts.
         jobs = [
             (f"{b.name}-{slug}", cohort, lambda b=b, slug=slug, cohort=cohort: _run_repo_goal(
@@ -438,7 +445,7 @@ def _attempt_stats(records: list[dict]) -> dict:
     """Per-attempt view (what best-of-N hides): every attempt, not the best per goal."""
     atts = [a for r in records for a in (r.get("result") or {}).get("attempts", [])]
     states = [st for r in records for st in r.get("attempt_states", [])]
-    ttv = [a.get("time_to_verified_ms", 0) / 1000 for a in atts]
+    ttv = [a["time_to_verified_ms"] / 1000 for a in atts if a.get("time_to_verified_ms") is not None]
     return {
         "attempts": len(atts),
         "green": sum(1 for a in atts if a.get("held_out") == "pass"),
