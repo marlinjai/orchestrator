@@ -17,6 +17,8 @@ from orchestrator.state import State
 
 
 _HANDOVER_COMPLETE_MARKER = "HANDOVER_COMPLETE"
+# Written by the Worker at the root of the tree it works in.
+HANDOVER_FILE = "HANDOVER.md"
 
 HANDOVER_WORKER_PROMPT = """\
 You are approaching context capacity. Before this session ends, write a file

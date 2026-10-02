@@ -665,8 +665,85 @@ async def test_no_threshold_means_no_early_end(tmp_path):
 async def test_checkpoint_turn_is_not_ended_at_the_threshold(tmp_path):
     big = _tool_call_events("list_dir", {}, call_id="c1")
     big[-1]["usage"] = {"prompt_tokens": 90_000, "completion_tokens": 5}
-    chat = _ScriptedChat(big, _text_events("HANDOVER_COMPLETE"))
+    chat = _ScriptedChat(big, _write_handover(), _text_events("HANDOVER_COMPLETE"))
     session = _session(tmp_path, chat, context_limit=89_600)
     result = await session.run_turn("write the handover", checkpoint=True)
     assert result.chunks[-1] == "HANDOVER_COMPLETE"
-    assert len(chat.bodies) == 2  # the checkpoint turn ran to its final reply
+    assert len(chat.bodies) == 3  # the checkpoint turn ran to its final reply
+
+
+def _write_handover(text: str = "## GOAL\ng\n", call_id: str = "h1"):
+    return _tool_call_events("write_file", {"path": "HANDOVER.md", "content": text}, call_id=call_id)
+
+
+async def test_checkpoint_turn_that_claims_done_without_the_document_is_told_so(tmp_path):
+    # Seen live with Mercury: the handover prompt is answered by carrying on with
+    # the task and then claiming HANDOVER_COMPLETE, with no HANDOVER.md written.
+    chat = _ScriptedChat(
+        _text_events("HANDOVER_COMPLETE"), _write_handover(), _text_events("HANDOVER_COMPLETE")
+    )
+    session = _session(tmp_path, chat)
+    result = await session.run_turn("write the handover", checkpoint=True)
+    assert (tmp_path / "work" / "HANDOVER.md").read_text() == "## GOAL\ng\n"
+    assert result.chunks[-1] == "HANDOVER_COMPLETE"
+    nudge = chat.bodies[1]["messages"][-1]
+    assert nudge["role"] == "user" and "has not been written in this turn" in nudge["content"]
+
+
+async def test_checkpoint_turn_only_writes_the_handover_document(tmp_path):
+    chat = _ScriptedChat(
+        _tool_call_events("write_file", {"path": "feature.py", "content": "x = 1\n"}, call_id="c1"),
+        _tool_call_events(
+            "edit_file", {"path": "seed.py", "old_string": "a", "new_string": "b"}, call_id="c2"
+        ),
+        _write_handover(),
+        _text_events("HANDOVER_COMPLETE"),
+        _tool_call_events("write_file", {"path": "feature.py", "content": "x = 1\n"}, call_id="c3"),
+        _text_events("done"),
+    )
+    session = _session(tmp_path, chat)
+    work = tmp_path / "work"
+    (work / "seed.py").write_text("a\n")
+    await session.run_turn("write the handover", checkpoint=True)
+    assert not (work / "feature.py").exists()
+    assert (work / "seed.py").read_text() == "a\n"
+    refusals = [m["content"] for m in session.messages if m["role"] == "tool"][:2]
+    assert all("the only file you may write is HANDOVER.md" in r for r in refusals)
+    # The limit belongs to the handover turn alone: the next turn writes freely.
+    await session.run_turn("carry on")
+    assert (work / "feature.py").read_text() == "x = 1\n"
+
+
+async def test_checkpoint_turn_does_not_accept_a_document_left_by_an_earlier_leg(tmp_path):
+    chat = _ScriptedChat(
+        _text_events("HANDOVER_COMPLETE"),
+        _write_handover("## GOAL\nleg two\n"),
+        _text_events("HANDOVER_COMPLETE"),
+    )
+    session = _session(tmp_path, chat)
+    (tmp_path / "work" / "HANDOVER.md").write_text("## GOAL\nleg one\n")
+    await session.run_turn("write the handover", checkpoint=True)
+    assert (tmp_path / "work" / "HANDOVER.md").read_text() == "## GOAL\nleg two\n"
+    assert len(chat.bodies) == 3
+
+
+async def test_checkpoint_turn_asks_for_the_marker_when_only_the_document_is_there(tmp_path):
+    chat = _ScriptedChat(
+        _write_handover(), _text_events("I wrote the file."), _text_events("HANDOVER_COMPLETE")
+    )
+    session = _session(tmp_path, chat)
+    result = await session.run_turn("write the handover", checkpoint=True)
+    assert result.chunks[-1] == "HANDOVER_COMPLETE"
+    assert chat.bodies[2]["messages"][-1]["content"] == (
+        "HANDOVER.md is written. Reply with only: HANDOVER_COMPLETE"
+    )
+
+
+async def test_checkpoint_turn_gives_up_after_its_nudges(tmp_path):
+    # Three refusals to write: the turn ends and the loop's own check escalates.
+    chat = _ScriptedChat(*[_text_events("HANDOVER_COMPLETE") for _ in range(3)])
+    session = _session(tmp_path, chat)
+    result = await session.run_turn("write the handover", checkpoint=True)
+    assert len(chat.bodies) == 3 and not chat.calls
+    assert not (tmp_path / "work" / "HANDOVER.md").exists()
+    assert result.chunks[-1] == "HANDOVER_COMPLETE"

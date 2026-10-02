@@ -54,6 +54,7 @@ from orchestrator.executor import (
     resolve_proxy_cli,
 )
 from orchestrator.guardrails import bash_allowed
+from orchestrator.handover import HANDOVER_FILE, is_handover_complete
 from orchestrator.ports import OnText, TurnResult
 from orchestrator.state import CallLatency
 from orchestrator.tools import (
@@ -88,6 +89,9 @@ MAX_TOOL_OUTPUT_CHARS = 30_000
 # A shell command that creates a commit (`git commit`, `git -C x commit ...`).
 _GIT_COMMIT = re.compile(r"\bgit\b[^;&|\n]*\bcommit\b")
 TOOL_AUDIT_FILE = "worker-tools.jsonl"
+# How often the handover turn is told what is still missing before it is left
+# to fail (the loop then escalates, as it always did).
+CHECKPOINT_NUDGES = 2
 AUDIT_RESULT_CHARS = 500
 
 # A malformed or unterminated SSE stream must not grow one buffered line without bound.
@@ -529,6 +533,7 @@ class OpenAICompatWorkerSession:
         # leaves a full transcript; this is the Mercury Worker's equivalent, so
         # a command that reached outside its assignment is visible afterwards.
         self.audit_path = state_path.parent / TOOL_AUDIT_FILE
+        self._checkpoint = False
         self.messages: list[dict] = [{"role": "system", "content": build_system_prompt()}]
 
     async def run_turn(
@@ -536,6 +541,11 @@ class OpenAICompatWorkerSession:
     ) -> TurnResult:
         self.messages.append({"role": "user", "content": user_message})
         result = TurnResult()
+        # The handover turn: file writes are held to the handover document, and
+        # the turn does not end until that document exists (see _checkpoint_gap).
+        self._checkpoint = checkpoint
+        doc_before = self._handover_doc() if checkpoint else None
+        nudges = 0
         for _ in range(self._max_tool_rounds):
             call = await self._call_model_with_retry()
             # One on_text per model call, not per stream delta: the loop prefixes
@@ -556,7 +566,16 @@ class OpenAICompatWorkerSession:
                 ]
             self.messages.append(assistant)
             if not call.tool_calls:
-                return result
+                gap = self._checkpoint_gap(doc_before, call.content) if checkpoint else None
+                if gap is None or nudges >= CHECKPOINT_NUDGES:
+                    return result
+                # A fast model tends to answer the handover prompt by carrying
+                # on with the task and then claiming HANDOVER_COMPLETE (seen
+                # live 2026-10-02, 2 of 2). Say what is missing and go on.
+                nudges += 1
+                logger.info("openai-compat worker: handover turn incomplete (%s)", gap)
+                self.messages.append({"role": "user", "content": gap})
+                continue
             tools_started = self._clock()
             for tc in call.tool_calls:
                 output = await self._run_tool(tc["name"], tc["arguments"])
@@ -587,6 +606,29 @@ class OpenAICompatWorkerSession:
         if on_text is not None:
             on_text(note)
         return result
+
+    def _handover_doc(self) -> str | None:
+        """The handover document's current text, or None when there is none."""
+        try:
+            return (self._root / HANDOVER_FILE).read_text(encoding="utf-8")
+        except (OSError, UnicodeDecodeError):
+            return None
+
+    def _checkpoint_gap(self, doc_before: str | None, answer: str) -> str | None:
+        """What the handover turn still owes, as the message to send the model,
+        or None when it is complete: the document was written in THIS turn (a
+        leftover from an earlier leg does not count) and the answer carries the
+        completion marker the loop checks for."""
+        doc = self._handover_doc()
+        if doc is None or doc == doc_before:
+            return (
+                f"{HANDOVER_FILE} has not been written in this turn. Do not continue the task. "
+                f"Call write_file with path {HANDOVER_FILE} and every section the handover "
+                "instructions list, then reply with only: HANDOVER_COMPLETE"
+            )
+        if not is_handover_complete(answer or ""):
+            return f"{HANDOVER_FILE} is written. Reply with only: HANDOVER_COMPLETE"
+        return None
 
     def _account(self, result: TurnResult, call: _ModelCall) -> None:
         if call.content:
@@ -867,11 +909,24 @@ class OpenAICompatWorkerSession:
         numbered = "\n".join(f"{start + i}\t{line}" for i, line in enumerate(chosen))
         return _truncate(numbered) or "(empty file)"
 
+    def _checkpoint_refusal(self, path: Path) -> str | None:
+        """On the handover turn the session is about to be replaced, so the only
+        file worth writing is the handover document; unfinished work is described
+        there (IN FLIGHT), not continued."""
+        if not self._checkpoint or path == self._root / HANDOVER_FILE:
+            return None
+        return (
+            f"error: this is the handover turn, the only file you may write is {HANDOVER_FILE}. "
+            "Do not continue the task; list unfinished work under IN FLIGHT in that file."
+        )
+
     def _write_file(self, args: dict) -> str:
         try:
             path = self._confined(args["path"])
         except PermissionError as e:
             return str(e)
+        if (refusal := self._checkpoint_refusal(path)) is not None:
+            return refusal
         path.parent.mkdir(parents=True, exist_ok=True)
         content = args["content"]
         path.write_text(content, encoding="utf-8")
@@ -882,6 +937,8 @@ class OpenAICompatWorkerSession:
             path = self._confined(args["path"])
         except PermissionError as e:
             return str(e)
+        if (refusal := self._checkpoint_refusal(path)) is not None:
+            return refusal
         text = path.read_text(encoding="utf-8")
         old, new = args["old_string"], args["new_string"]
         count = text.count(old) if old else 0

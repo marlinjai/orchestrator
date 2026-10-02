@@ -45,6 +45,7 @@ from pydantic import BaseModel, Field, ValidationError
 from rich.console import Console
 
 from orchestrator.executor import resolve_executor
+from orchestrator.handover import HANDOVER_FILE
 from orchestrator.parse import parse_frontmatter
 from orchestrator.repo_registry import resolve_repo_policy
 from orchestrator.state import HeldOutRecord, State, TaskStatus, load_state, save_state
@@ -61,7 +62,6 @@ console = Console()
 
 MAX_SLICES = 8
 SPRINT_FILE = "sprint.json"
-HANDOVER_FILE = "HANDOVER.md"
 _STOP_POLL_S = 2.0
 
 SliceStatus = Literal["pending", "running", "completed", "escalated", "stopped", "failed"]

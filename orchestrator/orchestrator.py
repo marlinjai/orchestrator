@@ -35,6 +35,7 @@ from orchestrator.guardrails import (
     wall_clock_cap_hit,
 )
 from orchestrator.handover import (
+    HANDOVER_FILE,
     build_handover_prompt,
     is_handover_complete,
     seed_fresh_session_message,
@@ -522,7 +523,7 @@ async def _execute_handover(
     reconcile(state, work_dir)
     save_state(state_path, state)
 
-    doc_path = work_dir / "HANDOVER.md"
+    doc_path = work_dir / HANDOVER_FILE
 
     if not is_handover_complete(worker_output) or not doc_path.exists():
         state.status = "escalated"
