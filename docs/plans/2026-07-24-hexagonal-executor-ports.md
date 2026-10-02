@@ -207,6 +207,19 @@ Four Mercury-only remeasures (the race harness with `--cohorts mercury`, 20 atte
 
 The loop tail is gone (20 of 20 attempts in one iteration) and the mean is the lowest of any run. The final median is higher because the transport changed between runs: since secrets-proxy caller identity (orchestrator#32) every model call spawns the `secrets-proxy-call` Node CLI and mints a token, roughly 0.4s more per call on a Worker that makes 15 to 45 short calls per task (a dated ROADMAP line). The two hidden-test misses in the final run are ordinary quality misses, not loops. Remaining outliers (80 to 100s) are provider stalls now bounded by the 60s timeout.
 
+**Reality update 2026-10-02, the transport overhead is recovered.** The Worker now keeps one `secrets-proxy-call forward-session` process per session (secrets-proxy#27) instead of spawning the CLI per model call. Remeasure on the same 10 goals, Mercury cohort, 20 attempts:
+
+| Mercury, per attempt (20) | Final above (CLI per call) | Session transport |
+|---|---|---|
+| Hidden tests green | 18 | 20 |
+| One iteration | 20 | 20 |
+| Median | 21.2s | 15.7s |
+| Mean | 29.2s | 23.4s |
+| Transport overhead per call, median (response minus provider server time) | 662ms | 259ms |
+| Time to first token per call, median | 998ms | 592ms |
+
+The original race run on the shared-token transport had a per-call overhead median of 295ms, so the session transport is at least as fast as what the caller-identity switch replaced. Two of 298 calls stalled at the provider; both recovered through the 60s timeout, a restarted session process and the in-place retry.
+
 ## Verification
 
 - Existing suite green after E2 with no operator config; golden `state.json` invariance test.

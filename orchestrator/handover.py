@@ -17,6 +17,8 @@ from orchestrator.state import State
 
 
 _HANDOVER_COMPLETE_MARKER = "HANDOVER_COMPLETE"
+# Written by the Worker at the root of the tree it works in.
+HANDOVER_FILE = "HANDOVER.md"
 
 HANDOVER_WORKER_PROMPT = """\
 You are approaching context capacity. Before this session ends, write a file
@@ -67,6 +69,24 @@ def build_handover_prompt(state: State) -> str:
 
 def is_handover_complete(worker_output: str) -> bool:
     return _HANDOVER_COMPLETE_MARKER in worker_output
+
+
+def remove_untracked_handover(root: Path) -> bool:
+    """Delete the Worker's HANDOVER.md from the tree once it has been read,
+    unless the repo tracks a file of that name (then it is the project's own).
+    Returns whether a file was removed."""
+    doc = root / HANDOVER_FILE
+    try:
+        tracked = subprocess.run(
+            ["git", "ls-files", "--error-unmatch", HANDOVER_FILE], cwd=root, capture_output=True
+        ).returncode == 0
+    except OSError:
+        # No git executable (in-place run on a non-git project): nothing is tracked.
+        tracked = False
+    if doc.exists() and not tracked:
+        doc.unlink()
+        return True
+    return False
 
 
 def _git_log_shas(project_dir: Path, baseline_ref: str) -> set[str]:

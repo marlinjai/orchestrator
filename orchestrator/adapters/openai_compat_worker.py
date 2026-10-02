@@ -31,6 +31,7 @@ corrupt the experiment.
 from __future__ import annotations
 
 import asyncio
+import collections
 import json
 import logging
 import os
@@ -53,6 +54,7 @@ from orchestrator.executor import (
     resolve_proxy_cli,
 )
 from orchestrator.guardrails import bash_allowed
+from orchestrator.handover import HANDOVER_FILE, is_handover_complete
 from orchestrator.ports import OnText, TurnResult
 from orchestrator.state import CallLatency
 from orchestrator.tools import (
@@ -87,10 +89,18 @@ MAX_TOOL_OUTPUT_CHARS = 30_000
 # A shell command that creates a commit (`git commit`, `git -C x commit ...`).
 _GIT_COMMIT = re.compile(r"\bgit\b[^;&|\n]*\bcommit\b")
 TOOL_AUDIT_FILE = "worker-tools.jsonl"
+# How often the handover turn is told what is still missing before it is left
+# to fail (the loop then escalates, as it always did).
+CHECKPOINT_NUDGES = 2
 AUDIT_RESULT_CHARS = 500
 
 # A malformed or unterminated SSE stream must not grow one buffered line without bound.
 _MAX_SSE_LINE_BYTES = 1 << 20
+# One frame line from the forward-session CLI (a JSON-escaped network chunk).
+_MAX_FRAME_LINE_BYTES = 4 << 20
+_STDERR_TAIL_LINES = 20
+# How long a closing forward-session process gets to exit before it is killed.
+_SESSION_EXIT_GRACE_S = 2.0
 
 # A denylist can't keep up with whatever secret the orchestrator's own launch
 # environment happens to carry (DATABASE_URL, a notify webhook, ...); only these
@@ -115,8 +125,9 @@ _NETWORK_FAILURE_RE = re.compile(
 
 
 def _cli_failure(returncode: int, stderr: str) -> ProviderError:
-    """Classify a failed ``secrets-proxy-call forward`` run: a retryable HTTP
-    status or a network-level failure is transient, anything else is terminal."""
+    """Classify a failed ``secrets-proxy-call`` call (its error frame, or its
+    stderr when the process exited): a retryable HTTP status or a network-level
+    failure is transient, anything else is terminal."""
     reason = stderr.strip()[:300]
     if _NETWORK_FAILURE_RE.search(reason):
         transient = True
@@ -124,27 +135,155 @@ def _cli_failure(returncode: int, stderr: str) -> ProviderError:
         match = _HTTP_STATUS_RE.search(reason)
         transient = bool(match) and int(match.group(1)) in TRANSIENT_HTTP_STATUSES
     return ProviderError(
-        f"secrets-proxy-call forward exited {returncode}: {reason}", transient=transient
+        f"secrets-proxy-call forward-session failed (exit {returncode}): {reason}",
+        transient=transient,
     )
 
 
-def forward_chat_stream(
-    provider: str,
-    *,
-    cli_path: str | None = None,
-    timeout_s: float = STREAM_READ_TIMEOUT_S,
-) -> ChatStream:
-    """The production ChatStream: pipe the request body into the
-    secrets-proxy-call CLI's ``forward`` subcommand for ``provider`` and yield
-    each SSE ``data:`` event it relays as parsed JSON until ``[DONE]``.
+def _status_failure(status: int, body: str) -> ProviderError:
+    """A non-2xx answer from the provider forward, with the start of its body."""
+    detail = body.strip()[:300]
+    return ProviderError(
+        f"provider forward returned HTTP {status}" + (f": {detail}" if detail else ""),
+        transient=status in TRANSIENT_HTTP_STATUSES,
+    )
 
-    The CLI mints its own short-lived token from the operator's machine
-    identity, so this process holds neither the provider key nor a proxy token.
+
+class ForwardSession:
+    """The production ChatStream: one long-lived ``secrets-proxy-call
+    forward-session`` process per Worker session, called once per model call.
+
+    The CLI mints its token from the operator's machine identity once and keeps
+    it, so this process holds neither the provider key nor a proxy token, and a
+    model call no longer pays for a process start, a credential read and a
+    login (about 0.4s each, measured 2026-10-02). Protocol: one JSON request
+    line in, id-tagged JSON frames out (``chunk`` text, ``end`` with the HTTP
+    status, ``error``); a new request makes the CLI abandon the one in flight.
+
+    The process is started on first use and restarted after it died or was
+    killed for a stalled stream, so an in-place retry of a call just works.
     """
-    route = PROVIDER_FORWARD_ROUTES[provider]
 
-    def stream(body: dict) -> Iterator[dict]:
-        resolved = cli_path if cli_path is not None else resolve_proxy_cli()
+    def __init__(
+        self,
+        provider: str,
+        *,
+        cli_path: str | None = None,
+        timeout_s: float = STREAM_READ_TIMEOUT_S,
+    ) -> None:
+        self._route = PROVIDER_FORWARD_ROUTES[provider]
+        self._cli_path = cli_path
+        self._timeout_s = timeout_s
+        self._lock = threading.Lock()
+        self._proc: subprocess.Popen | None = None
+        self._stderr: collections.deque[str] = collections.deque(maxlen=_STDERR_TAIL_LINES)
+        self._stderr_thread: threading.Thread | None = None
+        self._next_id = 0
+
+    def __call__(self, body: dict) -> Iterator[dict]:
+        with self._lock:
+            proc = self._ensure_process()
+            self._next_id += 1
+            request_id = self._next_id
+            # A stalled stream is killed after timeout_s of silence so a hung
+            # forward cannot wedge the run; the limit restarts on every frame.
+            timed_out = threading.Event()
+
+            def _kill_on_timeout() -> None:
+                timed_out.set()
+                proc.kill()
+
+            timer = threading.Timer(self._timeout_s, _kill_on_timeout)
+            timer.start()
+            try:
+                try:
+                    line = json.dumps({"id": request_id, "body": body}) + "\n"
+                    proc.stdin.write(line.encode("utf-8"))
+                    proc.stdin.flush()
+                except OSError:
+                    pass  # the CLI died; the read below reports why
+                buffered = ""
+                seen_text: list[str] = []
+                while True:
+                    raw = proc.stdout.readline(_MAX_FRAME_LINE_BYTES + 1)
+                    if not raw:
+                        raise self._died(proc, timed_out)
+                    timer.cancel()
+                    timer = threading.Timer(self._timeout_s, _kill_on_timeout)
+                    timer.start()
+                    if len(raw) > _MAX_FRAME_LINE_BYTES:
+                        self._kill(proc)
+                        raise ProviderError("provider stream frame exceeds 4 MiB", transient=False)
+                    try:
+                        frame = json.loads(raw)
+                    except json.JSONDecodeError as e:
+                        self._kill(proc)
+                        raise ProviderError(
+                            f"malformed frame from secrets-proxy-call: {raw[:200]!r}", transient=False
+                        ) from e
+                    if not isinstance(frame, dict) or frame.get("id") != request_id:
+                        continue  # the tail of an earlier call this one abandoned
+                    if "error" in frame:
+                        raise _cli_failure(1, str(frame["error"]))
+                    if "end" in frame:
+                        status = frame["end"].get("status") if isinstance(frame["end"], dict) else None
+                        if not isinstance(status, int) or not 200 <= status < 300:
+                            raise _status_failure(
+                                status if isinstance(status, int) else 0, "".join(seen_text)
+                            )
+                        return
+                    chunk = frame.get("chunk")
+                    if not isinstance(chunk, str):
+                        continue
+                    if len(seen_text) < 8:
+                        seen_text.append(chunk[:300])
+                    buffered += chunk
+                    *lines, buffered = buffered.split("\n")
+                    if len(buffered) > _MAX_SSE_LINE_BYTES:
+                        self._kill(proc)
+                        raise ProviderError("provider stream line exceeds 1 MiB", transient=False)
+                    for sse_line in lines:
+                        sse_line = sse_line.strip()
+                        if not sse_line.startswith("data:"):
+                            continue
+                        data = sse_line[len("data:"):].strip()
+                        if data == "[DONE]":
+                            return
+                        try:
+                            yield json.loads(data)
+                        except json.JSONDecodeError as e:
+                            raise ProviderError(
+                                f"malformed stream event: {data[:200]!r}", transient=False
+                            ) from e
+            finally:
+                timer.cancel()
+
+    def close(self) -> None:
+        """End the CLI process. Safe to call twice; a later call starts a new one."""
+        # Deliberately without the call lock: a call still reading (a cancelled
+        # turn) must be ended by this, not waited for.
+        proc, self._proc = self._proc, None
+        if proc is None:
+            return
+        try:
+            proc.stdin.close()
+        except OSError:
+            pass
+        try:
+            # It exits on its own once stdin closes, unless a stream is still open.
+            proc.wait(timeout=_SESSION_EXIT_GRACE_S)
+        except subprocess.TimeoutExpired:
+            proc.kill()
+            proc.wait()
+        self._reap(proc)
+
+    def _ensure_process(self) -> subprocess.Popen:
+        if self._proc is not None and self._proc.poll() is None:
+            return self._proc
+        if self._proc is not None:
+            self._reap(self._proc)
+            self._proc = None
+        resolved = self._cli_path if self._cli_path is not None else resolve_proxy_cli()
         if not resolved:
             raise ProviderError(
                 f"secrets-proxy-call CLI not found (looked for ${PROXY_CLI_ENV} or "
@@ -153,80 +292,78 @@ def forward_chat_stream(
             )
         try:
             proc = subprocess.Popen(
-                ["node", str(resolved), "forward", route],
+                ["node", str(resolved), "forward-session", self._route],
                 stdin=subprocess.PIPE,
                 stdout=subprocess.PIPE,
                 stderr=subprocess.PIPE,
             )
         except OSError as e:
-            raise ProviderError(f"secrets-proxy-call forward failed to run: {e}", transient=True) from e
-        # The proxy stream ends when the CLI exits; a stalled stream is killed
-        # after timeout_s so a hung forward cannot wedge the run.
-        timed_out = threading.Event()
-
-        def _kill_on_timeout() -> None:
-            timed_out.set()
-            proc.kill()
-
-        timer = threading.Timer(timeout_s, _kill_on_timeout)
-        timer.start()
-
-        def _rearm() -> None:
-            # The limit is on silence, so every line that arrives restarts it.
-            nonlocal timer
-            timer.cancel()
-            timer = threading.Timer(timeout_s, _kill_on_timeout)
-            timer.start()
-
-        stderr_chunks: list[bytes] = []
-        stderr_thread = threading.Thread(
-            target=lambda: stderr_chunks.append(proc.stderr.read()), daemon=True
+            raise ProviderError(
+                f"secrets-proxy-call forward-session failed to run: {e}", transient=True
+            ) from e
+        # Drained continuously: a long-lived process must never block on a full
+        # stderr pipe, and only the tail is kept for a failure message.
+        self._stderr = collections.deque(maxlen=_STDERR_TAIL_LINES)
+        self._stderr_thread = threading.Thread(
+            target=self._drain_stderr, args=(proc, self._stderr), daemon=True
         )
-        stderr_thread.start()
-        try:
-            try:
-                proc.stdin.write(json.dumps(body).encode("utf-8"))
-                proc.stdin.close()
-            except OSError:
-                pass  # the CLI died early; its exit status below carries the reason
-            while True:
-                raw = proc.stdout.readline(_MAX_SSE_LINE_BYTES + 1)
-                if not raw:
-                    break
-                _rearm()
-                if len(raw) > _MAX_SSE_LINE_BYTES:
-                    raise ProviderError("provider stream line exceeds 1 MiB", transient=False)
-                line = raw.decode("utf-8", errors="replace").strip()
-                if not line.startswith("data:"):
-                    continue
-                data = line[len("data:"):].strip()
-                if data == "[DONE]":
-                    return
-                try:
-                    yield json.loads(data)
-                except json.JSONDecodeError as e:
-                    raise ProviderError(
-                        f"malformed stream event: {data[:200]!r}", transient=False
-                    ) from e
-            returncode = proc.wait()
-            stderr_thread.join(timeout=5)
-            if timed_out.is_set():
-                raise ProviderError(
-                    f"provider stream timed out after {timeout_s:g}s", transient=True
-                )
-            if returncode != 0:
-                raise _cli_failure(
-                    returncode, b"".join(stderr_chunks).decode("utf-8", errors="replace")
-                )
-        finally:
-            timer.cancel()
-            if proc.poll() is None:
-                proc.kill()
-            proc.wait()
-            for pipe in (proc.stdin, proc.stdout, proc.stderr):
-                pipe.close()
+        self._stderr_thread.start()
+        self._proc = proc
+        return proc
 
-    return stream
+    @staticmethod
+    def _drain_stderr(proc: subprocess.Popen, tail: collections.deque) -> None:
+        try:
+            for raw in iter(proc.stderr.readline, b""):
+                tail.append(raw.decode("utf-8", errors="replace"))
+        except (OSError, ValueError):
+            pass  # the pipe was closed under us while the process was reaped
+
+    def _died(self, proc: subprocess.Popen, timed_out: threading.Event) -> ProviderError:
+        """The CLI's stdout ended mid-call: it was killed for silence, or it exited."""
+        returncode = proc.wait()
+        if self._stderr_thread is not None:
+            self._stderr_thread.join(timeout=5)
+        stderr = "".join(self._stderr)
+        self._reap(proc)
+        if self._proc is proc:
+            self._proc = None
+        if timed_out.is_set():
+            return ProviderError(
+                f"provider stream timed out after {self._timeout_s:g}s", transient=True
+            )
+        if "unknown command forward-session" in stderr:
+            return ProviderError(
+                "the secrets-proxy-call CLI is older than its forward-session mode; "
+                "pull and rebuild secrets-proxy/mcp (npm ci && npm run build)",
+                transient=False,
+            )
+        return _cli_failure(returncode, stderr)
+
+    def _kill(self, proc: subprocess.Popen) -> None:
+        proc.kill()
+        proc.wait()
+        self._reap(proc)
+        if self._proc is proc:
+            self._proc = None
+
+    @staticmethod
+    def _reap(proc: subprocess.Popen) -> None:
+        for pipe in (proc.stdin, proc.stdout, proc.stderr):
+            try:
+                pipe.close()
+            except OSError:
+                pass
+
+
+def forward_chat_stream(
+    provider: str,
+    *,
+    cli_path: str | None = None,
+    timeout_s: float = STREAM_READ_TIMEOUT_S,
+) -> ForwardSession:
+    """The production ChatStream for ``provider``, see ``ForwardSession``."""
+    return ForwardSession(provider, cli_path=cli_path, timeout_s=timeout_s)
 
 
 def build_system_prompt() -> str:
@@ -396,6 +533,7 @@ class OpenAICompatWorkerSession:
         # leaves a full transcript; this is the Mercury Worker's equivalent, so
         # a command that reached outside its assignment is visible afterwards.
         self.audit_path = state_path.parent / TOOL_AUDIT_FILE
+        self._checkpoint = False
         self.messages: list[dict] = [{"role": "system", "content": build_system_prompt()}]
 
     async def run_turn(
@@ -403,6 +541,11 @@ class OpenAICompatWorkerSession:
     ) -> TurnResult:
         self.messages.append({"role": "user", "content": user_message})
         result = TurnResult()
+        # The handover turn: file writes are held to the handover document, and
+        # the turn does not end until that document exists (see _checkpoint_gap).
+        self._checkpoint = checkpoint
+        doc_before = self._handover_doc() if checkpoint else None
+        nudges = 0
         for _ in range(self._max_tool_rounds):
             call = await self._call_model_with_retry()
             # One on_text per model call, not per stream delta: the loop prefixes
@@ -423,7 +566,16 @@ class OpenAICompatWorkerSession:
                 ]
             self.messages.append(assistant)
             if not call.tool_calls:
-                return result
+                gap = self._checkpoint_gap(doc_before, call.content) if checkpoint else None
+                if gap is None or nudges >= CHECKPOINT_NUDGES:
+                    return result
+                # A fast model tends to answer the handover prompt by carrying
+                # on with the task and then claiming HANDOVER_COMPLETE (seen
+                # live 2026-10-02, 2 of 2). Say what is missing and go on.
+                nudges += 1
+                logger.info("openai-compat worker: handover turn incomplete (%s)", gap)
+                self.messages.append({"role": "user", "content": gap})
+                continue
             tools_started = self._clock()
             for tc in call.tool_calls:
                 output = await self._run_tool(tc["name"], tc["arguments"])
@@ -454,6 +606,29 @@ class OpenAICompatWorkerSession:
         if on_text is not None:
             on_text(note)
         return result
+
+    def _handover_doc(self) -> str | None:
+        """The handover document's current text, or None when there is none."""
+        try:
+            return (self._root / HANDOVER_FILE).read_text(encoding="utf-8")
+        except (OSError, UnicodeDecodeError):
+            return None
+
+    def _checkpoint_gap(self, doc_before: str | None, answer: str) -> str | None:
+        """What the handover turn still owes, as the message to send the model,
+        or None when it is complete: the document was written in THIS turn (a
+        leftover from an earlier leg does not count) and the answer carries the
+        completion marker the loop checks for."""
+        doc = self._handover_doc()
+        if doc is None or doc == doc_before:
+            return (
+                f"{HANDOVER_FILE} has not been written in this turn. Do not continue the task. "
+                f"Call write_file with path {HANDOVER_FILE} and every section the handover "
+                "instructions list, then reply with only: HANDOVER_COMPLETE"
+            )
+        if not is_handover_complete(answer or ""):
+            return f"{HANDOVER_FILE} is written. Reply with only: HANDOVER_COMPLETE"
+        return None
 
     def _account(self, result: TurnResult, call: _ModelCall) -> None:
         if call.content:
@@ -619,6 +794,10 @@ class OpenAICompatWorkerSession:
                 rel = self._confined(args.get("path")).relative_to(self._root)
             except (PermissionError, ValueError):
                 return
+            if self._checkpoint and str(rel) == HANDOVER_FILE:
+                # The loop's own document, removed again once the fresh
+                # session is seeded: not a file the task changed.
+                return
             await self._update_state({"kind": "file_touched", "path": str(rel)})
         elif (
             name == "run_command"
@@ -734,11 +913,24 @@ class OpenAICompatWorkerSession:
         numbered = "\n".join(f"{start + i}\t{line}" for i, line in enumerate(chosen))
         return _truncate(numbered) or "(empty file)"
 
+    def _checkpoint_refusal(self, path: Path) -> str | None:
+        """On the handover turn the session is about to be replaced, so the only
+        file worth writing is the handover document; unfinished work is described
+        there (IN FLIGHT), not continued."""
+        if not self._checkpoint or path == self._root / HANDOVER_FILE:
+            return None
+        return (
+            f"error: this is the handover turn, the only file you may write is {HANDOVER_FILE}. "
+            "Do not continue the task; list unfinished work under IN FLIGHT in that file."
+        )
+
     def _write_file(self, args: dict) -> str:
         try:
             path = self._confined(args["path"])
         except PermissionError as e:
             return str(e)
+        if (refusal := self._checkpoint_refusal(path)) is not None:
+            return refusal
         path.parent.mkdir(parents=True, exist_ok=True)
         content = args["content"]
         path.write_text(content, encoding="utf-8")
@@ -749,6 +941,8 @@ class OpenAICompatWorkerSession:
             path = self._confined(args["path"])
         except PermissionError as e:
             return str(e)
+        if (refusal := self._checkpoint_refusal(path)) is not None:
+            return refusal
         text = path.read_text(encoding="utf-8")
         old, new = args["old_string"], args["new_string"]
         count = text.count(old) if old else 0
@@ -820,11 +1014,18 @@ class OpenAICompatWorkerAdapter:
 
     @asynccontextmanager
     async def open(self) -> AsyncIterator[OpenAICompatWorkerSession]:
-        yield OpenAICompatWorkerSession(
-            profile=self._profile,
-            chat=self._chat,
-            work_dir=self._work_dir,
-            state_path=self._state_path,
-            clock=self._clock,
-            context_limit=self._context_limit,
-        )
+        try:
+            yield OpenAICompatWorkerSession(
+                profile=self._profile,
+                chat=self._chat,
+                work_dir=self._work_dir,
+                state_path=self._state_path,
+                clock=self._clock,
+                context_limit=self._context_limit,
+            )
+        finally:
+            # The transport's CLI process lives as long as the Worker session;
+            # the next session starts its own on first use.
+            close = getattr(self._chat, "close", None)
+            if close is not None:
+                await asyncio.to_thread(close)

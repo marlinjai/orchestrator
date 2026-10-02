@@ -1,3 +1,4 @@
+import json
 import os
 import subprocess
 from contextlib import contextmanager
@@ -842,3 +843,74 @@ async def test_mercury_worker_runs_a_real_turn_and_completes(tmp_path: Path, exe
     assert rec.executor == "mercury" and rec.provider == "inception"
     assert rec.call_count == 2
     assert state.usage[-1].output_tokens == 8
+
+
+async def test_handover_survives_into_the_fresh_leg(tmp_path: Path, executor_home: Path):
+    """The token watcher ends a Mercury turn, the loop hands over, and the fresh
+    leg finishes the task. What the handover recorded (the handover itself, its
+    turn's usage and record) must still be in state afterwards: the loop used to
+    carry on with its pre-handover copy and write it back over them."""
+    (executor_home / "config.toml").write_text(
+        '[executors.worker]\nmodel_id = "mercury-2"\nprovider = "inception"\n'
+        "\n[marlin_proxy.thresholds]\ncontext_handover_tokens = 1000\n"
+    )
+    repo = _repo_with_test(tmp_path)
+    cfg = _cfg_for_repo(tmp_path, repo, verify="true")
+    cfg.held_out_override = "test -f note.txt"
+    cfg.max_iterations = 5  # leg 1, the handover turn and leg 2 each count
+    doc ="## GOAL\nwrite note.txt\n\n## VERIFIED DONE (git-confirmed only)\n\n## NEXT EXACT ACTION\nwrite note.txt\n"
+
+    def scripted(provider, **kw):
+        calls = [
+            # Leg 1: one tool round, and the prompt is already over the threshold.
+            [
+                _tool_event("c1", "list_dir", "{}"),
+                {"choices": [], "usage": {"prompt_tokens": 1500, "completion_tokens": 5}},
+            ],
+            # The handover turn: write the document, then the marker.
+            [
+                _tool_event("h1", "write_file", json.dumps({"path": "HANDOVER.md", "content": doc})),
+                {"choices": [], "usage": {"prompt_tokens": 1600, "completion_tokens": 40}},
+            ],
+            [
+                {"model": "mercury-2", "choices": [{"delta": {"content": "HANDOVER_COMPLETE"}}]},
+                {"choices": [], "usage": {"prompt_tokens": 1700, "completion_tokens": 3}},
+            ],
+            # Leg 2, a fresh session: do the work.
+            [
+                _tool_event("c2", "write_file", '{"path": "note.txt", "content": "hi"}'),
+                {"choices": [], "usage": {"prompt_tokens": 300, "completion_tokens": 5}},
+            ],
+            [
+                {"model": "mercury-2", "choices": [{"delta": {"content": "wrote note.txt"}}]},
+                {"choices": [], "usage": {"prompt_tokens": 320, "completion_tokens": 3}},
+            ],
+        ]
+
+        def stream(body):
+            yield from calls.pop(0)
+
+        return stream
+
+    decisions = [
+        ProxyDecision(action="reply", text="Continue.", reasoning="not done"),
+        ProxyDecision(action="stop", text="", reasoning="done"),
+    ]
+    with patch(
+        "orchestrator.adapters.openai_compat_worker.forward_chat_stream", side_effect=scripted
+    ), patch("orchestrator.orchestrator.run_proxy_decision", side_effect=decisions):
+        await run_orchestrator(cfg)
+
+    state = load_state(cfg.state_dir / "state.json")
+    assert state.status == "completed"
+    assert (repo / "note.txt").read_text() == "hi"
+    assert len(state.handovers) == 1 and state.handovers[0].at_turn == 2
+    # Three Worker turns were paid for: leg 1, the handover turn, leg 2.
+    worker_records = [r for r in state.executor_records if r.role == "worker"]
+    assert [r.call_count for r in worker_records] == [1, 2, 2]
+    assert len(state.usage) == 3
+    # The seed carried the document; it must not stay in the tree to be committed.
+    assert not (repo / "HANDOVER.md").exists()
+    # Nor is it a file the task touched.
+    assert [f.path for f in state.files_touched] == ["note.txt"]
+

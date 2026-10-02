@@ -7,6 +7,7 @@ from unittest.mock import patch
 from orchestrator.handover import (
     build_handover_prompt,
     is_handover_complete,
+    remove_untracked_handover,
     seed_fresh_session_message,
     verify_handover_doc,
 )
@@ -203,3 +204,10 @@ def test_seed_includes_leg_number(tmp_path):
     state.handovers.append(Handover(at_turn=5, reason="t", doc=str(doc)))
     seed = seed_fresh_session_message(doc, state, discrepancies=[])
     assert "leg 1" in seed
+
+
+def test_remove_untracked_handover_without_git_executable(tmp_path):
+    (tmp_path / "HANDOVER.md").write_text("x")
+    with patch("orchestrator.handover.subprocess.run", side_effect=FileNotFoundError):
+        assert remove_untracked_handover(tmp_path) is True
+    assert not (tmp_path / "HANDOVER.md").exists()
