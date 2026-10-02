@@ -1,0 +1,139 @@
+{
+  "claude": {
+    "goals": 10,
+    "passed": 10,
+    "pass_rate_pct": 100.0,
+    "median_ttv_ms": 64246.0
+  },
+  "mercury": {
+    "goals": 10,
+    "passed": 7,
+    "pass_rate_pct": 70.0,
+    "median_ttv_ms": 33974.0
+  },
+  "n_ok": true,
+  "cohorts_ran": [
+    "claude",
+    "mercury"
+  ],
+  "verdict_possible": true,
+  "mercury_wins": false,
+  "attempts": {
+    "claude": {
+      "attempts": 20,
+      "green": 20,
+      "one_iteration": 20,
+      "median_s": 65.086,
+      "mean_s": 63.67695
+    },
+    "mercury": {
+      "attempts": 20,
+      "green": 14,
+      "one_iteration": 20,
+      "median_s": 66.514,
+      "mean_s": 78.44475
+    }
+  },
+  "per_goal": {
+    "email-editor-01-segment-numeric": {
+      "claude": {
+        "passed": true,
+        "ttv_ms": 67958.0
+      },
+      "mercury": {
+        "passed": true,
+        "ttv_ms": 31757.0
+      }
+    },
+    "email-editor-02-merge-fallback": {
+      "claude": {
+        "passed": true,
+        "ttv_ms": 66286.0
+      },
+      "mercury": {
+        "passed": true,
+        "ttv_ms": 28238.0
+      }
+    },
+    "email-editor-03-condition-operators": {
+      "claude": {
+        "passed": true,
+        "ttv_ms": 77804.0
+      },
+      "mercury": {
+        "passed": true,
+        "ttv_ms": 34769.0
+      }
+    },
+    "email-editor-04-engagement-clock": {
+      "claude": {
+        "passed": true,
+        "ttv_ms": 45494.0
+      },
+      "mercury": {
+        "passed": true,
+        "ttv_ms": 96115.0
+      }
+    },
+    "email-editor-05-csv-edges": {
+      "claude": {
+        "passed": true,
+        "ttv_ms": 62206.0
+      },
+      "mercury": {
+        "passed": false,
+        "ttv_ms": null
+      }
+    },
+    "hud-01-notes-under-options": {
+      "claude": {
+        "passed": true,
+        "ttv_ms": 49564.0
+      },
+      "mercury": {
+        "passed": true,
+        "ttv_ms": 33179.0
+      }
+    },
+    "hud-02-notion-cover-roundtrip": {
+      "claude": {
+        "passed": true,
+        "ttv_ms": 43190.0
+      },
+      "mercury": {
+        "passed": false,
+        "ttv_ms": null
+      }
+    },
+    "hud-03-switch-company-errors": {
+      "claude": {
+        "passed": true,
+        "ttv_ms": 46714.0
+      },
+      "mercury": {
+        "passed": true,
+        "ttv_ms": 27637.0
+      }
+    },
+    "hud-04-number-and-duration": {
+      "claude": {
+        "passed": true,
+        "ttv_ms": 76887.0
+      },
+      "mercury": {
+        "passed": false,
+        "ttv_ms": null
+      }
+    },
+    "hud-05-youtube-start": {
+      "claude": {
+        "passed": true,
+        "ttv_ms": 68638.0
+      },
+      "mercury": {
+        "passed": true,
+        "ttv_ms": 33038.0
+      }
+    }
+  }
+}

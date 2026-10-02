@@ -1,0 +1,1 @@
+cd packages/analytics && ./node_modules/.bin/vitest run src/__tests__/hidden-engagement-clock.test.ts

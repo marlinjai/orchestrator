@@ -29,6 +29,19 @@ Usage (from the orchestrator repo, with its venv on PATH so ``python3`` has pyte
   python3 scripts/mercury_race.py validate
   python3 scripts/mercury_race.py run --out ~/.orchestrator/mercury-race/<date>
   python3 scripts/mercury_race.py report --out ~/.orchestrator/mercury-race/<date>
+
+Round two, on real repositories (decided 2026-10-02, bench/mercury-round-two):
+``run --bench <dir>`` (repeatable) races the goals of a repo bench instead of
+the textkit benchmark. A repo bench is a directory with ``bench.toml`` and
+``goals/``; every attempt gets a fresh clone of the bench's base repo, prepared
+by the bench's setup command, and the hidden tests are run by the bench's
+held-out command (on hermes: a verifier that runs them as another OS user and
+answers only PASS or FAIL). The harness runs the attempts itself, one
+``orchestrator start`` each, because a best-of worktree would start without the
+repo's installed dependencies. Scoring and the exit criterion are the same.
+
+  python3 scripts/mercury_race.py run --out <dir> \\
+      --bench bench/mercury-round-two/email-editor --bench bench/mercury-round-two/hud
 """
 
 from __future__ import annotations
@@ -42,7 +55,9 @@ import statistics
 import subprocess
 import sys
 import tempfile
+import tomllib
 from concurrent.futures import ThreadPoolExecutor
+from dataclasses import dataclass
 from pathlib import Path
 
 BENCH = Path(__file__).resolve().parent.parent / "bench" / "mercury-race"
@@ -55,6 +70,59 @@ PASS_BAND_POINTS = 10.0
 # Keep pytest and Python from writing caches into the attempt worktrees: an
 # untracked __pycache__ would make a clean worktree look dirty.
 _QUIET_ENV = {"PYTHONDONTWRITEBYTECODE": "1"}
+
+
+@dataclass(frozen=True)
+class RepoBench:
+    """A bench on a real repository (round two), read from ``<dir>/bench.toml``.
+
+    ``base``: the git repo every attempt tree is cloned from. ``setup``: a shell
+    command run in a fresh tree before the Worker starts (install, build), or
+    None. ``held_out``: the hidden-test command, run by the orchestrator with
+    the attempt tree as its working directory; ``{goal}`` in it is replaced by
+    the goal's slug. ``trees``: where attempt trees are created (it must be
+    readable by whoever runs the hidden tests).
+    """
+
+    name: str
+    goals: Path
+    base: Path
+    setup: str | None
+    held_out: str
+    trees: Path
+
+    def goal_slugs(self) -> list[str]:
+        return sorted(p.stem for p in self.goals.glob("*.md"))
+
+
+def load_bench(path: Path) -> RepoBench:
+    """Read ``<path>/bench.toml``. A malformed manifest is an error, never a
+    silently different race."""
+    path = Path(path).expanduser().resolve()
+    manifest = path / "bench.toml"
+    try:
+        data = tomllib.loads(manifest.read_text())
+    except (OSError, tomllib.TOMLDecodeError) as e:
+        raise ValueError(f"cannot read {manifest}: {e}") from e
+    missing = [k for k in ("name", "base", "held_out", "trees") if not isinstance(data.get(k), str) or not data[k]]
+    if missing:
+        raise ValueError(f"{manifest}: missing or empty {', '.join(missing)}")
+    if "{goal}" not in data["held_out"]:
+        raise ValueError(f"{manifest}: held_out must contain {{goal}}, or every goal would run the same hidden tests")
+    setup = data.get("setup")
+    if setup is not None and (not isinstance(setup, str) or not setup.strip()):
+        raise ValueError(f"{manifest}: setup must be a non-empty string when given")
+    goals = path / "goals"
+    if not any(goals.glob("*.md")):
+        raise ValueError(f"{goals}: no goal files")
+    return RepoBench(
+        name=data["name"],
+        goals=goals,
+        base=Path(data["base"]).expanduser(),
+        setup=setup,
+        held_out=data["held_out"],
+        trees=Path(data["trees"]).expanduser(),
+    )
 
 
 def goal_slugs() -> list[str]:
@@ -158,6 +226,85 @@ def _run_one(out: Path, slug: str, cohort: str, attempts: int, max_iterations: i
     return record
 
 
+def _prepare_tree(bench: RepoBench, tree: Path, log) -> bool:
+    """A fresh clone of the bench's base, set up for the Worker. False (with the
+    reason in the log) when the clone or the setup command fails."""
+    tree.parent.mkdir(parents=True, exist_ok=True)
+    steps = [
+        (["git", "clone", "-q", str(bench.base), str(tree)], None),
+        (["git", "config", "user.email", "race@example.invalid"], tree),
+        (["git", "config", "user.name", "race"], tree),
+    ]
+    for argv, cwd in steps:
+        if subprocess.run(argv, cwd=cwd, stdout=log, stderr=subprocess.STDOUT).returncode != 0:
+            return False
+    if bench.setup is None:
+        return True
+    return subprocess.run(bench.setup, shell=True, cwd=tree, stdout=log, stderr=subprocess.STDOUT).returncode == 0
+
+
+def _run_repo_goal(
+    out: Path, bench: RepoBench, slug: str, cohort: str, attempts: int, max_iterations: int
+) -> dict:
+    """One goal of a repo bench for one cohort: ``attempts`` single runs, each
+    in its own prepared clone, folded into the record shape best-of produces."""
+    goal_id = f"{bench.name}-{slug}"
+    base = out / cohort / goal_id
+    cfg_home = base / "config"
+    cfg_home.mkdir(parents=True)
+    if cohort == "mercury":
+        (cfg_home / "config.toml").write_text(MERCURY_CONFIG)
+    home = base / "home"
+    env = {**os.environ, "ORCHESTRATOR_CONFIG_HOME": str(cfg_home), "ORCHESTRATOR_HOME": str(home)}
+    attempt_records: list[dict] = []
+    with open(base / "run.out", "w") as log:
+        for i in range(attempts):
+            task_id = f"race-{cohort}-{goal_id}-attempt-{i}"
+            tree = bench.trees / out.name / cohort / goal_id / f"attempt-{i}"
+            print(f"=== attempt {i}: {tree}", file=log, flush=True)
+            if not _prepare_tree(bench, tree, log):
+                attempt_records.append(
+                    {"attempt_index": i, "task_id": task_id, "status": "setup-failed",
+                     "held_out": None, "time_to_verified_ms": None}
+                )
+                continue
+            cmd = [
+                "orchestrator", "start",
+                "--goal", str(bench.goals / f"{slug}.md"),
+                "--project", str(tree),
+                "--task-id", task_id,
+                "--max-iterations", str(max_iterations),
+                "--max-hours", "0.75",
+                "--held-out", bench.held_out.replace("{goal}", slug),
+            ]
+            subprocess.run(cmd, env=env, stdout=log, stderr=subprocess.STDOUT)
+            state_path = home / "tasks" / task_id / "state.json"
+            state = json.loads(state_path.read_text()) if state_path.exists() else {}
+            attempt = _single_run_cohort(task_id, state)["attempts"][0]
+            attempt_records.append({"attempt_index": i, **attempt, "tree": str(tree)})
+    greens = [a for a in attempt_records if a.get("held_out") == "pass"]
+    selected = min(greens, key=lambda a: a["time_to_verified_ms"]) if greens else None
+    for a in attempt_records:
+        a["selected"] = a is selected
+    result = {
+        "task_id": f"race-{cohort}-{goal_id}",
+        "n": attempts,
+        "status": "completed" if selected else "no-green-attempt",
+        "attempts": attempt_records,
+    }
+    record = {
+        "goal": goal_id,
+        "cohort": cohort,
+        "exit_code": 0 if selected else 1,
+        "result": result,
+        "attempt_states": [
+            _state_summary(home / "tasks" / a["task_id"] / "state.json") for a in attempt_records
+        ],
+    }
+    print(f"done {cohort:7} {goal_id}: {result['status']}", flush=True)
+    return record
+
+
 def _single_run_cohort(task_id: str, state: dict) -> dict:
     """A one-attempt cohort record in best-of's shape, built from a single run."""
     held = (state.get("last_held_out") or {}).get("status")
@@ -202,14 +349,43 @@ def cmd_run(args) -> int:
         print(f"{out} is not empty; pick a fresh --out", file=sys.stderr)
         return 2
     out.mkdir(parents=True, exist_ok=True)
-    install_vault()
-    slugs = [g for g in goal_slugs() if not args.goals or g in args.goals.split(",")]
+    wanted = args.goals.split(",") if args.goals else None
     cohorts = [c for c in COHORTS if not args.cohorts or c in args.cohorts.split(",")]
-    jobs = [(slug, cohort) for slug in slugs for cohort in cohorts]
+    if args.bench:
+        try:
+            benches = [load_bench(Path(b)) for b in args.bench]
+        except ValueError as e:
+            print(e, file=sys.stderr)
+            return 2
+        # Attempt trees are cloned into bench.trees/<out name>; a leftover one
+        # would make the clone fail and be scored as a setup failure.
+        for b in benches:
+            root = b.trees / out.name
+            if root.exists() and any(root.iterdir()):
+                print(f"{root} is not empty; pick a fresh --out", file=sys.stderr)
+                return 2
+        # (goal id, cohort, runner): a repo bench runs its own attempts.
+        jobs = [
+            (f"{b.name}-{slug}", cohort, lambda b=b, slug=slug, cohort=cohort: _run_repo_goal(
+                out, b, slug, cohort, args.attempts, args.max_iterations))
+            for b in benches
+            for slug in b.goal_slugs()
+            if wanted is None or slug in wanted or f"{b.name}-{slug}" in wanted
+            for cohort in cohorts
+        ]
+    else:
+        install_vault()
+        jobs = [
+            (slug, cohort, lambda slug=slug, cohort=cohort: _run_one(
+                out, slug, cohort, args.attempts, args.max_iterations))
+            for slug in goal_slugs()
+            if wanted is None or slug in wanted
+            for cohort in cohorts
+        ]
 
     def _safe(j):
         try:
-            return _run_one(out, j[0], j[1], args.attempts, args.max_iterations)
+            return j[2]()
         except Exception as e:  # keep the other records
             print(f"error {j[1]:7} {j[0]}: {e!r}", flush=True)
             return {"goal": j[0], "cohort": j[1], "exit_code": None, "error": repr(e)}
@@ -269,7 +445,7 @@ def _attempt_stats(records: list[dict]) -> dict:
     """Per-attempt view (what best-of-N hides): every attempt, not the best per goal."""
     atts = [a for r in records for a in (r.get("result") or {}).get("attempts", [])]
     states = [st for r in records for st in r.get("attempt_states", [])]
-    ttv = [a.get("time_to_verified_ms", 0) / 1000 for a in atts]
+    ttv = [a["time_to_verified_ms"] / 1000 for a in atts if a.get("time_to_verified_ms") is not None]
     return {
         "attempts": len(atts),
         "green": sum(1 for a in atts if a.get("held_out") == "pass"),
@@ -343,6 +519,11 @@ def main(argv=None) -> int:
             sp.add_argument("--max-iterations", type=int, default=8)
             sp.add_argument("--goals", default="", help="comma-separated subset (a dry run)")
             sp.add_argument("--cohorts", default="", help="comma-separated subset, e.g. mercury (a remeasure)")
+            sp.add_argument(
+                "--bench", action="append", default=[],
+                help="a repo bench directory (bench.toml + goals/); repeatable. "
+                "Without it the textkit benchmark runs.",
+            )
     args = p.parse_args(argv)
     return {"validate": cmd_validate, "run": cmd_run, "report": cmd_report}[args.cmd](args)
 

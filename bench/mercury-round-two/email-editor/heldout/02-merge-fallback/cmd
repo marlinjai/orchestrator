@@ -1,0 +1,1 @@
+cd packages/contacts && ./node_modules/.bin/vitest run src/__tests__/hidden-merge-fallback.test.ts
