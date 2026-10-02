@@ -15,6 +15,7 @@ from pathlib import Path
 import pytest
 
 from orchestrator.adapters.openai_compat_worker import (
+    OpenAICompatWorkerAdapter,
     OpenAICompatWorkerSession,
     ProviderError,
     build_system_prompt,
@@ -260,77 +261,196 @@ async def test_update_state_goes_through_the_shared_handler(tmp_path):
 needs_node = pytest.mark.skipif(shutil.which("node") is None, reason="node is not on PATH")
 
 
-def _cli_stub(path: Path, *, stdout: str, exit_code: int = 0, stderr: str = "") -> Path:
-    """A node script standing in for the secrets-proxy-call CLI: records its argv
-    and stdin to a trace file, then writes the scripted stdout/stderr and exits."""
+def _session_stub(path: Path, script: list[dict]) -> Path:
+    """A node script standing in for ``secrets-proxy-call forward-session``.
+
+    It appends ``SPAWN <argv>`` and then every request line to a trace file, and
+    answers request N (counted across restarts, through the trace) with
+    ``script[N]``: ``frames`` (written as given, with ``"id": "$id"`` replaced
+    by the request's id), then optionally ``hang`` (answer nothing more) or
+    ``exit`` (a code, with ``stderr`` written first).
+    """
     trace = path.with_suffix(".trace")
     path.write_text(
         f"""const fs = require("fs");
-const stdin = fs.readFileSync(0, "utf8");
-fs.writeFileSync({json.dumps(str(trace))}, "ARGV=" + process.argv.slice(2).join(",") + "\\n" + stdin);
-process.stdout.write({json.dumps(stdout)});
-process.stderr.write({json.dumps(stderr)});
-process.exit({exit_code});
+const readline = require("readline");
+const trace = {json.dumps(str(trace))};
+const script = {json.dumps(script)};
+fs.appendFileSync(trace, "SPAWN " + process.argv.slice(2).join(",") + "\\n");
+const served = () => fs.readFileSync(trace, "utf8").split("\\n").filter((l) => l.startsWith("{{")).length;
+readline.createInterface({{ input: process.stdin }}).on("line", (line) => {{
+  const step = script[served()] || {{}};
+  fs.appendFileSync(trace, line + "\\n");
+  const id = JSON.parse(line).id;
+  for (const frame of step.frames || []) {{
+    process.stdout.write(JSON.stringify(frame.id === "$id" ? {{ ...frame, id }} : frame) + "\\n");
+  }}
+  if (step.stderr) process.stderr.write(step.stderr);
+  if (step.exit !== undefined) process.exit(step.exit);
+}});
+if (script.length && script[0].exit_at_start !== undefined) {{
+  process.stderr.write(script[0].stderr || "");
+  process.exit(script[0].exit_at_start);
+}}
 """
     )
     return trace
 
 
+def _ok(*chunks: str) -> dict:
+    """A scripted 200 answer whose body arrives as the given chunks."""
+    return {
+        "frames": [{"id": "$id", "chunk": c} for c in chunks]
+        + [{"id": "$id", "end": {"status": 200}}]
+    }
+
+
+_HI = 'data: {"choices":[{"delta":{"content":"hi"}}]}\n\n'
+
+
 @needs_node
-def test_forward_stream_parses_sse_until_done(tmp_path):
-    sse = 'data: {"choices":[{"delta":{"content":"hi"}}]}\n\n: keep-alive\n\ndata: [DONE]\n\n'
+def test_forward_session_serves_every_call_through_one_process(tmp_path):
     cli = tmp_path / "cli.js"
-    trace = _cli_stub(cli, stdout=sse)
+    trace = _session_stub(
+        cli, [_ok(_HI, ": keep-alive\n\n", "data: [DONE]\n\n"), _ok(_HI + "data: [DONE]\n\n")]
+    )
     stream = forward_chat_stream("inception", cli_path=str(cli))
-    events = list(stream({"model": "mercury-2"}))
-    assert events == [{"choices": [{"delta": {"content": "hi"}}]}]
-    argv, body = trace.read_text().split("\n", 1)
-    assert argv == "ARGV=forward,/forward/inception/chat/completions"
-    assert json.loads(body) == {"model": "mercury-2"}
+    try:
+        assert list(stream({"model": "mercury-2"})) == [{"choices": [{"delta": {"content": "hi"}}]}]
+        assert list(stream({"model": "mercury-2", "n": 2})) == [
+            {"choices": [{"delta": {"content": "hi"}}]}
+        ]
+    finally:
+        stream.close()
+    spawn, first, second = trace.read_text().splitlines()
+    # One process for both calls: the point of the session.
+    assert spawn == "SPAWN forward-session,/forward/inception/chat/completions"
+    assert json.loads(first) == {"id": 1, "body": {"model": "mercury-2"}}
+    assert json.loads(second) == {"id": 2, "body": {"model": "mercury-2", "n": 2}}
+
+
+@needs_node
+def test_forward_session_reassembles_events_split_across_chunks(tmp_path):
+    cli = tmp_path / "cli.js"
+    _session_stub(cli, [_ok('data: {"choi', 'ces":[]}\n', '\ndata: {"a":1}\n\n')])
+    stream = forward_chat_stream("inception", cli_path=str(cli))
+    try:
+        # No [DONE]: a 2xx end frame closes the stream just as well.
+        assert list(stream({})) == [{"choices": []}, {"a": 1}]
+    finally:
+        stream.close()
+
+
+@needs_node
+def test_forward_session_skips_the_tail_of_an_abandoned_call(tmp_path):
+    cli = tmp_path / "cli.js"
+    late = {"frames": [{"id": 1, "chunk": 'data: {"stale":true}\n\n'}] + _ok(_HI)["frames"]}
+    _session_stub(cli, [{"frames": [{"id": "$id", "chunk": _HI}]}, late])
+    stream = forward_chat_stream("inception", cli_path=str(cli))
+    try:
+        first = stream({})
+        assert next(first) == {"choices": [{"delta": {"content": "hi"}}]}
+        first.close()  # read enough; the next call abandons it
+        assert list(stream({})) == [{"choices": [{"delta": {"content": "hi"}}]}]
+    finally:
+        stream.close()
 
 
 @needs_node
 @pytest.mark.parametrize(
-    ("stderr", "transient"),
+    ("error", "transient"),
     [
         ("429: rate limited", True),
         ("HTTP 503 overloaded", True),
         ("connect ECONNREFUSED 100.124.97.31:8765", True),
         # A port that looks like an HTTP status must not mask a network failure.
         ("connect ETIMEDOUT 10.0.0.5:443", True),
+        ("fetch failed", True),
         # Terminal statuses and unclassified failures are not retried.
         ("400: prompt is too long", False),
-        ("could not resolve the provider key", False),
+        ("no machine-identity credentials for org lumitra", False),
     ],
 )
-def test_forward_cli_failures_carry_an_explicit_transient_flag(tmp_path, stderr, transient):
+def test_forward_session_error_frames_carry_an_explicit_transient_flag(tmp_path, error, transient):
     cli = tmp_path / "cli.js"
-    _cli_stub(cli, stdout="", exit_code=1, stderr=stderr)
+    _session_stub(cli, [{"frames": [{"id": "$id", "error": error}]}, _ok(_HI)])
     stream = forward_chat_stream("inception", cli_path=str(cli))
-    with pytest.raises(ProviderError) as info:
-        list(stream({"model": "mercury-2"}))
-    assert info.value.transient is transient
-    assert is_transient_sdk_error(info.value) is transient
+    try:
+        with pytest.raises(ProviderError) as info:
+            list(stream({"model": "mercury-2"}))
+        assert info.value.transient is transient
+        assert is_transient_sdk_error(info.value) is transient
+        # A failed call does not end the session: the retry reuses the process.
+        assert list(stream({})) == [{"choices": [{"delta": {"content": "hi"}}]}]
+    finally:
+        stream.close()
 
 
 @needs_node
-def test_forward_timer_killed_stream_is_a_transient_timeout(tmp_path):
+@pytest.mark.parametrize(("status", "transient"), [(429, True), (503, True), (400, False), (403, False)])
+def test_forward_session_non_2xx_end_reports_status_and_body(tmp_path, status, transient):
     cli = tmp_path / "cli.js"
-    cli.write_text("setTimeout(() => {}, 30000);\n")
+    frames = [
+        {"id": "$id", "chunk": '{"error":"the provider said no"}'},
+        {"id": "$id", "end": {"status": status}},
+    ]
+    _session_stub(cli, [{"frames": frames}])
+    stream = forward_chat_stream("inception", cli_path=str(cli))
+    try:
+        with pytest.raises(ProviderError, match=f"HTTP {status}: .*the provider said no") as info:
+            list(stream({}))
+        assert info.value.transient is transient
+    finally:
+        stream.close()
+
+
+@needs_node
+def test_forward_session_stall_is_a_transient_timeout_and_the_retry_restarts_it(tmp_path):
+    cli = tmp_path / "cli.js"
+    trace = _session_stub(cli, [{"frames": []}, _ok(_HI)])
     stream = forward_chat_stream("inception", cli_path=str(cli), timeout_s=0.5)
-    with pytest.raises(ProviderError, match="timed out") as info:
-        list(stream({"model": "mercury-2"}))
+    try:
+        with pytest.raises(ProviderError, match="timed out") as info:
+            list(stream({"model": "mercury-2"}))
+        assert info.value.transient is True
+        assert list(stream({})) == [{"choices": [{"delta": {"content": "hi"}}]}]
+    finally:
+        stream.close()
+    assert [line.split()[0] for line in trace.read_text().splitlines()].count("SPAWN") == 2
+
+
+@needs_node
+def test_forward_session_process_exit_is_classified_by_its_stderr(tmp_path):
+    cli = tmp_path / "cli.js"
+    _session_stub(cli, [{"exit": 1, "stderr": "secrets-proxy-call: connect ECONNREFUSED 1.2.3.4:8765\n"}])
+    stream = forward_chat_stream("inception", cli_path=str(cli))
+    with pytest.raises(ProviderError, match="ECONNREFUSED") as info:
+        list(stream({}))
     assert info.value.transient is True
+
+
+@needs_node
+def test_forward_session_names_a_cli_too_old_for_the_mode(tmp_path):
+    cli = tmp_path / "cli.js"
+    usage = "secrets-proxy-call: unknown command forward-session\nusage: ...\n"
+    _session_stub(cli, [{"exit_at_start": 2, "stderr": usage}])
+    stream = forward_chat_stream("inception", cli_path=str(cli))
+    with pytest.raises(ProviderError, match="older than its forward-session mode") as info:
+        list(stream({}))
+    assert info.value.transient is False
 
 
 @needs_node
 def test_forward_malformed_event_is_terminal(tmp_path):
     cli = tmp_path / "cli.js"
-    _cli_stub(cli, stdout="data: {not json\n\n")
+    _session_stub(cli, [_ok("data: {not json\n\n")])
     stream = forward_chat_stream("inception", cli_path=str(cli))
-    with pytest.raises(ProviderError, match="malformed") as info:
-        list(stream({"model": "mercury-2"}))
-    assert info.value.transient is False
+    try:
+        with pytest.raises(ProviderError, match="malformed") as info:
+            list(stream({"model": "mercury-2"}))
+        assert info.value.transient is False
+    finally:
+        stream.close()
 
 
 def test_forward_without_the_cli_is_terminal(monkeypatch):
@@ -339,6 +459,44 @@ def test_forward_without_the_cli_is_terminal(monkeypatch):
     with pytest.raises(ProviderError, match="CLI not found") as info:
         list(stream({"model": "mercury-2"}))
     assert info.value.transient is False
+
+
+@needs_node
+def test_forward_session_close_ends_the_process_and_is_repeatable(tmp_path):
+    cli = tmp_path / "cli.js"
+    trace = _session_stub(cli, [_ok(_HI), _ok(_HI)])
+    stream = forward_chat_stream("inception", cli_path=str(cli))
+    list(stream({}))
+    proc = stream._proc
+    stream.close()
+    stream.close()
+    assert proc.poll() is not None
+    # A call after close starts a fresh process rather than failing.
+    assert list(stream({})) == [{"choices": [{"delta": {"content": "hi"}}]}]
+    stream.close()
+    assert trace.read_text().count("SPAWN") == 2
+
+
+async def test_adapter_closes_its_transport_when_the_session_ends(tmp_path):
+    class _Closable(_ScriptedChat):
+        closed = 0
+
+        def close(self) -> None:
+            self.closed += 1
+
+    chat = _Closable()
+    adapter = OpenAICompatWorkerAdapter(
+        profile=PROFILE, work_dir=tmp_path, state_path=tmp_path / "state.json", chat=chat
+    )
+    async with adapter.open():
+        assert chat.closed == 0
+    assert chat.closed == 1
+    # A transport without close (a test double, a plain function) is fine too.
+    plain = OpenAICompatWorkerAdapter(
+        profile=PROFILE, work_dir=tmp_path, state_path=tmp_path / "state.json", chat=lambda body: iter(())
+    )
+    async with plain.open():
+        pass
 
 
 async def test_every_tool_call_is_audited_next_to_state(tmp_path):

@@ -4,6 +4,11 @@ Living tracker for orchestrator work. Read top to bottom: shipped at the top, in
 
 ## Shipped
 
+### Mercury transport: one proxy CLI process per Worker session (2026-10-02)
+- **The per-call overhead is gone.** Since the secrets-proxy caller-identity switch every Mercury model call spawned the `secrets-proxy-call` Node CLI, which read the credentials and logged in to Infisical again. `ForwardSession` in `orchestrator/adapters/openai_compat_worker.py` now keeps ONE `secrets-proxy-call forward-session` process per Worker session (secrets-proxy#27): one JSON request line in, id-tagged frames out, the token never leaves the CLI. The process starts on first use, is killed and restarted after a stalled stream, and ends with the session.
+- **Measured** (benchmark remeasure, Mercury cohort, 20 attempts, `~/.orchestrator/mercury-race/2026-10-02-forward-session`): transport overhead per call (response time minus the provider's own server time) median 259ms, against 662ms with a CLI per call (`2026-09-28-tail-fix-final`) and 295ms on the original shared-token transport (`2026-09-28`). Median time to first token 592ms against 998ms. Per attempt: 20 of 20 hidden-test green, 20 of 20 in one iteration, median 15.7s (was 21.2s), mean 23.4s (was 29.2s). Two calls of 298 stalled at the provider and recovered through the 60s timeout and in-place retry.
+- Needs the secrets-proxy CLI at 0.5.0 or newer; an older build fails the run loud and says how to rebuild.
+
 ### Worker worktree path guard (2026-09-10)
 - **`build_worktree_guard(project_dir)`** in `orchestrator/worker.py`: an SDK `can_use_tool` callback wired into every `ClaudeAgentOptions` a Worker gets. It resolves the target `file_path` of any `Write`, `Edit`, `NotebookEdit`, or `MultiEdit` tool call against `project_dir`'s realpath and hard-denies (with `interrupt=True`, escalating rather than silently continuing) any path that resolves outside it, whether via an absolute path pointing at another checkout or a `../` relative escape.
 - Closes the 2026-08-01 bug report: a Worker given a prepared worktree via `--project` once edited the repo's main checkout instead. `cwd` only sets the SDK subprocess's *starting* directory; it never constrained where a later absolute-path Edit/Write call landed. `can_use_tool` runs before every tool call, so this is a true per-call assertion, not a post-hoc reconcile check.
@@ -107,7 +112,7 @@ Living tracker for orchestrator work. Read top to bottom: shipped at the top, in
 - E1 to E4 shipped; the E4b race verdict is "Mercury wins" on the benchmark (both 10/10 held-out green, median 15.0s against Claude's 28.6s, about 29x cheaper), with a tail of multi-iteration attempts. Details: `docs/plans/2026-07-24-hexagonal-executor-ports.md`, Verdict.
 - [ ] Mercury Worker round two on real repositories before it does real work: pick the repos and their hidden test sets (Marlin), move the hidden tests to a separate OS user so the Worker cannot read them, rerun `scripts/mercury_race.py`-style cohorts, and gate the result on the same 10-point band. (2026-09-28)
 - [x] DONE 2026-09-28: Cut the Mercury tail. Four causes found and fixed (an `update_state` duplicate bug, self-report bookkeeping, streams held open, stalled calls); 20 of 20 attempts now finish in one iteration, mean 29.2s. Details: the plan's night reality update.
-- [ ] Recover the Mercury per-call overhead the caller-identity CLI added (a Node process and a token mint per model call, about 0.4s on 15 to 45 calls per task): keep one CLI process or its token alive per Worker session, then remeasure. (2026-09-28)
+- [x] DONE 2026-10-02: Recovered the Mercury per-call overhead the caller-identity CLI added. One `secrets-proxy-call forward-session` process per Worker session instead of a process and a token mint per model call; transport overhead per call back from a median of 662ms to 259ms, attempt median 15.7s (was 21.2s). Numbers: Shipped, "Mercury transport: one proxy CLI process per Worker session".
 
 ## Queued (v2 themes, prioritized)
 
