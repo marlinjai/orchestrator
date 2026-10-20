@@ -8,6 +8,7 @@ build/
 *.egg-info/
 .orchestrator/
 .infisical.json
+.infisical.yaml
 .DS_Store
 .claude/
 
