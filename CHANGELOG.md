@@ -20,13 +20,19 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
   Fixed: a PreToolUse hook now denies `Write`, `Edit`, `MultiEdit` and
   `NotebookEdit` outside the worktree (symlinks and `..` resolved), and Bash runs
   in the Claude Code OS sandbox with writes limited to the worktree, its git
-  metadata and temp dirs. `scripts/prove_confinement.py` is the real-SDK proof.
+  metadata and temp dirs (and refuses to run unconfined if the sandbox cannot
+  start). A denied write also stops the turn, as the old guard intended. The file
+  tools now require an absolute path inside the worktree: a relative path or `~`
+  is refused, because the tool resolves it against a base the hook cannot see.
+  `scripts/prove_confinement.py` is the real-SDK proof.
   A command that writes a global cache outside the worktree (`~/.npm`, a pnpm
   store, `~/.cache`) now fails inside the sandbox by design.
   The OpenAI-compatible (Mercury) adapter's `run_command` is not sandboxed.
 
 ### Changed
 
+- `claude-agent-sdk` floor raised to 0.2.121 (the first release patched for the
+  critical advisory, and the first the confinement was proved on).
 - CI installs from `uv.lock` (`uv sync --frozen`) so it tests the versions that
   ship, instead of resolving fresh.
 

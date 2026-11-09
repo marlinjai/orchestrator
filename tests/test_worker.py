@@ -409,9 +409,25 @@ async def test_confinement_allows_edit_inside_root(tmp_path: Path):
     assert await hook(_tool_call("Edit", file_path=str(tmp_path / "file.py")), "t1", {}) == {}
 
 
-async def test_confinement_allows_relative_path_inside_root(tmp_path: Path):
+@pytest.mark.parametrize("raw", ["notes.md", "sub/notes.md", "./notes.md", "~/notes.md", "~", "evil/x"])
+async def test_confinement_refuses_paths_it_cannot_resolve_itself(tmp_path: Path, raw: str):
+    """A relative path is resolved by the tool against the session's current
+    directory (it moves with `cd`, and a symlink inside can redirect it), and `~`
+    is expanded by the tool: the hook cannot tell where either lands, so it asks
+    for an absolute path instead of guessing "inside"."""
     hook = build_confinement_hook(tmp_path)
-    assert await hook(_tool_call("Write", file_path="notes.md"), "t1", {}) == {}
+    result = await hook(_tool_call("Write", file_path=raw), "t1", {})
+    assert _denied(result)
+    assert "absolute path" in result["hookSpecificOutput"]["permissionDecisionReason"]
+
+
+async def test_confinement_denial_also_stops_the_turn(tmp_path: Path):
+    """The old guard interrupted the turn so an escape attempt escalates rather
+    than being retried around; the hook keeps that."""
+    hook = build_confinement_hook(tmp_path)
+    result = await hook(_tool_call("Write", file_path="/etc/hosts"), "t1", {})
+    assert result["continue_"] is False
+    assert "/etc/hosts" in result["stopReason"]
 
 
 async def test_confinement_denies_absolute_path_outside_root(tmp_path: Path):
@@ -431,6 +447,7 @@ async def test_confinement_denies_dot_dot_escape(tmp_path: Path):
     root.mkdir()
     (tmp_path / "sibling").mkdir()
     hook = build_confinement_hook(root)
+    assert _denied(await hook(_tool_call("Write", file_path=str(root / ".." / "sibling" / "leak.txt")), "t1", {}))
     assert _denied(await hook(_tool_call("Write", file_path="../sibling/leak.txt"), "t1", {}))
 
 
@@ -471,6 +488,7 @@ def test_bash_sandbox_is_on_and_cannot_be_opted_out_of(monkeypatch: pytest.Monke
     sandbox = build_bash_sandbox()
     assert sandbox["enabled"] is True
     assert sandbox["allowUnsandboxedCommands"] is False
+    assert sandbox["failIfUnavailable"] is True
     # Filesystem confinement only: egress stays as open as it was before.
     assert sandbox["network"] == {"allowedDomains": ["*"]}
 

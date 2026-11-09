@@ -371,25 +371,42 @@ def build_confinement_hook(project_dir: Path):
             return {}
         tool_input = input_data.get("tool_input") or {}
         for key in PATH_INPUT_KEYS:
-            offending = path_outside_root(tool_input.get(key), project_root)
-            if offending is None:
+            raw = tool_input.get(key)
+            if not raw:
                 continue
-            logger.error(
-                "worker tool %s targeted %s, outside assigned worktree %s; denying",
-                tool_name,
-                offending,
-                project_root,
-            )
+            raw = str(raw)
+            # Only an absolute path can be judged here. A relative path is
+            # resolved by the tool against a base this hook cannot see (the
+            # session's current directory moves with `cd`), and `~` is expanded
+            # by the tool, not by us: both could land outside while looking
+            # inside, so they are refused and the Worker is told to use an
+            # absolute path (the file tools' schema asks for one anyway).
+            if not os.path.isabs(raw) or raw.startswith("~"):
+                reason = (
+                    f"Refused: {tool_name} was given {raw!r}. Use an absolute path inside "
+                    f"the assigned worktree {project_root}."
+                )
+            else:
+                offending = path_outside_root(raw, project_root)
+                if offending is None:
+                    continue
+                reason = (
+                    f"Refused: {tool_name} targeted {offending}, which is outside the "
+                    f"assigned project root {project_root}. Only edit files inside the "
+                    "assigned worktree."
+                )
+            logger.error("worker tool %s denied: %s", tool_name, reason)
+            # Deny AND stop the turn: an attempt to leave the worktree is not a
+            # mistake to retry around (the old guard interrupted too, so the
+            # run escalates instead of carrying on).
             return {
+                "continue_": False,
+                "stopReason": reason,
                 "hookSpecificOutput": {
                     "hookEventName": "PreToolUse",
                     "permissionDecision": "deny",
-                    "permissionDecisionReason": (
-                        f"Refused: {tool_name} targeted {offending}, which is "
-                        f"outside the assigned project root {project_root}. "
-                        "Only edit files inside the assigned worktree."
-                    ),
-                }
+                    "permissionDecisionReason": reason,
+                },
             }
         return {}
 
@@ -413,7 +430,8 @@ def build_bash_sandbox() -> SandboxSettings:
     worktree, work (`scripts/prove_confinement.py`).
 
     `allowUnsandboxedCommands` is False so a Worker cannot ask for a command to
-    run outside the sandbox (`dangerouslyDisableSandbox`).
+    run outside the sandbox (`dangerouslyDisableSandbox`), and `failIfUnavailable`
+    makes a sandbox that cannot start an error, never a silent unconfined Bash.
 
     Network: the sandbox also proxies Bash's network and, by default, allows no
     domain at all (curl, git fetch, package installs fail). This confinement is
@@ -442,6 +460,10 @@ def build_bash_sandbox() -> SandboxSettings:
         "enabled": True,
         "autoAllowBashIfSandboxed": True,
         "allowUnsandboxedCommands": False,
+        # If the sandbox cannot start (no bubblewrap namespaces, a missing
+        # dependency), fail the session instead of running Bash unconfined.
+        # The key is read by the CLI but is not in the SDK's TypedDict yet.
+        "failIfUnavailable": True,  # type: ignore[typeddict-unknown-key]
         "network": {"allowedDomains": ["*"]},
     }
 

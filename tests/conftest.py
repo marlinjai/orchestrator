@@ -33,3 +33,24 @@ def _isolate_machine_env(monkeypatch):
     # Tests that need a config point this at their own tmp dir.
     monkeypatch.setenv("ORCHESTRATOR_CONFIG_HOME", "/nonexistent/orchestrator-tests/config")
     monkeypatch.delenv("ORCHESTRATOR_EXECUTORS_FILE", raising=False)
+
+
+@pytest.fixture(autouse=True)
+def _bash_sandbox_is_available(monkeypatch):
+    """`build_worker_options` refuses to build a Worker where the Bash sandbox
+    cannot run (no bubblewrap on a bare Linux runner). The tests that only look at
+    the options must not depend on the runner image; the platform check itself is
+    tested directly in test_worker.py through the real function."""
+    from orchestrator import worker
+
+    monkeypatch.setattr(
+        worker,
+        "build_bash_sandbox",
+        lambda: {
+            "enabled": True,
+            "autoAllowBashIfSandboxed": True,
+            "allowUnsandboxedCommands": False,
+            "failIfUnavailable": True,
+            "network": {"allowedDomains": ["*"]},
+        },
+    )
