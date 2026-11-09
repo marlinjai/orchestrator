@@ -235,6 +235,33 @@ async def test_run_command_runs_in_the_work_dir_with_a_scrubbed_env(tmp_path, mo
     assert "[]" in out and "secret" not in out
 
 
+async def test_run_command_goes_through_the_sandbox_argv(tmp_path, monkeypatch):
+    seen = {}
+
+    def argv(command, work_dir):
+        seen["command"], seen["work_dir"] = command, work_dir
+        return ["/bin/bash", "-c", "echo sandboxed-ran"]
+
+    monkeypatch.setattr("orchestrator.adapters.openai_compat_worker.sandboxed_command_argv", argv)
+    session = _session(tmp_path, _ScriptedChat())
+    out = await _tool(session, "run_command", {"command": "echo original"})
+    assert "sandboxed-ran" in out and "original" not in out
+    assert seen["command"] == "echo original" and seen["work_dir"] == (tmp_path / "work").resolve()
+
+
+async def test_run_command_is_refused_not_run_unconfined_when_no_sandbox_exists(tmp_path, monkeypatch):
+    from orchestrator.worker import ConfinementUnavailableError
+
+    def unavailable(command, work_dir):
+        raise ConfinementUnavailableError("no sandbox on this host")
+
+    monkeypatch.setattr("orchestrator.adapters.openai_compat_worker.sandboxed_command_argv", unavailable)
+    session = _session(tmp_path, _ScriptedChat())
+    out = await _tool(session, "run_command", {"command": "touch should-not-exist"})
+    assert out.startswith("refused: run_command needs the OS write sandbox")
+    assert not (tmp_path / "work" / "should-not-exist").exists()
+
+
 async def test_run_command_honors_the_denylist(tmp_path):
     session = _session(tmp_path, _ScriptedChat())
     out = await _tool(session, "run_command", {"command": "rm -rf ."})

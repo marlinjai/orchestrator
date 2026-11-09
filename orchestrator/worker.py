@@ -14,6 +14,7 @@ import os
 import shutil
 import subprocess
 import sys
+import tempfile
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import AsyncIterator, Literal
@@ -435,38 +436,22 @@ def build_confinement_hook(project_dir: Path):
     return confine
 
 
+SANDBOX_EXEC = "/usr/bin/sandbox-exec"
+
+
 class ConfinementUnavailableError(RuntimeError):
     """The OS sandbox that confines a Worker's Bash cannot run here. Raised
     instead of starting an unconfined Worker."""
 
 
-def build_bash_sandbox() -> SandboxSettings:
-    """The Claude Code sandbox settings that confine a Worker's Bash.
-
-    With the sandbox on, the CLI runs every Bash command under the OS sandbox
-    (Seatbelt on macOS, bubblewrap on Linux) whose filesystem writes are limited
-    to the session's cwd (the task worktree), its git metadata and temp dirs; a
-    write anywhere else fails with "Operation not permitted". Proved with the
-    real SDK: `echo > /outside`, `cp`, `mv`, `tee` and `python -c` all fail,
-    while the same commands inside the worktree, and `git commit` in a linked
-    worktree, work (`scripts/prove_confinement.py`).
-
-    `allowUnsandboxedCommands` is False so a Worker cannot ask for a command to
-    run outside the sandbox (`dangerouslyDisableSandbox`), and `failIfUnavailable`
-    makes a sandbox that cannot start an error, never a silent unconfined Bash.
-
-    Network: the sandbox also proxies Bash's network and, by default, allows no
-    domain at all (curl, git fetch, package installs fail). This confinement is
-    about filesystem writes, and Worker egress was unrestricted before it, so
-    every domain stays allowed; narrowing egress is a separate decision.
-
-    Known consequence: a command that writes a global cache outside the
-    worktree (`npm`'s ~/.npm, a pnpm store under ~/Library, ~/.cache) fails
-    inside the sandbox, which is the point; such a command must keep its cache
-    inside the worktree or the temp dir.
-    """
+def require_sandbox_platform() -> None:
+    """Raise ConfinementUnavailableError unless an OS sandbox can run here:
+    Seatbelt (`sandbox-exec`) on macOS, bubblewrap with socat and working user
+    namespaces on Linux. Shared by the Claude Worker's Bash sandbox and the
+    Mercury adapter's `run_command`, so neither can run unconfined by accident."""
     if sys.platform == "darwin":
-        pass
+        if not os.path.exists(SANDBOX_EXEC):
+            raise ConfinementUnavailableError(f"the macOS sandbox ({SANDBOX_EXEC}) is missing")
     elif sys.platform.startswith("linux"):
         missing = [tool for tool in ("bwrap", "socat") if shutil.which(tool) is None]
         if missing:
@@ -496,6 +481,98 @@ def build_bash_sandbox() -> SandboxSettings:
             f"the Bash sandbox is not available on {sys.platform}; refusing to "
             "run a Worker with unconfined Bash"
         )
+
+
+def _git_dirs(work_dir: Path) -> list[Path]:
+    """The git directories a commit in ``work_dir`` writes: its own (a linked
+    worktree's admin dir) and the shared common dir (objects, refs, logs)."""
+    found: list[Path] = []
+    for flag in ("--git-dir", "--git-common-dir"):
+        try:
+            out = subprocess.run(
+                ["git", "-C", str(work_dir), "rev-parse", "--path-format=absolute", flag],
+                capture_output=True,
+                text=True,
+                timeout=10,
+            )
+        except (OSError, subprocess.SubprocessError):
+            continue
+        path = Path(out.stdout.strip()).resolve() if out.returncode == 0 and out.stdout.strip() else None
+        if path is not None and path not in found:
+            found.append(path)
+    return found
+
+
+def _sbpl_string(path: Path | str) -> str:
+    return '"' + str(path).replace("\\", "\\\\").replace('"', '\\"') + '"'
+
+
+def sandboxed_command_argv(command: str, work_dir: Path) -> list[str]:
+    """argv that runs ``command`` in bash under the same write confinement as the
+    Claude Worker's Bash sandbox: filesystem writes only in ``work_dir``, the
+    git directories a commit in it writes, and temp dirs. Used by the Mercury
+    adapter's `run_command`, which has no SDK sandbox to switch on.
+
+    macOS: Seatbelt through `sandbox-exec` with a deny-writes profile. Linux:
+    bubblewrap with the root read-only and those paths bound writable. Either
+    way git `hooks` and `config` stay read-only (a commit must not be able to
+    plant code the main checkout later runs). Raises ConfinementUnavailableError
+    when no sandbox can run here; the caller must then refuse the command, never
+    run it unconfined. Network is not restricted (as for the Claude Worker).
+    """
+    require_sandbox_platform()
+    root = work_dir.resolve()
+    tmp = Path(tempfile.gettempdir()).resolve()
+    writable = [root, tmp, *_git_dirs(root)]
+    protected = [p for g in _git_dirs(root) for p in (g / "hooks", g / "config")]
+    if sys.platform == "darwin":
+        allow = " ".join(f"(subpath {_sbpl_string(p)})" for p in [*writable, Path("/private/tmp"), Path("/private/var/tmp")])
+        deny = " ".join(
+            f"(subpath {_sbpl_string(p)})" if p.name == "hooks" else f"(literal {_sbpl_string(p)})" for p in protected
+        )
+        profile = (
+            "(version 1)(allow default)(deny file-write*)"
+            f"(allow file-write* {allow}"
+            ' (literal "/dev/null") (literal "/dev/zero") (literal "/dev/tty") (subpath "/dev/fd")'
+            ' (regex #"^/dev/ttys[0-9]+$"))'
+            + (f"(deny file-write* {deny})" if deny else "")
+        )
+        return [SANDBOX_EXEC, "-p", profile, "/bin/bash", "-c", command]
+    argv = ["bwrap", "--ro-bind", "/", "/", "--dev", "/dev", "--proc", "/proc", "--die-with-parent"]
+    for path in writable:
+        argv += ["--bind", str(path), str(path)]
+    for path in protected:
+        if path.exists():
+            argv += ["--ro-bind", str(path), str(path)]
+    return [*argv, "--chdir", str(root), "/bin/bash", "-c", command]
+
+
+def build_bash_sandbox() -> SandboxSettings:
+    """The Claude Code sandbox settings that confine a Worker's Bash.
+
+    With the sandbox on, the CLI runs every Bash command under the OS sandbox
+    (Seatbelt on macOS, bubblewrap on Linux) whose filesystem writes are limited
+    to the session's cwd (the task worktree), its git metadata and temp dirs; a
+    write anywhere else fails with "Operation not permitted". Proved with the
+    real SDK: `echo > /outside`, `cp`, `mv`, `tee` and `python -c` all fail,
+    while the same commands inside the worktree, and `git commit` in a linked
+    worktree, work (`scripts/prove_confinement.py`).
+
+    `allowUnsandboxedCommands` is False so a Worker cannot ask for a command to
+    run outside the sandbox (`dangerouslyDisableSandbox`), and `failIfUnavailable`
+    makes a sandbox that cannot start an error, never a silent unconfined Bash.
+
+    Network: the sandbox also proxies Bash's network and, by default, allows no
+    domain at all (curl, git fetch, package installs fail). This confinement is
+    about filesystem writes, and Worker egress was unrestricted before it, so
+    every domain stays allowed; narrowing egress is a separate decision.
+
+    Known consequence: a command that writes a global cache outside the
+    worktree (`npm`'s ~/.npm, a pnpm store under ~/Library, ~/.cache) fails
+    inside the sandbox, which is the point; such a command must keep its cache
+    inside the worktree or the temp dir.
+    """
+    require_sandbox_platform()
     return {
         "enabled": True,
         "autoAllowBashIfSandboxed": True,

@@ -6,6 +6,7 @@ import pytest
 
 from orchestrator.worker import (
     ConfinementUnavailableError,
+    sandboxed_command_argv,
     CROSS_PROVIDER_KEY_DENYLIST,
     DEFAULT_ALLOWED_TOOLS,
     WORKER_MCP_REGISTRY,
@@ -489,6 +490,7 @@ async def test_confinement_hook_leaves_other_tools_to_their_own_layer(tmp_path: 
 
 def test_bash_sandbox_is_on_and_cannot_be_opted_out_of(monkeypatch: pytest.MonkeyPatch):
     monkeypatch.setattr("orchestrator.worker.sys.platform", "darwin")
+    monkeypatch.setattr("orchestrator.worker.os.path.exists", lambda _p: True)
     sandbox = build_bash_sandbox()
     assert sandbox["enabled"] is True
     assert sandbox["allowUnsandboxedCommands"] is False
@@ -568,3 +570,72 @@ async def test_confinement_refuses_a_file_with_other_hard_links(tmp_path: Path):
     hook = build_confinement_hook(root)
     assert _denied(await hook(_tool_call("Edit", file_path=str(root / "linked")), "t1", {}))
     assert await hook(_tool_call("Edit", file_path=str(root / "plain")), "t1", {}) == {}
+
+
+# ---- the command sandbox the Mercury adapter's run_command uses ----
+
+
+def _git_repo(path: Path) -> Path:
+    import subprocess
+
+    path.mkdir()
+    subprocess.run(["git", "init", "-q", str(path)], check=True)
+    return path
+
+
+def test_command_argv_on_macos_denies_writes_except_the_worktree_git_and_temp(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
+    monkeypatch.setattr("orchestrator.worker.sys.platform", "darwin")
+    monkeypatch.setattr("orchestrator.worker.os.path.exists", lambda _p: True)
+    work = _git_repo(tmp_path / "work")
+    argv = sandboxed_command_argv("echo hi", work)
+    assert argv[:2] == ["/usr/bin/sandbox-exec", "-p"]
+    assert argv[3:] == ["/bin/bash", "-c", "echo hi"]
+    profile = argv[2]
+    assert "(deny file-write*)" in profile
+    assert f'(subpath "{work.resolve()}")' in profile
+    assert f'(subpath "{(work / ".git").resolve()}")' in profile
+    # a commit must not be able to plant hooks or rewrite the config
+    assert f'(subpath "{(work / ".git" / "hooks").resolve()}")' in profile.split("(deny file-write* ")[-1]
+    assert f'(literal "{(work / ".git" / "config").resolve()}")' in profile.split("(deny file-write* ")[-1]
+
+
+def test_command_argv_on_linux_binds_the_same_paths_writable(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
+    monkeypatch.setattr("orchestrator.worker.sys.platform", "linux")
+    monkeypatch.setattr("orchestrator.worker.require_sandbox_platform", lambda: None)
+    work = _git_repo(tmp_path / "work")
+    argv = sandboxed_command_argv("echo hi", work)
+    assert argv[0] == "bwrap" and argv[1:4] == ["--ro-bind", "/", "/"]
+    binds = [argv[i + 1] for i, a in enumerate(argv) if a == "--bind"]
+    assert str(work.resolve()) in binds and str((work / ".git").resolve()) in binds
+    ro = [argv[i + 1] for i, a in enumerate(argv) if a == "--ro-bind"]
+    assert str((work / ".git" / "hooks").resolve()) in ro and str((work / ".git" / "config").resolve()) in ro
+    assert argv[-3:] == ["/bin/bash", "-c", "echo hi"]
+
+
+def test_command_argv_refuses_when_no_sandbox_can_run(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
+    monkeypatch.setattr("orchestrator.worker.sys.platform", "win32")
+    with pytest.raises(ConfinementUnavailableError):
+        sandboxed_command_argv("echo hi", tmp_path)
+
+
+@pytest.mark.skipif(
+    __import__("sys").platform != "darwin" or not os.path.exists("/usr/bin/sandbox-exec"),
+    reason="runs the real macOS sandbox",
+)
+def test_command_argv_really_confines_writes_on_macos(tmp_path: Path):
+    """Not a mock: the real Seatbelt profile refuses a write outside the worktree
+    (in a directory under the home dir, which is not a temp dir) and allows one inside."""
+    import shutil
+    import subprocess
+    import tempfile
+
+    work = tmp_path / "work"
+    work.mkdir()
+    outside = Path(tempfile.mkdtemp(dir=Path.home(), prefix=".orch-sandbox-test-"))
+    try:
+        inside = subprocess.run(sandboxed_command_argv(f"echo x > {work.resolve()}/in.txt", work), capture_output=True)
+        assert inside.returncode == 0 and (work / "in.txt").exists()
+        blocked = subprocess.run(sandboxed_command_argv(f"echo x > {outside}/out.txt", work), capture_output=True)
+        assert blocked.returncode != 0 and not (outside / "out.txt").exists()
+    finally:
+        shutil.rmtree(outside, ignore_errors=True)
