@@ -186,8 +186,9 @@ Console; the proxy receives 401 and the run stops; rotate by creating a new key 
   final backstop behind the proxy's own caps.
 - **Key handling: minted by the agent through the automation browser, never by hand and never printed.** A
   `dev-browser` script creates the workspace, sets the limit, creates one key named `orchestrator-worker`, and
-  moves the value straight into Infisical inside the same script (project `orchestrator`, environment `prod`, path
-  `/`, key `ORCH_WORKER_ANTHROPIC_API_KEY`). The script never logs the value; it reports only a prefix class and a
+  moves the value straight into Infisical inside the same script (project `Dotfiles`, which this repository's
+  `.infisical.json` is bound to, environment `prod`, folder `/orchestrator-worker`, key
+  `ORCH_WORKER_ANTHROPIC_API_KEY`; its own folder so no `infisical run` that reads the root folder ever injects it). The script never logs the value; it reports only a prefix class and a
   length check. Verification afterwards is functional (one minimal request through the secrets proxy answering 200),
   never by reading the value. This replaces the earlier "Marlin types it into the Infisical web interface" step.
 - **GitHub-enforced review is not pursued**: no GitHub Pro. The head-pinned merge gate stays enforced by land-pr
@@ -199,6 +200,9 @@ Console; the proxy receives 401 and the run stops; rotate by creating a new key 
 
 ## Done when
 
+- [x] Key minted 2026-11-09: workspace `orchestrator-workers` (`wrkspc_017ZKdAQ7Vatft7khZZDi4ja`), limit 75 USD per
+  month confirmed after a reload, one key `orchestrator-worker` expiring 2027-02-09, stored as above, verified by one
+  `max_tokens: 1` request through the secrets proxy answering 200 (value never printed). Rotate before 2027-02-09.
 - [x] Plan decided (2026-11-09); the synthetic lab confirms the SDK honours `ANTHROPIC_BASE_URL` with the run secret.
 - [ ] `orch-worker` profile, egress filter, container runner, Claude proxy, bundle handback implemented with tests.
 - [ ] Proof list passes in a real run, with controls; the revocation drill passes.
