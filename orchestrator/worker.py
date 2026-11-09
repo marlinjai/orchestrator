@@ -12,6 +12,7 @@ not used here.
 import logging
 import os
 import shutil
+import subprocess
 import sys
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -361,6 +362,41 @@ def build_confinement_hook(project_dir: Path):
     """
     project_root = project_dir.resolve()
 
+    def refusal(tool_name: str, tool_input: dict) -> str | None:
+        """Why this call is refused, or None when it stays inside the worktree.
+        May raise on a path it cannot resolve; the caller treats that as a refusal."""
+        for key in PATH_INPUT_KEYS:
+            raw = tool_input.get(key)
+            if not raw:
+                continue
+            raw = str(raw)
+            # Only an absolute path can be judged here. A relative path is
+            # resolved by the tool against a base this hook cannot see (the
+            # session's current directory moves with `cd`, and a symlink inside
+            # can redirect it), and `~` is expanded by the tool, not by us: both
+            # could land outside while looking inside, so they are refused and
+            # the Worker is told to use an absolute path.
+            if not os.path.isabs(raw) or raw.startswith("~"):
+                return (
+                    f"Refused: {tool_name} was given {raw!r}. Use an absolute path inside "
+                    f"the assigned worktree {project_root}."
+                )
+            resolved = Path(raw).resolve()
+            if resolved != project_root and project_root not in resolved.parents:
+                return (
+                    f"Refused: {tool_name} targeted {resolved}, which is outside the "
+                    f"assigned project root {project_root}. Only edit files inside the "
+                    "assigned worktree."
+                )
+            # A file with several hard links is one inode under several names:
+            # writing it here can change a file outside the worktree.
+            if resolved.is_file() and resolved.stat().st_nlink > 1:
+                return (
+                    f"Refused: {tool_name} targeted {resolved}, which has other hard links "
+                    "(it may be the same file as one outside the worktree)."
+                )
+        return None
+
     async def confine(
         input_data: HookInput,
         tool_use_id: str | None,
@@ -369,46 +405,32 @@ def build_confinement_hook(project_dir: Path):
         tool_name = input_data.get("tool_name", "")
         if tool_name not in PATH_GUARDED_TOOLS:
             return {}
-        tool_input = input_data.get("tool_input") or {}
-        for key in PATH_INPUT_KEYS:
-            raw = tool_input.get(key)
-            if not raw:
-                continue
-            raw = str(raw)
-            # Only an absolute path can be judged here. A relative path is
-            # resolved by the tool against a base this hook cannot see (the
-            # session's current directory moves with `cd`), and `~` is expanded
-            # by the tool, not by us: both could land outside while looking
-            # inside, so they are refused and the Worker is told to use an
-            # absolute path (the file tools' schema asks for one anyway).
-            if not os.path.isabs(raw) or raw.startswith("~"):
-                reason = (
-                    f"Refused: {tool_name} was given {raw!r}. Use an absolute path inside "
-                    f"the assigned worktree {project_root}."
-                )
-            else:
-                offending = path_outside_root(raw, project_root)
-                if offending is None:
-                    continue
-                reason = (
-                    f"Refused: {tool_name} targeted {offending}, which is outside the "
-                    f"assigned project root {project_root}. Only edit files inside the "
-                    "assigned worktree."
-                )
-            logger.error("worker tool %s denied: %s", tool_name, reason)
-            # Deny AND stop the turn: an attempt to leave the worktree is not a
-            # mistake to retry around (the old guard interrupted too, so the
-            # run escalates instead of carrying on).
-            return {
-                "continue_": False,
-                "stopReason": reason,
-                "hookSpecificOutput": {
-                    "hookEventName": "PreToolUse",
-                    "permissionDecision": "deny",
-                    "permissionDecisionReason": reason,
-                },
-            }
-        return {}
+        try:
+            reason = refusal(tool_name, input_data.get("tool_input") or {})
+        except Exception as exc:  # noqa: BLE001 - a security hook fails closed
+            # A NUL byte (ValueError), a symlink loop (RuntimeError), an
+            # unreadable path (OSError): anything the check could not decide is
+            # a refusal, never an allow (a failing hook is non-blocking in the CLI).
+            reason = (
+                f"Refused: {tool_name} could not be checked ({type(exc).__name__}); "
+                "use a plain absolute path inside the assigned worktree "
+                f"{project_root}."
+            )
+        if reason is None:
+            return {}
+        logger.error("worker tool %s denied: %s", tool_name, reason)
+        # Deny AND stop the turn: an attempt to leave the worktree is not a
+        # mistake to retry around (the old guard interrupted too, so the run
+        # escalates instead of carrying on).
+        return {
+            "continue_": False,
+            "stopReason": reason,
+            "hookSpecificOutput": {
+                "hookEventName": "PreToolUse",
+                "permissionDecision": "deny",
+                "permissionDecisionReason": reason,
+            },
+        }
 
     return confine
 
@@ -446,10 +468,28 @@ def build_bash_sandbox() -> SandboxSettings:
     if sys.platform == "darwin":
         pass
     elif sys.platform.startswith("linux"):
-        if shutil.which("bwrap") is None:
+        missing = [tool for tool in ("bwrap", "socat") if shutil.which(tool) is None]
+        if missing:
             raise ConfinementUnavailableError(
-                "the Bash sandbox needs bubblewrap (`bwrap`) on Linux; install it "
-                "(and socat) rather than run a Worker unconfined"
+                f"the Bash sandbox needs {' and '.join(missing)} on Linux; install "
+                "bubblewrap and socat rather than run a Worker unconfined"
+            )
+        # Both installed is not enough: an AppArmor policy (Ubuntu 24.04) can
+        # forbid the unprivileged user namespaces bubblewrap needs, and the
+        # session would then fail at its first Bash call. Fail here instead.
+        try:
+            probe = subprocess.run(
+                ["bwrap", "--ro-bind", "/", "/", "--unshare-user", "true"],
+                capture_output=True,
+                timeout=15,
+            )
+        except (OSError, subprocess.SubprocessError) as exc:
+            raise ConfinementUnavailableError(f"the Bash sandbox could not be started: {exc}") from exc
+        if probe.returncode != 0:
+            raise ConfinementUnavailableError(
+                "bubblewrap cannot create a user namespace here "
+                f"({probe.stderr.decode(errors='replace').strip() or 'no detail'}); "
+                "enable unprivileged user namespaces rather than run a Worker unconfined"
             )
     else:
         raise ConfinementUnavailableError(

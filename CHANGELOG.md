@@ -15,7 +15,7 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
   defaults. A Worker could therefore Write or Edit any path (including the repo's
   main checkout, the 2026-08-01 incident) and run any Bash command that writes
   anywhere, for example `echo > /elsewhere`, `cp`, `mv`, `tee` or `python -c`.
-  Reproduced with the real SDK on 0.2.93 and 0.2.121. `NotebookEdit` was also
+  The escape was reproduced with the real SDK on 0.2.93 and on 0.2.121. `NotebookEdit` was also
   unguarded (the check read only `file_path`).
   Fixed: a PreToolUse hook now denies `Write`, `Edit`, `MultiEdit` and
   `NotebookEdit` outside the worktree (symlinks and `..` resolved), and Bash runs
@@ -24,10 +24,14 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
   start). A denied write also stops the turn, as the old guard intended. The file
   tools now require an absolute path inside the worktree: a relative path or `~`
   is refused, because the tool resolves it against a base the hook cannot see.
-  `scripts/prove_confinement.py` is the real-SDK proof.
+  `scripts/prove_confinement.py` is the real-SDK proof (18 cases on the SDK in
+  `uv.lock`, plus `--control` runs that remove each layer and show the escape).
   A command that writes a global cache outside the worktree (`~/.npm`, a pnpm
   store, `~/.cache`) now fails inside the sandbox by design.
-  The OpenAI-compatible (Mercury) adapter's `run_command` is not sandboxed.
+  Known limits: a hard link that already exists inside the worktree to a file
+  outside it stays writable through Bash (the sandbox judges paths; the hook
+  refuses the file tools on such a file), and the OpenAI-compatible (Mercury)
+  adapter's `run_command` is not sandboxed.
 
 ### Changed
 

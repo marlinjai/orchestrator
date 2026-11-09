@@ -500,10 +500,57 @@ def test_bash_sandbox_refuses_an_unsupported_platform(monkeypatch: pytest.Monkey
         build_bash_sandbox()
 
 
-def test_bash_sandbox_on_linux_needs_bubblewrap(monkeypatch: pytest.MonkeyPatch):
+def _fake_probe(returncode: int):
+    class Done:
+        stderr = b"bwrap: No permissions to create new namespace"
+
+    Done.returncode = returncode
+    return lambda *_a, **_k: Done()
+
+
+def test_bash_sandbox_on_linux_needs_bubblewrap_and_socat(monkeypatch: pytest.MonkeyPatch):
     monkeypatch.setattr("orchestrator.worker.sys.platform", "linux")
     monkeypatch.setattr("orchestrator.worker.shutil.which", lambda _name: None)
-    with pytest.raises(ConfinementUnavailableError):
+    with pytest.raises(ConfinementUnavailableError, match="bwrap and socat"):
         build_bash_sandbox()
-    monkeypatch.setattr("orchestrator.worker.shutil.which", lambda _name: "/usr/bin/bwrap")
+    monkeypatch.setattr("orchestrator.worker.shutil.which", lambda name: "/usr/bin/bwrap" if name == "bwrap" else None)
+    with pytest.raises(ConfinementUnavailableError, match="socat"):
+        build_bash_sandbox()
+    monkeypatch.setattr("orchestrator.worker.shutil.which", lambda name: f"/usr/bin/{name}")
+    monkeypatch.setattr("orchestrator.worker.subprocess.run", _fake_probe(0))
     assert build_bash_sandbox()["enabled"] is True
+
+
+def test_bash_sandbox_on_linux_fails_when_user_namespaces_are_forbidden(monkeypatch: pytest.MonkeyPatch):
+    """bwrap on PATH is not enough (AppArmor on Ubuntu 24.04): the preflight fails
+    when the Worker is built, not at its first Bash call mid-run."""
+    monkeypatch.setattr("orchestrator.worker.sys.platform", "linux")
+    monkeypatch.setattr("orchestrator.worker.shutil.which", lambda name: f"/usr/bin/{name}")
+    monkeypatch.setattr("orchestrator.worker.subprocess.run", _fake_probe(1))
+    with pytest.raises(ConfinementUnavailableError, match="user namespace"):
+        build_bash_sandbox()
+
+
+async def test_confinement_fails_closed_on_a_path_it_cannot_resolve(tmp_path: Path):
+    """A failing hook is non-blocking in the CLI, so an exception inside the check
+    must become a refusal, not an allow."""
+    hook = build_confinement_hook(tmp_path)
+    nul = await hook(_tool_call("Write", file_path=str(tmp_path / "a\0b")), "t1", {})
+    assert _denied(nul) and nul["continue_"] is False
+    loop = tmp_path / "loop"
+    loop.symlink_to(loop)
+    assert _denied(await hook(_tool_call("Write", file_path=str(loop / "x")), "t1", {}))
+
+
+async def test_confinement_refuses_a_file_with_other_hard_links(tmp_path: Path):
+    """One inode under two names: writing the name inside the worktree changes the
+    file outside it."""
+    root = tmp_path / "worktree-a"
+    root.mkdir()
+    outside = tmp_path / "outside.txt"
+    outside.write_text("orig")
+    (root / "linked").hardlink_to(outside)
+    (root / "plain").write_text("x")
+    hook = build_confinement_hook(root)
+    assert _denied(await hook(_tool_call("Edit", file_path=str(root / "linked")), "t1", {}))
+    assert await hook(_tool_call("Edit", file_path=str(root / "plain")), "t1", {}) == {}
