@@ -888,3 +888,94 @@ def test_the_subprocess_env_scrub_is_set_only_where_the_sandbox_is_on(tmp_path: 
     monkeypatch.setattr("orchestrator.worker.build_bash_sandbox", build_bash_sandbox)
     on = build_worker_options(state_path=tmp_path / "s.json", project_dir=tmp_path)
     assert on.env["CLAUDE_CODE_SUBPROCESS_ENV_SCRUB"] == "1"
+
+
+# ---- a failing git must refuse the Worker, never drop the git denies (fail closed) ----
+
+
+def _failing_git(monkeypatch: pytest.MonkeyPatch, *, match: str | None, how: str) -> None:
+    """Make `git` fail inside orchestrator.worker, either for every call or only
+    for the argument list containing ``match``: ``how`` is "timeout", "missing" or "exit"."""
+    import subprocess
+
+    real = subprocess.run
+
+    def run(argv, *a, **k):
+        if argv[0] == "git" and (match is None or match in argv):
+            if how == "timeout":
+                raise subprocess.TimeoutExpired(argv, 10)
+            if how == "missing":
+                raise FileNotFoundError("git")
+
+            class Done:
+                returncode = 128
+                stdout = ""
+                stderr = "fatal: simulated failure"
+
+            return Done()
+        return real(argv, *a, **k)
+
+    monkeypatch.setattr("orchestrator.worker.subprocess.run", run)
+
+
+@pytest.mark.parametrize("how", ["timeout", "missing", "exit"])
+@pytest.mark.parametrize("failing", [None, "--git-common-dir", "for-each-ref", "symbolic-ref"])
+def test_a_git_that_fails_refuses_the_claude_worker_instead_of_dropping_the_denies(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, how: str, failing: str | None
+):
+    """Each of the layout calls (git dir, common dir, branch, ref list) failing or
+    timing out must refuse the Worker; before, a failed call returned None or []
+    and the shared-git deny list (main's ref among it) silently vanished."""
+    from orchestrator.worker import _git_dirs
+
+    _base, work = _linked_worktree(tmp_path)
+    monkeypatch.setattr("orchestrator.worker.sys.platform", "darwin")
+    monkeypatch.setattr("orchestrator.worker.os.path.exists", lambda _p: True)
+    _git_dirs.cache_clear()
+    _failing_git(monkeypatch, match=failing, how=how)
+    with pytest.raises(ConfinementUnavailableError):
+        build_bash_sandbox(work)
+    if failing != "for-each-ref":  # the Seatbelt allow-list needs no ref listing; every other call it does need
+        with pytest.raises(ConfinementUnavailableError):
+            sandboxed_command_argv("true", work)
+
+
+def test_a_failed_git_call_is_not_cached(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
+    from orchestrator.worker import _git_dirs, _git_layout
+
+    _base, work = _linked_worktree(tmp_path)
+    root = work.resolve()
+    _git_dirs.cache_clear()
+    with monkeypatch.context() as m:
+        _failing_git(m, match=None, how="timeout")
+        with pytest.raises(ConfinementUnavailableError):
+            _git_layout(root)
+    layout = _git_layout(root)  # git works again: the earlier failure left nothing behind
+    assert layout is not None and layout.linked
+
+
+def test_a_directory_outside_any_repository_is_plain_not_a_failure(tmp_path: Path):
+    from orchestrator.worker import _git_layout
+
+    plain = tmp_path / "plain"
+    plain.mkdir()
+    assert _git_layout(plain.resolve()) is None
+
+
+def test_a_broken_git_pointer_is_a_failure_not_a_plain_directory(tmp_path: Path):
+    """A worktree whose `.git` file points nowhere is not "no repository": it is a
+    repository we cannot read, so the Worker is refused."""
+    from orchestrator.worker import _git_layout
+
+    work = tmp_path / "work"
+    work.mkdir()
+    (work / ".git").write_text("gitdir: /nonexistent/elsewhere\n")
+    with pytest.raises(ConfinementUnavailableError):
+        _git_layout(work.resolve())
+
+
+def test_the_worker_prompt_does_not_claim_branch_creation_is_refused():
+    from orchestrator.worker import WORKER_SYSTEM_PROMPT
+
+    assert "do not create others" in WORKER_SYSTEM_PROMPT
+    assert "creating or deleting branches" not in WORKER_SYSTEM_PROMPT.lower()

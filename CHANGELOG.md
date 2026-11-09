@@ -51,9 +51,13 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
   but a name it can predict is shadowed); the Worker's own admin dir, including
   its `HEAD`, is writable, so the orchestrator must not run git write operations
   in a Worker's worktree afterwards without checking `HEAD`. Git flows that no
-  longer work inside the sandbox (the Worker is told): `git stash`, `tag`, new
-  branches, `fetch`, `gc`/`pack-refs`/`repack`, `submodule`, `config --local`,
-  `worktree add/prune`; commit, amend, rebase and detached HEAD still work.
+  longer work inside the sandbox (the Worker is told): `git stash`, `tag`,
+  deleting branches, `fetch`, `gc`/`pack-refs`/`repack`, `submodule`, `config
+  --local`, `worktree add/prune`, and creating new branches on the Mercury and
+  Linux paths; commit, amend, rebase and detached HEAD still work. **On the
+  Claude path creating a new branch is NOT blocked** (the CLI sandbox cannot deny
+  new names under `refs/heads` and allow only the Worker's own ref); the Worker
+  is told not to, and that is an instruction, not enforcement.
 - **UNRESOLVED on the Claude Worker path: a Worker's Bash can overwrite an
   existing loose object of the shared git object store.** The Claude CLI's
   sandbox takes deny lists only and cannot make the store create-only. Git does
@@ -63,8 +67,15 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
   review of the Worker's own branch would show. Closed on the Mercury path on
   macOS (create-only) and for forged packs on both macOS paths; open on the Claude
   path (proved by `scripts/prove_confinement.py`, reported there as a known
-  limit). Until a Worker runs under a separate OS identity (plan #45), Claude
-  Workers must not be run against a repository whose main checkout matters.
+  limit). The tampering is detected only by `git fsck` (which re-hashes
+  objects); a push does not reveal it, since objects the remote already has are
+  not re-sent or re-verified. The planned fix is a private object store per Worker
+  (orchestrator #45, the separate-identity plan). Until then Claude Workers must
+  not be run against a repository whose main checkout matters.
+- **The Worker is refused, not started unconfined, when git cannot describe the
+  repository** (git missing, timed out, a failing `for-each-ref`, a broken `.git`
+  pointer): the shared-git deny list is built from that layout, and dropping it
+  would have failed open. A failure is never cached.
 - **Credentials.** Under its default routes the Worker holds no usable git or gh
   credentials: forge, cloud and registry tokens are removed from its environment,
   gh and git are pointed at empty configuration (no credential helper, no

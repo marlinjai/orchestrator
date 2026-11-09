@@ -213,7 +213,7 @@ let your work speak through the state file and the git log.
 
 Hard rules you must follow:
 - Never run destructive shell commands (the orchestrator's denylist will block them anyway).
-- You work inside a sandbox: you can write only in your worktree, its temp dirs and your own branch (commit, amend and rebase work). Creating or deleting branches, tags and stashes, `git fetch`/`gc`/`config`, writing outside the worktree, and any credentialed or remote action are refused by design.
+- You work inside a sandbox: you can write only in your worktree, its temp dirs and your own branch (commit, amend and rebase work). Stay on your own branch and do not create others. Deleting branches, tags and stashes, `git fetch`/`gc`/`config`, writing outside the worktree, and any credentialed or remote action are refused by design.
 - Never send messages, comments, or PRs to external systems.
 - Never spend money, deploy to prod, or modify infrastructure.
 - If you genuinely cannot proceed without a human decision, write your question
@@ -624,29 +624,51 @@ class GitLayout:
         return self.common_dir / "refs" / "heads" / self.branch if self.branch else None
 
 
-def _rev(work_dir: Path, *args: str) -> str:
+def _git(work_dir: Path, *args: str) -> subprocess.CompletedProcess:
+    """Run git in ``work_dir`` with messages in English. A git that cannot be RUN
+    (missing, timed out, unreadable) refuses the Worker: confinement is built from
+    the repository's layout, and without it every git deny would silently be
+    dropped (fail open)."""
+    env = {**os.environ, "LC_ALL": "C", "LANG": "C"}
     try:
-        out = subprocess.run(["git", "-C", str(work_dir), *args], capture_output=True, text=True, timeout=10)
-    except (OSError, subprocess.SubprocessError):
-        return ""
-    return out.stdout.strip() if out.returncode == 0 else ""
+        return subprocess.run(["git", "-C", str(work_dir), *args], capture_output=True, text=True, timeout=10, env=env)
+    except (OSError, subprocess.SubprocessError) as exc:
+        raise ConfinementUnavailableError(
+            f"git could not be run in {work_dir} ({type(exc).__name__}); refusing to confine without the "
+            "repository's layout"
+        ) from exc
+
+
+def _git_failed(work_dir: Path, args: tuple[str, ...], proc: subprocess.CompletedProcess) -> ConfinementUnavailableError:
+    detail = (proc.stderr or "").strip().splitlines()[:1]
+    return ConfinementUnavailableError(
+        f"`git {' '.join(args)}` failed in {work_dir} (exit {proc.returncode}"
+        f"{': ' + detail[0] if detail else ''}); refusing to confine without the repository's layout"
+    )
 
 
 @functools.lru_cache(maxsize=64)
 def _git_dirs(work_dir: Path) -> tuple[Path, Path] | None:
-    """The git dir and the common git dir of ``work_dir`` (None outside a repo).
-    Cached: they never move during a run. Relative answers are resolved against
-    ``work_dir`` (works on any git version)."""
-
-    def resolved(raw: str) -> Path | None:
+    """The git dir and the common git dir of ``work_dir``; None only for a
+    directory that is not in a repository at all. Anything else that goes wrong
+    raises (a failure is never cached and never read as "no repository"). Cached
+    on success: the directories never move during a run. Relative answers are
+    resolved against ``work_dir`` (works on any git version)."""
+    found: list[Path] = []
+    for args in (("rev-parse", "--git-dir"), ("rev-parse", "--git-common-dir")):
+        proc = _git(work_dir, *args)
+        if proc.returncode != 0:
+            # "not a git repository" is a plain non-repo only when the directory
+            # has no `.git` entry; a broken `.git` pointer is a failure.
+            if "not a git repository" in (proc.stderr or "").lower() and not (work_dir / ".git").exists():
+                return None
+            raise _git_failed(work_dir, args, proc)
+        raw = proc.stdout.strip()
         if not raw:
-            return None
+            raise _git_failed(work_dir, args, proc)
         path = Path(raw)
-        return (path if path.is_absolute() else work_dir / path).resolve()
-
-    git_dir = resolved(_rev(work_dir, "rev-parse", "--git-dir"))
-    common_dir = resolved(_rev(work_dir, "rev-parse", "--git-common-dir"))
-    return (git_dir, common_dir) if git_dir is not None and common_dir is not None else None
+        found.append((path if path.is_absolute() else work_dir / path).resolve())
+    return found[0], found[1]
 
 
 def _git_layout(work_dir: Path) -> GitLayout | None:
@@ -656,21 +678,25 @@ def _git_layout(work_dir: Path) -> GitLayout | None:
     dirs = _git_dirs(work_dir)
     if dirs is None:
         return None
-    return GitLayout(work_dir, dirs[0], dirs[1], _rev(work_dir, "symbolic-ref", "-q", "--short", "HEAD") or None)
+    args = ("symbolic-ref", "-q", "--short", "HEAD")
+    proc = _git(work_dir, *args)
+    if proc.returncode == 0:
+        branch = proc.stdout.strip() or None
+    elif proc.returncode == 1 and not (proc.stderr or "").strip():
+        branch = None  # detached HEAD: `-q` exits 1 silently
+    else:
+        raise _git_failed(work_dir, args, proc)
+    return GitLayout(work_dir, dirs[0], dirs[1], branch)
 
 
 def _git_refs(layout: GitLayout) -> list[str]:
-    """Every ref of the repository (loose and packed)."""
-    try:
-        out = subprocess.run(
-            ["git", "-C", str(layout.work), "for-each-ref", "--format=%(refname)"],
-            capture_output=True,
-            text=True,
-            timeout=10,
-        )
-    except (OSError, subprocess.SubprocessError):
-        return []
-    return out.stdout.split() if out.returncode == 0 else []
+    """Every ref of the repository (loose and packed). Raises when they cannot be
+    listed: dropping the per-branch denies (main among them) would fail open."""
+    args = ("for-each-ref", "--format=%(refname)")
+    proc = _git(layout.work, *args)
+    if proc.returncode != 0:
+        raise _git_failed(layout.work, args, proc)
+    return proc.stdout.split()
 
 
 def git_deny_write_paths(layout: GitLayout) -> list[Path]:
@@ -684,7 +710,11 @@ def git_deny_write_paths(layout: GitLayout) -> list[Path]:
     config, which would run code the next time the orchestrator invokes git there."""
     common, own = layout.common_dir, layout.own_ref
     deny = [layout.work / ".git"]
-    deny += [common / n for n in os.listdir(common) if n not in ("objects", "worktrees", "logs", "refs")]
+    try:
+        top_level = os.listdir(common)
+    except OSError as exc:
+        raise ConfinementUnavailableError(f"the shared git dir {common} cannot be read ({exc.__class__.__name__})") from exc
+    deny += [common / n for n in top_level if n not in ("objects", "worktrees", "logs", "refs")]
     deny += [common / n for n in ("packed-refs", "info", "hooks", "config", "HEAD", "index")]
     for ref in _git_refs(layout):
         if common / ref != own:
