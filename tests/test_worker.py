@@ -2,20 +2,18 @@ import json
 import os
 from pathlib import Path
 
-from claude_agent_sdk.types import (
-    PermissionResultAllow,
-    PermissionResultDeny,
-    ToolPermissionContext,
-)
+import pytest
 
 from orchestrator.worker import (
+    ConfinementUnavailableError,
     CROSS_PROVIDER_KEY_DENYLIST,
     DEFAULT_ALLOWED_TOOLS,
     WORKER_MCP_REGISTRY,
     WorkerExtras,
     apply_env_contract,
+    build_bash_sandbox,
+    build_confinement_hook,
     build_worker_options,
-    build_worktree_guard,
     load_worker_extras,
     resolve_effective_mcp_servers,
 )
@@ -377,81 +375,117 @@ def test_none_ceiling_is_unchanged_behavior(tmp_path: Path):
     assert "context7" in options.mcp_servers
 
 
-def test_worker_options_wires_worktree_guard(tmp_path: Path):
-    """build_worker_options must install the path guard as can_use_tool, not
-    just leave the SDK's own permission_mode to gate it."""
+def test_worker_options_wire_the_confinement(tmp_path: Path):
+    """Confinement must not depend on allowed_tools: the SDK never consults a
+    `can_use_tool` callback for a tool that is in allowed_tools (Write, Edit and
+    Bash are), which is how the old guard was inert. The options carry a
+    PreToolUse hook for the file tools and the OS sandbox for Bash."""
     options = build_worker_options(
         state_path=tmp_path / "s.json",
         project_dir=tmp_path,
         denied_bash=[],
     )
-    assert options.can_use_tool is not None
+    assert options.can_use_tool is None
+    matchers = options.hooks["PreToolUse"]
+    assert len(matchers) == 1 and len(matchers[0].hooks) == 1
+    assert options.sandbox["enabled"] is True
+    assert options.sandbox["allowUnsandboxedCommands"] is False
+    for tool in ("Write", "Edit", "Bash"):
+        assert tool in options.allowed_tools
 
 
-async def test_worktree_guard_allows_edit_inside_root(tmp_path: Path):
-    guard = build_worktree_guard(tmp_path)
+def _tool_call(tool: str, **tool_input) -> dict:
+    return {"hook_event_name": "PreToolUse", "tool_name": tool, "tool_input": tool_input}
+
+
+def _denied(result: dict) -> bool:
+    out = result.get("hookSpecificOutput") or {}
+    return out.get("hookEventName") == "PreToolUse" and out.get("permissionDecision") == "deny"
+
+
+async def test_confinement_allows_edit_inside_root(tmp_path: Path):
+    hook = build_confinement_hook(tmp_path)
     (tmp_path / "file.py").write_text("x")
-    result = await guard(
-        "Edit",
-        {"file_path": str(tmp_path / "file.py")},
-        ToolPermissionContext(),
-    )
-    assert isinstance(result, PermissionResultAllow)
+    assert await hook(_tool_call("Edit", file_path=str(tmp_path / "file.py")), "t1", {}) == {}
 
 
-async def test_worktree_guard_allows_relative_path_inside_root(tmp_path: Path):
-    guard = build_worktree_guard(tmp_path)
-    result = await guard("Write", {"file_path": "notes.md"}, ToolPermissionContext())
-    assert isinstance(result, PermissionResultAllow)
+async def test_confinement_allows_relative_path_inside_root(tmp_path: Path):
+    hook = build_confinement_hook(tmp_path)
+    assert await hook(_tool_call("Write", file_path="notes.md"), "t1", {}) == {}
 
 
-async def test_worktree_guard_denies_absolute_path_outside_root(tmp_path: Path):
-    """The 2026-08-01 bug this guards against: a Worker given worktree A edits
-    the main checkout B instead. An absolute file_path outside project_dir must
-    be hard-denied, not silently allowed."""
-    project_root = tmp_path / "worktree-a"
-    other_checkout = tmp_path / "main-checkout"
-    project_root.mkdir()
-    other_checkout.mkdir()
-    guard = build_worktree_guard(project_root)
-    result = await guard(
-        "Edit",
-        {"file_path": str(other_checkout / "src.py")},
-        ToolPermissionContext(),
-    )
-    assert isinstance(result, PermissionResultDeny)
-    assert result.interrupt is True
-    assert str(other_checkout) in result.message
+async def test_confinement_denies_absolute_path_outside_root(tmp_path: Path):
+    """The 2026-08-01 bug: a Worker given worktree A edits the main checkout B."""
+    root = tmp_path / "worktree-a"
+    other = tmp_path / "main-checkout"
+    root.mkdir()
+    other.mkdir()
+    hook = build_confinement_hook(root)
+    result = await hook(_tool_call("Edit", file_path=str(other / "src.py")), "t1", {})
+    assert _denied(result)
+    assert str(other) in result["hookSpecificOutput"]["permissionDecisionReason"]
 
 
-async def test_worktree_guard_denies_dot_dot_escape(tmp_path: Path):
-    project_root = tmp_path / "worktree-a"
-    project_root.mkdir()
+async def test_confinement_denies_dot_dot_escape(tmp_path: Path):
+    root = tmp_path / "worktree-a"
+    root.mkdir()
     (tmp_path / "sibling").mkdir()
-    guard = build_worktree_guard(project_root)
-    result = await guard(
-        "Write",
-        {"file_path": "../sibling/leak.txt"},
-        ToolPermissionContext(),
-    )
-    assert isinstance(result, PermissionResultDeny)
+    hook = build_confinement_hook(root)
+    assert _denied(await hook(_tool_call("Write", file_path="../sibling/leak.txt"), "t1", {}))
 
 
-async def test_worktree_guard_ignores_unguarded_tools(tmp_path: Path):
-    """Bash is not (and cannot cheaply be) path-guarded; the guard must pass
-    it through rather than pretending to cover it."""
-    project_root = tmp_path / "worktree-a"
-    project_root.mkdir()
-    guard = build_worktree_guard(project_root)
-    result = await guard(
-        "Bash",
-        {"command": "rm -rf /Users/marlinjai/software-dev/orchestrator"},
-        ToolPermissionContext(),
-    )
-    assert isinstance(result, PermissionResultAllow)
+async def test_confinement_denies_a_symlink_inside_that_points_outside(tmp_path: Path):
+    root = tmp_path / "worktree-a"
+    outside = tmp_path / "elsewhere"
+    root.mkdir()
+    outside.mkdir()
+    (root / "link").symlink_to(outside, target_is_directory=True)
+    hook = build_confinement_hook(root)
+    assert _denied(await hook(_tool_call("Write", file_path=str(root / "link" / "leak.txt")), "t1", {}))
 
 
-async def test_worktree_guard_ignores_tool_input_without_file_path(tmp_path: Path):
-    guard = build_worktree_guard(tmp_path)
-    result = await guard("Edit", {}, ToolPermissionContext())
-    assert isinstance(result, PermissionResultAllow)
+@pytest.mark.parametrize(
+    ("tool", "key"),
+    [("Write", "file_path"), ("Edit", "file_path"), ("MultiEdit", "file_path"), ("NotebookEdit", "notebook_path")],
+)
+async def test_confinement_covers_every_file_tool_and_its_path_key(tmp_path: Path, tool: str, key: str):
+    """NotebookEdit names its target `notebook_path`; the old guard read only
+    `file_path` and let a notebook write anywhere."""
+    root = tmp_path / "worktree-a"
+    root.mkdir()
+    hook = build_confinement_hook(root)
+    assert _denied(await hook(_tool_call(tool, **{key: str(tmp_path / "out.txt")}), "t1", {}))
+    assert await hook(_tool_call(tool, **{key: str(root / "in.txt")}), "t1", {}) == {}
+
+
+async def test_confinement_hook_leaves_other_tools_to_their_own_layer(tmp_path: Path):
+    """Bash is confined by the OS sandbox, not parsed here; the hook must pass it
+    through rather than pretend to cover it."""
+    hook = build_confinement_hook(tmp_path)
+    assert await hook(_tool_call("Bash", command="echo x > /somewhere/else"), "t1", {}) == {}
+    assert await hook(_tool_call("Edit"), "t1", {}) == {}
+
+
+def test_bash_sandbox_is_on_and_cannot_be_opted_out_of(monkeypatch: pytest.MonkeyPatch):
+    monkeypatch.setattr("orchestrator.worker.sys.platform", "darwin")
+    sandbox = build_bash_sandbox()
+    assert sandbox["enabled"] is True
+    assert sandbox["allowUnsandboxedCommands"] is False
+    # Filesystem confinement only: egress stays as open as it was before.
+    assert sandbox["network"] == {"allowedDomains": ["*"]}
+
+
+def test_bash_sandbox_refuses_an_unsupported_platform(monkeypatch: pytest.MonkeyPatch):
+    """No silent downgrade to an unconfined Worker."""
+    monkeypatch.setattr("orchestrator.worker.sys.platform", "win32")
+    with pytest.raises(ConfinementUnavailableError):
+        build_bash_sandbox()
+
+
+def test_bash_sandbox_on_linux_needs_bubblewrap(monkeypatch: pytest.MonkeyPatch):
+    monkeypatch.setattr("orchestrator.worker.sys.platform", "linux")
+    monkeypatch.setattr("orchestrator.worker.shutil.which", lambda _name: None)
+    with pytest.raises(ConfinementUnavailableError):
+        build_bash_sandbox()
+    monkeypatch.setattr("orchestrator.worker.shutil.which", lambda _name: "/usr/bin/bwrap")
+    assert build_bash_sandbox()["enabled"] is True

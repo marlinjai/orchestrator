@@ -11,12 +11,13 @@ What the Claude SDK gives the Claude adapter for free is built here explicitly:
   ``run_command`` and ``update_state`` (the same schema and handler as the
   Claude Worker's MCP tool), all confined to the attempt's work dir.
 - **Confinement**: every file tool resolves its path through
-  ``worker.path_outside_root``, the one check the Claude adapter's
-  ``can_use_tool`` guard also uses. ``run_command`` runs with ``cwd`` at the work
+  ``worker.path_outside_root``, the one check the Claude adapter's PreToolUse
+  confinement hook also uses. ``run_command`` runs with ``cwd`` at the work
   dir, the orchestrator's bash denylist, a timeout, capped output and an env
-  scrubbed of provider and proxy credentials. Like the Claude guard it cannot
-  stop a shell command from writing outside the work dir; the git reconcile and
-  the held-out verifier are the backstops.
+  scrubbed of provider and proxy credentials. Unlike the Claude Worker's Bash
+  (OS sandbox, see ``worker.build_bash_sandbox``) it is NOT sandboxed and
+  cannot stop a shell command from writing outside the work dir; the git
+  reconcile and the held-out verifier are the backstops.
 - **Telemetry**: the provider forward streams, so each model call's
   time-to-first-token, generation time, tool time and the provider-reported
   server latency are measured directly (``CallLatency``), which is what the E4

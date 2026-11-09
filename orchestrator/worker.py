@@ -11,16 +11,14 @@ not used here.
 
 import logging
 import os
+import shutil
+import sys
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import AsyncIterator, Literal
 
-from claude_agent_sdk import ClaudeAgentOptions, ClaudeSDKClient
-from claude_agent_sdk.types import (
-    PermissionResultAllow,
-    PermissionResultDeny,
-    ToolPermissionContext,
-)
+from claude_agent_sdk import ClaudeAgentOptions, ClaudeSDKClient, HookMatcher
+from claude_agent_sdk.types import HookContext, HookInput, HookJSONOutput, SandboxSettings
 
 from orchestrator.tools import build_state_mcp_server
 
@@ -306,18 +304,13 @@ def resolve_effective_mcp_servers(
     return allowed, dropped
 
 
-# File-editing tools whose input carries a `file_path` the Worker is about to
-# write to. Guarded by build_worktree_guard below.
+# File-editing tools whose input carries the path the Worker is about to write
+# to, and the input keys that hold it (NotebookEdit names it `notebook_path`).
+# Checked by the PreToolUse hook built in `build_confinement_hook`.
 PATH_GUARDED_TOOLS: frozenset[str] = frozenset(
     {"Write", "Edit", "NotebookEdit", "MultiEdit"}
 )
-
-
-def _out_of_root_path(tool_input: dict, project_root: Path) -> Path | None:
-    """Resolve tool_input's file_path against project_root and return it if it
-    escapes project_root, else None. project_root must already be resolved
-    (realpath)."""
-    return path_outside_root(tool_input.get("file_path"), project_root)
+PATH_INPUT_KEYS: tuple[str, ...] = ("file_path", "notebook_path")
 
 
 def path_outside_root(raw: str | None, project_root: Path) -> Path | None:
@@ -344,53 +337,113 @@ def path_outside_root(raw: str | None, project_root: Path) -> Path | None:
     return resolved
 
 
-def build_worktree_guard(project_dir: Path):
-    """Build a `can_use_tool` callback that hard-denies any Write / Edit /
-    NotebookEdit / MultiEdit call whose target path resolves outside
-    project_dir (realpath).
+def build_confinement_hook(project_dir: Path):
+    """Build the PreToolUse hook that confines the structured file-editing tools
+    (Write, Edit, MultiEdit, NotebookEdit) to ``project_dir``.
 
-    This closes the 2026-08-01 bug where a Worker given a prepared worktree
-    via --project edited the repo's MAIN checkout instead: `cwd` only sets the
-    SDK subprocess's *starting* directory, it does not constrain where a
-    later absolute-path Edit/Write call lands. can_use_tool is invoked by the
-    SDK before every tool call, so this is a true per-call assertion, not a
-    post-hoc check.
+    A hook, not `can_use_tool`: the SDK consults `can_use_tool` only for tools
+    that are NOT already in `allowed_tools`, and the Worker's defaults allow
+    Write and Edit outright, so a `can_use_tool` guard was never called (proved
+    with the real SDK on 0.2.93 and 0.2.121: the callback ran zero times and the
+    out-of-worktree file was written). PreToolUse hooks run before every tool
+    call regardless of `allowed_tools`.
 
-    Deliberately scoped to the structured file-editing tools, which carry an
-    explicit file_path the SDK gives us to check. It does not, and cannot,
-    guard against a Bash command writing outside project_dir (that would
-    require parsing/simulating arbitrary shell, a much larger feature); the
-    existing git-based reconcile step is the backstop for Bash-driven edits
-    made *inside* project_dir's own repo.
+    Paths are resolved with symlinks followed and `..` collapsed
+    (`path_outside_root`), so an absolute path, a `../` escape and a symlink
+    inside the worktree that points outside are all denied. This closes the
+    2026-08-01 bug where a Worker given a prepared worktree edited the repo's
+    main checkout instead (`cwd` only sets the starting directory).
+
+    It covers only the structured tools. A Bash command can write anywhere the
+    OS lets the process write; that is confined by the sandbox in
+    `build_bash_sandbox`, not by anything this hook could parse out of a shell
+    string.
     """
     project_root = project_dir.resolve()
 
-    async def can_use_tool(
-        tool_name: str,
-        tool_input: dict,
-        context: ToolPermissionContext,
-    ) -> PermissionResultAllow | PermissionResultDeny:
-        if tool_name in PATH_GUARDED_TOOLS:
-            offending = _out_of_root_path(tool_input, project_root)
-            if offending is not None:
-                logger.error(
-                    "worker tool %s targeted %s, outside assigned worktree %s; "
-                    "denying and interrupting the turn",
-                    tool_name,
-                    offending,
-                    project_root,
-                )
-                return PermissionResultDeny(
-                    message=(
+    async def confine(
+        input_data: HookInput,
+        tool_use_id: str | None,
+        context: HookContext,
+    ) -> HookJSONOutput:
+        tool_name = input_data.get("tool_name", "")
+        if tool_name not in PATH_GUARDED_TOOLS:
+            return {}
+        tool_input = input_data.get("tool_input") or {}
+        for key in PATH_INPUT_KEYS:
+            offending = path_outside_root(tool_input.get(key), project_root)
+            if offending is None:
+                continue
+            logger.error(
+                "worker tool %s targeted %s, outside assigned worktree %s; denying",
+                tool_name,
+                offending,
+                project_root,
+            )
+            return {
+                "hookSpecificOutput": {
+                    "hookEventName": "PreToolUse",
+                    "permissionDecision": "deny",
+                    "permissionDecisionReason": (
                         f"Refused: {tool_name} targeted {offending}, which is "
                         f"outside the assigned project root {project_root}. "
                         "Only edit files inside the assigned worktree."
                     ),
-                    interrupt=True,
-                )
-        return PermissionResultAllow()
+                }
+            }
+        return {}
 
-    return can_use_tool
+    return confine
+
+
+class ConfinementUnavailableError(RuntimeError):
+    """The OS sandbox that confines a Worker's Bash cannot run here. Raised
+    instead of starting an unconfined Worker."""
+
+
+def build_bash_sandbox() -> SandboxSettings:
+    """The Claude Code sandbox settings that confine a Worker's Bash.
+
+    With the sandbox on, the CLI runs every Bash command under the OS sandbox
+    (Seatbelt on macOS, bubblewrap on Linux) whose filesystem writes are limited
+    to the session's cwd (the task worktree), its git metadata and temp dirs; a
+    write anywhere else fails with "Operation not permitted". Proved with the
+    real SDK: `echo > /outside`, `cp`, `mv`, `tee` and `python -c` all fail,
+    while the same commands inside the worktree, and `git commit` in a linked
+    worktree, work (`scripts/prove_confinement.py`).
+
+    `allowUnsandboxedCommands` is False so a Worker cannot ask for a command to
+    run outside the sandbox (`dangerouslyDisableSandbox`).
+
+    Network: the sandbox also proxies Bash's network and, by default, allows no
+    domain at all (curl, git fetch, package installs fail). This confinement is
+    about filesystem writes, and Worker egress was unrestricted before it, so
+    every domain stays allowed; narrowing egress is a separate decision.
+
+    Known consequence: a command that writes a global cache outside the
+    worktree (`npm`'s ~/.npm, a pnpm store under ~/Library, ~/.cache) fails
+    inside the sandbox, which is the point; such a command must keep its cache
+    inside the worktree or the temp dir.
+    """
+    if sys.platform == "darwin":
+        pass
+    elif sys.platform.startswith("linux"):
+        if shutil.which("bwrap") is None:
+            raise ConfinementUnavailableError(
+                "the Bash sandbox needs bubblewrap (`bwrap`) on Linux; install it "
+                "(and socat) rather than run a Worker unconfined"
+            )
+    else:
+        raise ConfinementUnavailableError(
+            f"the Bash sandbox is not available on {sys.platform}; refusing to "
+            "run a Worker with unconfined Bash"
+        )
+    return {
+        "enabled": True,
+        "autoAllowBashIfSandboxed": True,
+        "allowUnsandboxedCommands": False,
+        "network": {"allowedDomains": ["*"]},
+    }
 
 
 def build_worker_options(
@@ -480,7 +533,11 @@ def build_worker_options(
         setting_sources=[],
         mcp_servers=mcp_servers,
         allowed_tools=allowed_tools,
-        can_use_tool=build_worktree_guard(project_dir),
+        # Confinement to the task worktree, two layers (see each builder): a
+        # PreToolUse hook for Write/Edit/MultiEdit/NotebookEdit, and the OS
+        # sandbox for Bash. Neither depends on `allowed_tools`.
+        hooks={"PreToolUse": [HookMatcher(matcher=None, hooks=[build_confinement_hook(project_dir)])]},
+        sandbox=build_bash_sandbox(),
     )
 
 
