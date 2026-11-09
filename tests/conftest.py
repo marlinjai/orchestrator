@@ -36,21 +36,16 @@ def _isolate_machine_env(monkeypatch):
 
 
 @pytest.fixture(autouse=True)
-def _bash_sandbox_is_available(monkeypatch):
-    """`build_worker_options` refuses to build a Worker where the Bash sandbox
-    cannot run (no bubblewrap on a bare Linux runner). The tests that only look at
-    the options must not depend on the runner image; the platform check itself is
-    tested directly in test_worker.py through the real function."""
+def _no_bash_sandbox_in_tests(monkeypatch):
+    """Many tests start the real Claude CLI process through the SDK (without
+    sending a model request). With the Bash sandbox required and a runner that
+    lacks bubblewrap and socat (a bare Linux CI image), that process refuses to
+    start (`failIfUnavailable`), which is exactly what it should do in
+    production and exactly what a hermetic unit test must not depend on. So
+    `build_worker_options` gets a disabled sandbox here. The real settings and
+    the platform checks are unit-tested through the real `build_bash_sandbox`
+    in test_worker.py, and the sandbox itself is proved against the real SDK by
+    scripts/prove_confinement.py."""
     from orchestrator import worker
 
-    monkeypatch.setattr(
-        worker,
-        "build_bash_sandbox",
-        lambda: {
-            "enabled": True,
-            "autoAllowBashIfSandboxed": True,
-            "allowUnsandboxedCommands": False,
-            "failIfUnavailable": True,
-            "network": {"allowedDomains": ["*"]},
-        },
-    )
+    monkeypatch.setattr(worker, "build_bash_sandbox", lambda: {"enabled": False})

@@ -375,11 +375,15 @@ def test_none_ceiling_is_unchanged_behavior(tmp_path: Path):
     assert "context7" in options.mcp_servers
 
 
-def test_worker_options_wire_the_confinement(tmp_path: Path):
+def test_worker_options_wire_the_confinement(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
     """Confinement must not depend on allowed_tools: the SDK never consults a
     `can_use_tool` callback for a tool that is in allowed_tools (Write, Edit and
     Bash are), which is how the old guard was inert. The options carry a
     PreToolUse hook for the file tools and the OS sandbox for Bash."""
+    # conftest swaps in a disabled sandbox so tests that start the CLI run
+    # anywhere; this test wants the real settings.
+    monkeypatch.setattr("orchestrator.worker.sys.platform", "darwin")
+    monkeypatch.setattr("orchestrator.worker.build_bash_sandbox", build_bash_sandbox)
     options = build_worker_options(
         state_path=tmp_path / "s.json",
         project_dir=tmp_path,
