@@ -594,22 +594,69 @@ def test_command_argv_on_macos_denies_writes_except_the_worktree_git_and_temp(tm
     assert "(deny file-write*)" in profile
     assert f'(subpath "{work.resolve()}")' in profile
     assert f'(subpath "{(work / ".git").resolve()}")' in profile
-    # a commit must not be able to plant hooks or rewrite the config
-    assert f'(subpath "{(work / ".git" / "hooks").resolve()}")' in profile.split("(deny file-write* ")[-1]
-    assert f'(literal "{(work / ".git" / "config").resolve()}")' in profile.split("(deny file-write* ")[-1]
+    # a commit must not be able to plant hooks, rewrite the config, or move the
+    # git dir itself away and rebuild it (a plain repo's .git is inside the worktree)
+    denied = profile.split("(deny file-write* ")[-1]
+    assert f'(literal "{(work / ".git").resolve()}")' in denied
+    assert f'(subpath "{(work / ".git" / "hooks").resolve()}")' in denied
+    assert f'(literal "{(work / ".git" / "config").resolve()}")' in denied
+    # LaunchServices would start an unconfined app on the command's behalf
+    assert '(deny mach-lookup (global-name "com.apple.coreservices.launchservicesd")' in profile
 
 
 def test_command_argv_on_linux_binds_the_same_paths_writable(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
     monkeypatch.setattr("orchestrator.worker.sys.platform", "linux")
-    monkeypatch.setattr("orchestrator.worker.require_sandbox_platform", lambda: None)
+    monkeypatch.setattr("orchestrator.worker.require_sandbox_platform", lambda **_k: None)
     work = _git_repo(tmp_path / "work")
     argv = sandboxed_command_argv("echo hi", work)
     assert argv[0] == "bwrap" and argv[1:4] == ["--ro-bind", "/", "/"]
     binds = [argv[i + 1] for i, a in enumerate(argv) if a == "--bind"]
     assert str(work.resolve()) in binds and str((work / ".git").resolve()) in binds
-    ro = [argv[i + 1] for i, a in enumerate(argv) if a == "--ro-bind"]
-    assert str((work / ".git" / "hooks").resolve()) in ro and str((work / ".git" / "config").resolve()) in ro
+    ro_pairs = [(argv[i + 1], argv[i + 2]) for i, a in enumerate(argv) if a == "--ro-bind"]
+    ro_targets = [dst for _src, dst in ro_pairs]
+    assert str((work / ".git" / "hooks").resolve()) in ro_targets and str((work / ".git" / "config").resolve()) in ro_targets
     assert argv[-3:] == ["/bin/bash", "-c", "echo hi"]
+
+
+def test_command_argv_on_linux_protects_a_hooks_dir_that_does_not_exist_yet(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
+    """`git init --template=` leaves no hooks dir; a command must not be able to
+    create one and plant a hook there."""
+    import shutil
+
+    monkeypatch.setattr("orchestrator.worker.sys.platform", "linux")
+    monkeypatch.setattr("orchestrator.worker.require_sandbox_platform", lambda **_k: None)
+    work = _git_repo(tmp_path / "work")
+    shutil.rmtree(work / ".git" / "hooks")
+    argv = sandboxed_command_argv("echo hi", work)
+    hooks = str((work / ".git" / "hooks").resolve())
+    pairs = [(argv[i + 1], argv[i + 2]) for i, a in enumerate(argv) if a == "--ro-bind"]
+    sources = [src for src, dst in pairs if dst == hooks]
+    assert sources and Path(sources[0]).is_dir() and not any(Path(sources[0]).iterdir())
+
+
+def test_command_argv_on_linux_does_not_need_socat_but_probes_the_real_flags(monkeypatch: pytest.MonkeyPatch):
+    """socat is for the Claude CLI's network proxy; the command sandbox only needs
+    bwrap, and its probe must use the flags the real command uses."""
+    monkeypatch.setattr("orchestrator.worker.sys.platform", "linux")
+    monkeypatch.setattr("orchestrator.worker.shutil.which", lambda name: "/usr/bin/bwrap" if name == "bwrap" else None)
+    seen = {}
+
+    def run(argv, **_k):
+        seen["argv"] = argv
+
+        class Done:
+            returncode = 0
+            stderr = b""
+
+        return Done()
+
+    monkeypatch.setattr("orchestrator.worker.subprocess.run", run)
+    from orchestrator.worker import _BWRAP_FLAGS, require_sandbox_platform
+
+    require_sandbox_platform(need_socat=False, probe_args=_BWRAP_FLAGS)
+    assert "--proc" in seen["argv"] and "--dev" in seen["argv"]
+    with pytest.raises(ConfinementUnavailableError, match="socat"):
+        require_sandbox_platform()
 
 
 def test_command_argv_refuses_when_no_sandbox_can_run(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
@@ -639,3 +686,26 @@ def test_command_argv_really_confines_writes_on_macos(tmp_path: Path):
         assert blocked.returncode != 0 and not (outside / "out.txt").exists()
     finally:
         shutil.rmtree(outside, ignore_errors=True)
+
+
+@pytest.mark.skipif(
+    __import__("sys").platform != "darwin" or not os.path.exists("/usr/bin/sandbox-exec"),
+    reason="runs the real macOS sandbox",
+)
+def test_command_sandbox_protects_the_git_dir_of_a_plain_repo_on_macos(tmp_path: Path):
+    """Not a mock: in a plain repo the .git dir is inside the worktree, so it
+    must be protected as an entry too (`mv .git .g` and rebuild), and its hooks
+    and config stay read-only, while a commit still works."""
+    import subprocess
+
+    work = _git_repo(tmp_path / "work")
+
+    def run(cmd: str):
+        return subprocess.run(sandboxed_command_argv(cmd, work), cwd=work, capture_output=True, text=True)
+
+    assert run("mv .git .g").returncode != 0 and (work / ".git").is_dir()
+    assert run("echo planted > .git/hooks/pre-commit").returncode != 0
+    assert not (work / ".git" / "hooks" / "pre-commit").exists()
+    assert run("echo '[core]' >> .git/config").returncode != 0
+    ok = run("echo x > f.txt && git add f.txt && git -c user.email=a@b.c -c user.name=p commit -qm probe && git log --format=%s")
+    assert ok.returncode == 0 and "probe" in ok.stdout

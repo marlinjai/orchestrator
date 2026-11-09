@@ -24,14 +24,16 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
   start). A denied write also stops the turn, as the old guard intended. The file
   tools now require an absolute path inside the worktree: a relative path or `~`
   is refused, because the tool resolves it against a base the hook cannot see.
-  `scripts/prove_confinement.py` is the real-SDK proof (27 cases: the
+  `scripts/prove_confinement.py` is the real-SDK proof (31 cases: the
   Claude Worker on the SDK in `uv.lock` and the Mercury adapter's `run_command`,
   plus `--control` runs that remove each layer and show the escape).
   A command that writes a global cache outside the worktree (`~/.npm`, a pnpm
   store, `~/.cache`) now fails inside the sandbox by design.
   The OpenAI-compatible (Mercury) adapter's `run_command`, which was a plain
   `bash -c`, now runs under the same write policy (Seatbelt on macOS, bubblewrap
-  on Linux) and is refused when no sandbox can run. Known limit: a hard link
+  on Linux; git directories, their hooks and config stay protected, and on macOS
+  the LaunchServices lookups that `open -a` uses to start an unconfined app are
+  denied) and is refused when no sandbox can run. Known limit: a hard link
   that already exists inside the worktree to a file outside it stays writable
   through the shell (the sandbox judges paths; the hook refuses the file tools
   on such a file).

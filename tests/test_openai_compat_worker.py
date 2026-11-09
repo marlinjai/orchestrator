@@ -262,6 +262,31 @@ async def test_run_command_is_refused_not_run_unconfined_when_no_sandbox_exists(
     assert not (tmp_path / "work" / "should-not-exist").exists()
 
 
+@pytest.mark.skipif(
+    __import__("sys").platform != "darwin" or not Path("/usr/bin/sandbox-exec").exists(),
+    reason="runs the real macOS sandbox",
+)
+async def test_run_command_really_runs_sandboxed_with_the_scrubbed_env(tmp_path, monkeypatch):
+    """The conftest stub swaps the sandbox for plain bash so the suite runs
+    anywhere; this one test puts the real argv builder back and runs it through
+    `_run_command` with the scrubbed env, the way the adapter runs commands."""
+    import tempfile
+
+    from orchestrator.worker import sandboxed_command_argv
+
+    monkeypatch.setattr("orchestrator.adapters.openai_compat_worker.sandboxed_command_argv", sandboxed_command_argv)
+    monkeypatch.setenv("OPENAI_API_KEY", "openai-secret")
+    session = _session(tmp_path, _ScriptedChat())
+    outside = Path(tempfile.mkdtemp(dir=Path.home(), prefix=".orch-adapter-test-"))
+    try:
+        inside = await _tool(session, "run_command", {"command": 'echo "[${OPENAI_API_KEY:-}]" > in.txt && cat in.txt'})
+        assert inside.startswith("exit code 0") and "[]" in inside
+        blocked = await _tool(session, "run_command", {"command": f"echo x > {outside}/out.txt"})
+        assert not blocked.startswith("exit code 0") and not (outside / "out.txt").exists()
+    finally:
+        shutil.rmtree(outside, ignore_errors=True)
+
+
 async def test_run_command_honors_the_denylist(tmp_path):
     session = _session(tmp_path, _ScriptedChat())
     out = await _tool(session, "run_command", {"command": "rm -rf ."})

@@ -9,6 +9,7 @@ the SDK is `setting_sources=[]` ("SDK isolation mode"). The legacy
 not used here.
 """
 
+import functools
 import logging
 import os
 import shutil
@@ -444,16 +445,19 @@ class ConfinementUnavailableError(RuntimeError):
     instead of starting an unconfined Worker."""
 
 
-def require_sandbox_platform() -> None:
+def require_sandbox_platform(*, need_socat: bool = True, probe_args: tuple[str, ...] = ()) -> None:
     """Raise ConfinementUnavailableError unless an OS sandbox can run here:
-    Seatbelt (`sandbox-exec`) on macOS, bubblewrap with socat and working user
-    namespaces on Linux. Shared by the Claude Worker's Bash sandbox and the
-    Mercury adapter's `run_command`, so neither can run unconfined by accident."""
+    Seatbelt (`sandbox-exec`) on macOS, bubblewrap with working user namespaces
+    on Linux (and socat, which the Claude CLI's network proxy needs:
+    ``need_socat``). Shared by the Claude Worker's Bash sandbox and the Mercury
+    adapter's `run_command`, so neither can run unconfined by accident.
+    ``probe_args`` are extra bwrap flags the real invocation uses, so the probe
+    fails exactly where the real command would."""
     if sys.platform == "darwin":
         if not os.path.exists(SANDBOX_EXEC):
             raise ConfinementUnavailableError(f"the macOS sandbox ({SANDBOX_EXEC}) is missing")
     elif sys.platform.startswith("linux"):
-        missing = [tool for tool in ("bwrap", "socat") if shutil.which(tool) is None]
+        missing = [tool for tool in ("bwrap", "socat") if (need_socat or tool != "socat") and shutil.which(tool) is None]
         if missing:
             raise ConfinementUnavailableError(
                 f"the Bash sandbox needs {' and '.join(missing)} on Linux; install "
@@ -464,7 +468,7 @@ def require_sandbox_platform() -> None:
         # session would then fail at its first Bash call. Fail here instead.
         try:
             probe = subprocess.run(
-                ["bwrap", "--ro-bind", "/", "/", "--unshare-user", "true"],
+                ["bwrap", "--ro-bind", "/", "/", *probe_args, "--unshare-user", "true"],
                 capture_output=True,
                 timeout=15,
             )
@@ -483,67 +487,114 @@ def require_sandbox_platform() -> None:
         )
 
 
-def _git_dirs(work_dir: Path) -> list[Path]:
+@functools.lru_cache(maxsize=64)
+def _git_dirs(work_dir: Path) -> tuple[Path, ...]:
     """The git directories a commit in ``work_dir`` writes: its own (a linked
-    worktree's admin dir) and the shared common dir (objects, refs, logs)."""
+    worktree's admin dir) and the shared common dir (objects, refs, logs).
+    Cached per work dir: they never move during a run, and this runs a git
+    process per flag."""
     found: list[Path] = []
     for flag in ("--git-dir", "--git-common-dir"):
         try:
             out = subprocess.run(
-                ["git", "-C", str(work_dir), "rev-parse", "--path-format=absolute", flag],
+                ["git", "-C", str(work_dir), "rev-parse", flag],
                 capture_output=True,
                 text=True,
                 timeout=10,
             )
         except (OSError, subprocess.SubprocessError):
             continue
-        path = Path(out.stdout.strip()).resolve() if out.returncode == 0 and out.stdout.strip() else None
-        if path is not None and path not in found:
+        raw = out.stdout.strip() if out.returncode == 0 else ""
+        if not raw:
+            continue
+        path = Path(raw)
+        path = (path if path.is_absolute() else work_dir / path).resolve()  # relative to work_dir, any git version
+        if path not in found:
             found.append(path)
-    return found
+    return tuple(found)
 
 
 def _sbpl_string(path: Path | str) -> str:
     return '"' + str(path).replace("\\", "\\\\").replace('"', '\\"') + '"'
 
 
+# macOS: LaunchServices and launchd start processes OUTSIDE the sandbox on a
+# caller's behalf (`open -a Terminal x.command`, `open -a <app>`), so a confined
+# command could hand its work to an unconfined one. Their mach lookups are denied
+# (proved: `open -g -j -a Calculator` starts the app under a profile without this
+# and fails with it; git, DNS and curl keep working).
+_MACOS_DENIED_MACH_SERVICES = (
+    "com.apple.coreservices.launchservicesd",
+    "com.apple.lsd.mapdb",
+    "com.apple.lsd.modifydb",
+    "com.apple.lsd.open",
+    "com.apple.coreservices.quarantine-resolver",
+)
+
+# The Linux argv's own flags, also used by the preflight probe so it fails where
+# the real command would (an unprivileged container may allow user namespaces
+# but refuse the /proc mount).
+_BWRAP_FLAGS = ("--dev", "/dev", "--proc", "/proc", "--die-with-parent")
+
+_EMPTY_DIR: Path | None = None
+
+
+def _empty_dir() -> Path:
+    """An empty directory (made once) to bind read-only over a git `hooks` dir
+    that does not exist yet, so a command cannot create hooks there."""
+    global _EMPTY_DIR
+    if _EMPTY_DIR is None or not _EMPTY_DIR.exists():
+        _EMPTY_DIR = Path(tempfile.mkdtemp(prefix="orchestrator-empty-"))
+    return _EMPTY_DIR
+
+
 def sandboxed_command_argv(command: str, work_dir: Path) -> list[str]:
     """argv that runs ``command`` in bash under the same write confinement as the
     Claude Worker's Bash sandbox: filesystem writes only in ``work_dir``, the
-    git directories a commit in it writes, and temp dirs. Used by the Mercury
-    adapter's `run_command`, which has no SDK sandbox to switch on.
+    git directories a commit in it writes, and temp dirs (`/tmp`, `/var/tmp` and
+    the user's temp dir). Used by the Mercury adapter's `run_command`, which has
+    no SDK sandbox to switch on.
 
     macOS: Seatbelt through `sandbox-exec` with a deny-writes profile. Linux:
     bubblewrap with the root read-only and those paths bound writable. Either
-    way git `hooks` and `config` stay read-only (a commit must not be able to
-    plant code the main checkout later runs). Raises ConfinementUnavailableError
-    when no sandbox can run here; the caller must then refuse the command, never
-    run it unconfined. Network is not restricted (as for the Claude Worker).
+    way the git directories themselves, their `hooks` and their `config` stay
+    protected (a commit must not be able to plant code the main checkout later
+    runs, and a plain repo's `.git` must not be renamed away and rebuilt).
+    Raises ConfinementUnavailableError when no sandbox can run here; the caller
+    must then refuse the command, never run it unconfined. Network is not
+    restricted (as for the Claude Worker).
     """
-    require_sandbox_platform()
+    require_sandbox_platform(need_socat=False, probe_args=_BWRAP_FLAGS)
     root = work_dir.resolve()
+    gits = list(_git_dirs(root))
     tmp = Path(tempfile.gettempdir()).resolve()
-    writable = [root, tmp, *_git_dirs(root)]
-    protected = [p for g in _git_dirs(root) for p in (g / "hooks", g / "config")]
+    writable = [root, tmp, *gits]
     if sys.platform == "darwin":
-        allow = " ".join(f"(subpath {_sbpl_string(p)})" for p in [*writable, Path("/private/tmp"), Path("/private/var/tmp")])
-        deny = " ".join(
-            f"(subpath {_sbpl_string(p)})" if p.name == "hooks" else f"(literal {_sbpl_string(p)})" for p in protected
-        )
+        writable += [Path("/private/tmp"), Path("/private/var/tmp")]
+        allow = " ".join(f"(subpath {_sbpl_string(p)})" for p in writable)
+        # Denied AFTER the allows (the last matching rule wins): the git dirs as
+        # entries (so `mv .git .g` fails), their hooks and config.
+        denied = [f"(literal {_sbpl_string(g)})" for g in gits]
+        for g in gits:
+            denied += [f"(subpath {_sbpl_string(g / 'hooks')})", f"(literal {_sbpl_string(g / 'config')})"]
+        mach = " ".join(f'(global-name "{name}")' for name in _MACOS_DENIED_MACH_SERVICES)
         profile = (
             "(version 1)(allow default)(deny file-write*)"
             f"(allow file-write* {allow}"
             ' (literal "/dev/null") (literal "/dev/zero") (literal "/dev/tty") (subpath "/dev/fd")'
             ' (regex #"^/dev/ttys[0-9]+$"))'
-            + (f"(deny file-write* {deny})" if deny else "")
+            + (f"(deny file-write* {' '.join(denied)})" if denied else "")
+            + f"(deny mach-lookup {mach})"
         )
         return [SANDBOX_EXEC, "-p", profile, "/bin/bash", "-c", command]
-    argv = ["bwrap", "--ro-bind", "/", "/", "--dev", "/dev", "--proc", "/proc", "--die-with-parent"]
-    for path in writable:
-        argv += ["--bind", str(path), str(path)]
-    for path in protected:
-        if path.exists():
-            argv += ["--ro-bind", str(path), str(path)]
+    argv = ["bwrap", "--ro-bind", "/", "/", *_BWRAP_FLAGS]
+    for path in [*writable, *(p for p in (Path("/tmp"), Path("/var/tmp")) if p.exists())]:
+        argv += ["--bind", str(path.resolve()), str(path.resolve())]
+    for g in gits:
+        hooks = g / "hooks"
+        argv += ["--ro-bind", str(hooks if hooks.exists() else _empty_dir()), str(hooks)]
+        if (g / "config").exists():
+            argv += ["--ro-bind", str(g / "config"), str(g / "config")]
     return [*argv, "--chdir", str(root), "/bin/bash", "-c", command]
 
 
