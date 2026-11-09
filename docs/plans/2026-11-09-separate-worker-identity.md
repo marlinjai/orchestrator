@@ -1,6 +1,6 @@
 ---
 type: plan
-status: draft
+status: decided
 date: 2026-11-09
 title: "A separate identity for orchestrator Workers: a per-task container in a dedicated, home-less Colima VM"
 summary: >
@@ -178,21 +178,28 @@ with an explicit flag and a warning, and Workers stay stopped in the meantime. R
 the flag path and the `orch-worker` profile; no data migration. Revocation drill, tested before Workers run: revoke the key in the
 Console; the proxy receives 401 and the run stops; rotate by creating a new key and updating Infisical.
 
-## What needs Marlin
+## Decisions (Marlin, 2026-11-09)
 
-- Approve this plan, including the cost: Workers then bill per token on the Console API key instead of using his
-  subscription (the orchestrator chose the subscription on purpose to avoid API spend), bounded by the workspace spend
-  limit he sets.
-- Create the dedicated Console workspace with a spend limit and one API key (Console actions on his account; the
-  Admin API cannot create keys), and put the key into Infisical himself in the Infisical web interface under a name the
-  plan gives; it never goes through a chat or a terminal the orchestrator reads.
+- **Plan approved**, including the cost: Workers bill per token on a Console API key instead of using his
+  subscription (the orchestrator chose the subscription on purpose to avoid API spend).
+- **Spend limit: 75 USD per month** on the dedicated Console workspace `orchestrator-workers`. That limit is the
+  final backstop behind the proxy's own caps.
+- **Key handling: minted by the agent through the automation browser, never by hand and never printed.** A
+  `dev-browser` script creates the workspace, sets the limit, creates one key named `orchestrator-worker`, and
+  moves the value straight into Infisical inside the same script (project `orchestrator`, environment `prod`, path
+  `/`, key `ORCH_WORKER_ANTHROPIC_API_KEY`). The script never logs the value; it reports only a prefix class and a
+  length check. Verification afterwards is functional (one minimal request through the secrets proxy answering 200),
+  never by reading the value. This replaces the earlier "Marlin types it into the Infisical web interface" step.
+- **GitHub-enforced review is not pursued**: no GitHub Pro. The head-pinned merge gate stays enforced by land-pr
+  only, with the trust boundary stated in the security fleet plan (a compromised process running as Marlin can
+  bypass it).
 - Considered and not chosen: a `claude setup-token` subscription token (one-year life, model requests only,
   revocation not documented, and Consumer Terms 3.7 limit automated access to API keys unless otherwise explicitly
   permitted; the Agent SDK documentation names the API key as its auth).
 
 ## Done when
 
-- [ ] Plan decided; the synthetic lab confirms the SDK honours `ANTHROPIC_BASE_URL` with the run secret.
+- [x] Plan decided (2026-11-09); the synthetic lab confirms the SDK honours `ANTHROPIC_BASE_URL` with the run secret.
 - [ ] `orch-worker` profile, egress filter, container runner, Claude proxy, bundle handback implemented with tests.
 - [ ] Proof list passes in a real run, with controls; the revocation drill passes.
 - [ ] Documentation and the security plan updated; the "do not run the orchestrator" memory note lifted only then.
