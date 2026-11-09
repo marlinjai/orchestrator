@@ -40,6 +40,42 @@ does not depend on Marlin clicking Deny needs a different identity with no keych
   environment variable it would be readable in `/proc/1/environ` and in `docker inspect` on the host.
 - Fetching from a local clone runs `git-upload-pack` as Marlin, which reads the clone's configuration and alternates.
 
+
+## Synthetic lab results (2026-11-09, throwaway Colima profile, synthetic tokens only, profile deleted afterwards)
+
+- **Proxy routing:** the Claude Code CLI 2.1.319 and the Python Agent SDK 0.2.121 both send to `ANTHROPIC_BASE_URL`; an
+  auth token in the environment outranks a subscription token; the SDK honours the proxy with `ANTHROPIC_API_KEY` set to
+  a run secret (two `POST /v1/messages?beta=true`, answered through a stub upstream). A tool shell inside the Worker
+  cannot repoint the CLI, but can send any request to any host egress allows: the proxy allowlist and the egress filter
+  are what bound abuse.
+- **VM:** a dedicated profile mounting one temp folder has no `/Users` at all. Docker userns-remap works only with
+  `features.containerd-snapshotter=false` (Docker 29 refuses otherwise); container root then maps to an unprivileged
+  VM uid (100000), and the hardened container (read-only root, `--cap-drop ALL`, no-new-privileges, pids and memory
+  limits) still runs the CLI end to end. Files written through the mount appear on the Mac owned by Marlin's uid.
+- **Egress:** without a filter a container reached the Mac's ports 9222, 9224 and 22, the VM's sshd, the tailnet secrets
+  proxy and the bridge gateway; with the filter (DOCKER-USER for routed traffic, INPUT for the VM itself, ip6tables
+  FORWARD drop) all were blocked. An internal Docker network per task plus a forward proxy that allows CONNECT only to
+  listed hosts blocked direct 443, port 53, DNS resolution and non-listed hosts while the registry worked. IPv6 blocked.
+- **Port forwards:** Lima's default forwarded every VM listener and published container port to the Mac on all
+  interfaces, reachable from the LAN; `portForwarder: none` in the profile removed them.
+- **Task separation:** bind-mounting only the task directory isolates files; containers on the same default bridge
+  reached each other (br_netfilter not loaded), so each task gets its own internal network.
+- **Persistence:** a VM restart lost the iptables rules, br_netfilter and the userns setting (Colima regenerates
+  `daemon.json`); the profile's `docker:` section plus a `provision` script that installs the egress script, a systemd
+  unit bound to docker.service and a modules-load entry restored everything after restart. `colima start` switches the
+  global Docker context, so the runner always passes an explicit context and restores it.
+- **Handback:** with the plan's exact bundle commands, canaries for hooks, `core.fsmonitor`, `packObjectsHook`,
+  `core.sshCommand`, `core.pager`, `core.hooksPath`, alternates, symlinks and a forged `main` all stayed inert, only the
+  target ref changed and fsck was clean; a symlinked bundle and a 120 MB object were refused. Controls: a plain
+  `git fetch` from the clone pulled an object that existed only in an alternates repository (host data leak), and
+  `git status` inside the clone executed `core.fsmonitor` (host code execution).
+- **Proxy abuse:** a synthetic proxy allowed only `POST /v1/messages` (with `?beta=true`) and refused a wrong or expired
+  secret, missing credential, other methods, `count_tokens`, batches, files, models, traversal and encoded paths,
+  absolute-URI and `CONNECT` requests, a 2.1 MiB body and requests over the rate limit; the upstream only ever saw the
+  upstream key. Beyond endpoints, a messages request can carry `mcp_servers` and server-side tools (web search, web
+  fetch, code execution) that make Anthropic reach arbitrary URLs, so the proxy also rejects those in the body.
+- Exact commands: `docs/plans/assets/2026-11-09-isolation-lab-commands.md`.
+
 ## Options compared
 
 | Option | Separation from Marlin's keychain, home, credentials | Verdict |
@@ -51,6 +87,8 @@ does not depend on Marlin clicking Deny needs a different identity with no keych
 
 ## Design
 
+0. **Pinned image:** digest-pinned base, lockfiles, and an explicitly pinned Claude Code CLI version (the
+   orchestrator pins none today).
 1. **Dedicated Colima profile** `orch-worker`: its own VM, `mounts` listing only `~/.orchestrator/worker-clones`
    (writable) and nothing else of the home folder; Docker with `userns-remap` so container root is unprivileged in the
    VM; nothing else runs in this VM. The `default` profile is never used for Workers. The orchestrator refuses to start
@@ -60,7 +98,11 @@ does not depend on Marlin clicking Deny needs a different identity with no keych
    link-local and the VM's own services. Containers get **no direct internet**: direct 443 and port 53 are dropped;
    outbound HTTPS goes only through a forward proxy in the VM that allows the Claude proxy and the package registries
    by hostname (npm, PyPI, crates as needed). Rules are re-applied and re-tested on every VM start; the runner refuses
-   to start a Worker if the check fails. Lima's automatic port forwards are disabled (`portForwards` ignore all).
+   to start a Worker if the check fails. Lima's port forwarding is disabled (`portForwarder: none`). Each task runs on
+   its own `--internal` Docker network with the forward proxy dual-homed. Persistence comes from the profile's
+   `docker:` section (`userns-remap: default`, `features.containerd-snapshotter: false`) and a `provision` script that
+   installs the egress rules as a systemd unit bound to docker.service plus `br_netfilter`; the runner always uses an
+   explicit Docker context, never the global one.
 3. **Container per task run:** `--rm`, read-only root filesystem, `--cap-drop ALL`, `--security-opt
    no-new-privileges`, `--pids-limit`, memory and CPU limits, a size-capped tmpfs for `/tmp` and caches, a non-root
    user, image run by digest with `--pull=never`. Mounted: only that task's own directory
@@ -75,7 +117,8 @@ does not depend on Marlin clicking Deny needs a different identity with no keych
    allows only `POST /v1/messages` (and `/v1/messages/count_tokens` if the SDK uses it); refuses every other path and
    method, absolute-URI and `CONNECT` requests and any Worker-set Host; forwards only to a hard-coded
    `https://api.anthropic.com`; strips incoming auth and adds the real key; enforces an allowed model list, a
-   `max_tokens` ceiling, a body-size cap and only the `anthropic-beta` values the SDK needs; counts tokens from each
+   `max_tokens` ceiling, a body-size cap (1 MiB), only the `anthropic-beta` values the SDK needs, and rejects bodies
+   carrying `mcp_servers` or server-side tools (web search, web fetch, code execution); counts tokens from each
    response's `usage` against a per-run budget, caps request rate and concurrency, and stops the run on a breach. The
    workspace spend limit is the final backstop. `update_state` is served the same way, on its own allowed port with
    per-task authentication. Residual risk, stated: a container escape to VM root can rewrite the filter and reach the
