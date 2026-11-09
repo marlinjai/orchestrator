@@ -198,6 +198,12 @@ Console; the proxy receives 401 and the run stops; rotate by creating a new key 
   revocation not documented, and Consumer Terms 3.7 limit automated access to API keys unless otherwise explicitly
   permitted; the Agent SDK documentation names the API key as its auth).
 
+## Parked (Marlin, 2026-11-09)
+
+The orchestrator has not run since 2026-10-02 and is not in use, so the build waits until autonomous runs are wanted
+again. While parked, Workers do not run at all, which carries no risk. The ROADMAP line holds the item; the Console key
+stays in Infisical unused (no cost) and expires 2027-02-09.
+
 ## Done when
 
 - [x] Key minted 2026-11-09: workspace `orchestrator-workers` (`wrkspc_017ZKdAQ7Vatft7khZZDi4ja`), limit 75 USD per
