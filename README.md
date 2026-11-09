@@ -6,11 +6,11 @@ Autonomous Claude Code orchestrator. Spawns a Worker (Claude Code SDK session) o
 
 Two paths:
 
-**As a global CLI** (recommended for cross-project use):
+**As a global CLI** (recommended for cross-project use), from a checkout, pinned to `uv.lock`:
 
-    uv tool install git+https://github.com/marlinjai/orchestrator
-    # or, for local development:
-    cd ~/software-dev/orchestrator && uv tool install --editable .
+    cd ~/software-dev/orchestrator && scripts/install-tool.sh
+
+The script exports `uv.lock` as constraints and runs `uv tool install --force --editable . -c <constraints>`, so the installed tool has exactly the locked dependency versions. Run it again after pulling a change to `uv.lock`. A plain `uv tool install --editable .` (or `uv tool install git+https://github.com/marlinjai/orchestrator`) resolves fresh and ignores the lockfile; it once installed a newer `claude-agent-sdk` than the one the Worker confinement is proved against, and `orchestrator start` now warns when the installed SDK differs from `uv.lock`.
 
 After install, the `orchestrator` binary is on PATH everywhere.
 

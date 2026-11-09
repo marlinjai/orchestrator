@@ -73,6 +73,26 @@ async def test_orchestrator_writes_initial_state(cfg: OrchestratorConfig):
     assert state.status == "completed"
 
 
+async def test_run_start_warns_when_the_installed_sdk_differs_from_the_lock(cfg: OrchestratorConfig, monkeypatch, caplog):
+    import logging
+
+    monkeypatch.setattr("orchestrator.orchestrator.lock_drift_warning", lambda: "DRIFT-MARKER installed sdk differs")
+    with caplog.at_level(logging.WARNING, logger="orchestrator.orchestrator"):
+        with _mock_loop([_turn("worker said done")], [_decision("stop", text_out="", reasoning="done")]):
+            await run_orchestrator(cfg)
+    assert "DRIFT-MARKER" in caplog.text
+
+
+async def test_run_start_is_silent_about_the_lock_when_nothing_differs(cfg: OrchestratorConfig, monkeypatch, caplog):
+    import logging
+
+    monkeypatch.setattr("orchestrator.orchestrator.lock_drift_warning", lambda: None)
+    with caplog.at_level(logging.WARNING, logger="orchestrator.orchestrator"):
+        with _mock_loop([_turn("worker said done")], [_decision("stop", text_out="", reasoning="done")]):
+            await run_orchestrator(cfg)
+    assert "uv.lock" not in caplog.text
+
+
 async def test_orchestrator_iterates_until_proxy_stops(cfg: OrchestratorConfig):
     with _mock_loop(
         [_turn("t1", 1), _turn("t2", 2), _turn("t3", 3)],
