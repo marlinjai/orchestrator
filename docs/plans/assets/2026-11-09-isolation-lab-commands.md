@@ -4,6 +4,9 @@ type: documentation
 date: 2026-11-09
 ---
 
+> Reconstructed after the lab from what was run (the lab scripts were deleted at cleanup); these commands were
+> not re-executed after writing. Treat them as a recipe to re-verify, not as a tested script.
+
 # Isolation lab: the commands that worked (2026-11-09)
 
 Everything here is synthetic. No real credential was used or created. Placeholders:
