@@ -26,7 +26,6 @@ def test_worker_options_drops_user_settings(tmp_path: Path):
     options = build_worker_options(
         state_path=tmp_path / "s.json",
         project_dir=tmp_path,
-        denied_bash=[],
     )
     assert options.setting_sources == []
 
@@ -36,7 +35,6 @@ def test_worker_options_has_state_mcp(tmp_path: Path):
     options = build_worker_options(
         state_path=state_path,
         project_dir=tmp_path,
-        denied_bash=["rm -rf"],
     )
     assert "orchestrator-state" in options.mcp_servers
     assert "mcp__orchestrator-state__update_state" in options.allowed_tools
@@ -48,7 +46,6 @@ def test_worker_options_has_secrets_proxy_mcp(tmp_path: Path):
     options = build_worker_options(
         state_path=tmp_path / "s.json",
         project_dir=tmp_path,
-        denied_bash=[],
     )
     assert "secrets-proxy" in options.mcp_servers
     server = options.mcp_servers["secrets-proxy"]
@@ -77,7 +74,6 @@ def test_worker_options_never_puts_proxy_token_in_mcp_config(
     options = build_worker_options(
         state_path=tmp_path / "s.json",
         project_dir=tmp_path,
-        denied_bash=[],
     )
     server = options.mcp_servers["secrets-proxy"]
     assert "PROXY_TOKEN" not in server["env"]
@@ -95,7 +91,6 @@ def test_worker_options_includes_default_tools(tmp_path: Path):
     options = build_worker_options(
         state_path=tmp_path / "s.json",
         project_dir=tmp_path,
-        denied_bash=[],
     )
     for needed in ["Read", "Edit", "Write", "Bash", "Grep"]:
         assert needed in options.allowed_tools
@@ -105,7 +100,6 @@ def test_worker_options_sets_cwd(tmp_path: Path):
     options = build_worker_options(
         state_path=tmp_path / "s.json",
         project_dir=tmp_path,
-        denied_bash=[],
     )
     assert options.cwd == str(tmp_path)
 
@@ -120,7 +114,6 @@ def test_worker_options_scrubs_anthropic_api_key(tmp_path: Path, monkeypatch):
     build_worker_options(
         state_path=tmp_path / "s.json",
         project_dir=tmp_path,
-        denied_bash=[],
     )
     assert "ANTHROPIC_API_KEY" not in os.environ
 
@@ -130,7 +123,6 @@ def test_worker_options_scrub_is_noop_when_key_absent(tmp_path: Path, monkeypatc
     build_worker_options(
         state_path=tmp_path / "s.json",
         project_dir=tmp_path,
-        denied_bash=[],
     )
     assert "ANTHROPIC_API_KEY" not in os.environ
 
@@ -174,7 +166,6 @@ def test_build_worker_options_api_key_mode_keeps_key(tmp_path: Path, monkeypatch
     build_worker_options(
         state_path=tmp_path / "s.json",
         project_dir=tmp_path,
-        denied_bash=[],
         auth_mode="api_key",
     )
     assert os.environ.get("ANTHROPIC_API_KEY") == "sk-ant-keep"
@@ -214,7 +205,6 @@ def test_defaults_preserved_when_no_extras(tmp_path: Path):
     options = build_worker_options(
         state_path=tmp_path / "s.json",
         project_dir=tmp_path,
-        denied_bash=[],
         extras=None,
     )
     assert set(options.mcp_servers) == {"orchestrator-state", "secrets-proxy"}
@@ -226,7 +216,6 @@ def test_goal_allowed_tools_are_unioned_in(tmp_path: Path):
     options = build_worker_options(
         state_path=tmp_path / "s.json",
         project_dir=tmp_path,
-        denied_bash=[],
         extras=extras,
     )
     # New tool added, defaults preserved, duplicate ("Read") not re-added.
@@ -241,7 +230,6 @@ def test_goal_mcp_servers_merge_from_registry(tmp_path: Path):
     options = build_worker_options(
         state_path=tmp_path / "s.json",
         project_dir=tmp_path,
-        denied_bash=[],
         extras=extras,
     )
     assert "context7" in options.mcp_servers
@@ -260,7 +248,6 @@ def test_goal_cannot_drop_default_servers(tmp_path: Path):
     options = build_worker_options(
         state_path=tmp_path / "s.json",
         project_dir=tmp_path,
-        denied_bash=[],
         extras=extras,
     )
     assert "secrets-proxy" in options.mcp_servers
@@ -278,7 +265,6 @@ def test_unknown_server_name_handled_safely(tmp_path: Path):
     options = build_worker_options(
         state_path=tmp_path / "s.json",
         project_dir=tmp_path,
-        denied_bash=[],
         extras=extras,
     )
     assert "coolify" not in options.mcp_servers
@@ -323,7 +309,6 @@ def test_ceiling_allows_in_ceiling_server(tmp_path: Path):
     options = build_worker_options(
         state_path=tmp_path / "s.json",
         project_dir=tmp_path,
-        denied_bash=[],
         extras=extras,
         allowed_mcp_servers=["context7"],
     )
@@ -338,7 +323,6 @@ def test_ceiling_drops_out_of_ceiling_server(tmp_path: Path):
     options = build_worker_options(
         state_path=tmp_path / "s.json",
         project_dir=tmp_path,
-        denied_bash=[],
         extras=extras,
         allowed_mcp_servers=["some-other-server"],  # ceiling that excludes context7
     )
@@ -355,7 +339,6 @@ def test_empty_ceiling_drops_all_extras_keeps_defaults(tmp_path: Path):
     options = build_worker_options(
         state_path=tmp_path / "s.json",
         project_dir=tmp_path,
-        denied_bash=[],
         extras=extras,
         allowed_mcp_servers=[],  # operator allows no extra servers on this repo
     )
@@ -369,7 +352,6 @@ def test_none_ceiling_is_unchanged_behavior(tmp_path: Path):
     options = build_worker_options(
         state_path=tmp_path / "s.json",
         project_dir=tmp_path,
-        denied_bash=[],
         extras=extras,
         allowed_mcp_servers=None,
     )
@@ -388,7 +370,6 @@ def test_worker_options_wire_the_confinement(tmp_path: Path, monkeypatch: pytest
     options = build_worker_options(
         state_path=tmp_path / "s.json",
         project_dir=tmp_path,
-        denied_bash=[],
     )
     assert options.can_use_tool is None
     matchers = options.hooks["PreToolUse"]
@@ -583,41 +564,6 @@ def _git_repo(path: Path) -> Path:
     return path
 
 
-def test_command_argv_on_macos_denies_writes_except_the_worktree_git_and_temp(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
-    monkeypatch.setattr("orchestrator.worker.sys.platform", "darwin")
-    monkeypatch.setattr("orchestrator.worker.os.path.exists", lambda _p: True)
-    work = _git_repo(tmp_path / "work")
-    argv = sandboxed_command_argv("echo hi", work)
-    assert argv[:2] == ["/usr/bin/sandbox-exec", "-p"]
-    assert argv[3:] == ["/bin/bash", "-c", "echo hi"]
-    profile = argv[2]
-    assert "(deny file-write*)" in profile
-    assert f'(subpath "{work.resolve()}")' in profile
-    assert f'(subpath "{(work / ".git").resolve()}")' in profile
-    # a commit must not be able to plant hooks, rewrite the config, or move the
-    # git dir itself away and rebuild it (a plain repo's .git is inside the worktree)
-    denied = profile.split("(deny file-write* ")[-1]
-    assert f'(literal "{(work / ".git").resolve()}")' in denied
-    assert f'(subpath "{(work / ".git" / "hooks").resolve()}")' in denied
-    assert f'(literal "{(work / ".git" / "config").resolve()}")' in denied
-    # LaunchServices would start an unconfined app on the command's behalf
-    assert '(deny mach-lookup (global-name "com.apple.coreservices.launchservicesd")' in profile
-
-
-def test_command_argv_on_linux_binds_the_same_paths_writable(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
-    monkeypatch.setattr("orchestrator.worker.sys.platform", "linux")
-    monkeypatch.setattr("orchestrator.worker.require_sandbox_platform", lambda **_k: None)
-    work = _git_repo(tmp_path / "work")
-    argv = sandboxed_command_argv("echo hi", work)
-    assert argv[0] == "bwrap" and argv[1:4] == ["--ro-bind", "/", "/"]
-    binds = [argv[i + 1] for i, a in enumerate(argv) if a == "--bind"]
-    assert str(work.resolve()) in binds and str((work / ".git").resolve()) in binds
-    ro_pairs = [(argv[i + 1], argv[i + 2]) for i, a in enumerate(argv) if a == "--ro-bind"]
-    ro_targets = [dst for _src, dst in ro_pairs]
-    assert str((work / ".git" / "hooks").resolve()) in ro_targets and str((work / ".git" / "config").resolve()) in ro_targets
-    assert argv[-3:] == ["/bin/bash", "-c", "echo hi"]
-
-
 def test_command_argv_on_linux_protects_a_hooks_dir_that_does_not_exist_yet(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
     """`git init --template=` leaves no hooks dir; a command must not be able to
     create one and plant a hook there."""
@@ -709,3 +655,162 @@ def test_command_sandbox_protects_the_git_dir_of_a_plain_repo_on_macos(tmp_path:
     assert run("echo '[core]' >> .git/config").returncode != 0
     ok = run("echo x > f.txt && git add f.txt && git -c user.email=a@b.c -c user.name=p commit -qm probe && git log --format=%s")
     assert ok.returncode == 0 and "probe" in ok.stdout
+
+
+def _linked_worktree(tmp_path: Path, branch: str = "orchestrator/t") -> tuple[Path, Path]:
+    """A main checkout and a linked worktree of it, the way every Worker runs."""
+    import subprocess
+
+    base = _git_repo(tmp_path / "base")
+    git = ["git", "-c", "user.email=a@b.c", "-c", "user.name=t"]
+    subprocess.run([*git, "-C", str(base), "commit", "-q", "--allow-empty", "-m", "init"], check=True)
+    work = tmp_path / "work"
+    subprocess.run([*git, "-C", str(base), "worktree", "add", "-q", "-b", branch, str(work)], check=True)
+    return base, work
+
+
+def test_command_argv_on_macos_in_a_plain_repo_keeps_the_git_dir_an_entry_with_hooks_and_config_read_only(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+):
+    monkeypatch.setattr("orchestrator.worker.sys.platform", "darwin")
+    monkeypatch.setattr("orchestrator.worker.os.path.exists", lambda _p: True)
+    work = _git_repo(tmp_path / "work")
+    argv = sandboxed_command_argv("echo hi", work)
+    assert argv[:2] == ["/usr/bin/sandbox-exec", "-p"] and argv[3:] == ["/bin/bash", "-c", "echo hi"]
+    profile = argv[2]
+    assert "(deny file-write*)" in profile and f'(subpath "{work.resolve()}")' in profile
+    denied = profile.split("(deny file-write* ")[-1]
+    git = (work / ".git").resolve()
+    assert f'(literal "{git}")' in denied and f'(subpath "{git / "hooks"}")' in denied and f'(literal "{git / "config"}")' in denied
+
+
+def test_command_argv_on_macos_in_a_linked_worktree_does_not_let_the_shared_git_dir_be_written(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+):
+    """The Worker's own admin dir, its own branch ref and reflog, and a create-only
+    object store: nothing else of the main checkout's .git."""
+    monkeypatch.setattr("orchestrator.worker.sys.platform", "darwin")
+    monkeypatch.setattr("orchestrator.worker.os.path.exists", lambda _p: True)
+    base, work = _linked_worktree(tmp_path)
+    profile = sandboxed_command_argv("true", work)[2]
+    common = (base / ".git").resolve()
+    admin = next((common / "worktrees").iterdir()).resolve()
+    allowed = profile.split("(deny file-write*)")[1].split("(allow file-write-create")[0]
+    assert f'(subpath "{admin}")' in allowed
+    assert f'(subpath "{common / "refs" / "heads" / "orchestrator" / "t"}")' in allowed
+    # nothing else of the shared dir is in the allow list, in particular not the dir itself
+    assert f'(subpath "{common}")' not in allowed
+    for name in ("HEAD", "index", "packed-refs", "info", "hooks", "config"):
+        assert f'"{common / name}"' not in allowed
+    assert f'(subpath "{common / "objects" / "info"}")' in profile.split("file-write-unlink ")[-1]
+    # create-only objects: new files and tmp_* files, never an existing object
+    assert f'(allow file-write-create (subpath "{common / "objects"}"))' in profile
+    assert "file-write-unlink (regex" in profile and "tmp_[^/]*" in profile
+    # the worktree's pointer and its link back to the shared dir cannot be rewritten
+    denied = profile.split("file-write-unlink ")[-1]  # the final deny rule names every write operation
+    assert "(deny file-write* file-write-create" in profile
+    assert f'(literal "{work.resolve() / ".git"}")' in denied
+    assert f'(literal "{admin / "commondir"}")' in denied and f'(literal "{admin / "gitdir"}")' in denied
+    # the keychain daemon and credential files
+    assert '(global-name "com.apple.SecurityServer")' in profile
+    assert f'(subpath "{Path.home() / ".ssh"}")' in profile.split("(deny file-read* ")[-1]
+
+
+def test_command_argv_on_linux_binds_only_what_a_linked_worktree_needs(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
+    monkeypatch.setattr("orchestrator.worker.sys.platform", "linux")
+    monkeypatch.setattr("orchestrator.worker.require_sandbox_platform", lambda **_k: None)
+    base, work = _linked_worktree(tmp_path)
+    argv = sandboxed_command_argv("echo hi", work)
+    assert argv[0] == "bwrap" and argv[1:4] == ["--ro-bind", "/", "/"] and argv[-3:] == ["/bin/bash", "-c", "echo hi"]
+    binds = [argv[i + 1] for i, a in enumerate(argv) if a == "--bind"]
+    common = (base / ".git").resolve()
+    assert str(work.resolve()) in binds
+    assert str(common / "objects") in binds and str(common / "refs" / "heads" / "orchestrator") in binds
+    assert str(common) not in binds and str(common / "refs" / "heads") not in binds
+    ro = [argv[i + 2] for i, a in enumerate(argv) if a == "--ro-bind"]
+    assert str(work.resolve() / ".git") in ro
+
+
+def test_command_argv_on_linux_refuses_a_worktree_branch_without_a_namespace(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
+    """`feature` lives directly in refs/heads, next to main: it cannot be made
+    writable without making main writable, so the command is refused."""
+    monkeypatch.setattr("orchestrator.worker.sys.platform", "linux")
+    monkeypatch.setattr("orchestrator.worker.require_sandbox_platform", lambda **_k: None)
+    _base, work = _linked_worktree(tmp_path, branch="feature")
+    with pytest.raises(ConfinementUnavailableError, match="no namespace"):
+        sandboxed_command_argv("true", work)
+
+
+def test_the_claude_sandbox_denies_the_shared_git_dir_path_by_path(tmp_path: Path):
+    from orchestrator.worker import _claude_sandbox_filesystem
+
+    base, work = _linked_worktree(tmp_path)
+    fs = _claude_sandbox_filesystem(work)
+    common = (base / ".git").resolve()
+    deny = set(fs["denyWrite"])
+    for name in ("HEAD", "packed-refs", "index", "info", "hooks", "config"):
+        assert str(common / name) in deny
+    assert str(common / "refs" / "heads" / "main") in deny or str(common / "refs" / "heads" / "master") in deny
+    assert str(common / "objects" / "info") in deny and str(work.resolve() / ".git") in deny
+    own = common / "refs" / "heads" / "orchestrator" / "t"
+    assert str(own) not in deny and str(common / "objects") not in deny
+    assert str(Path.home() / ".ssh") in fs["denyRead"]
+
+
+async def test_confinement_hook_applies_the_bash_denylist_and_credentials_commands(tmp_path: Path):
+    hook = build_confinement_hook(tmp_path)
+    for command in ("rm -rf /", "security find-generic-password -s gh:github.com", "gh auth token", "git credential fill",
+                    "git credential-osxkeychain get"):
+        result = await hook({"hook_event_name": "PreToolUse", "tool_name": "Bash", "tool_input": {"command": command}}, "t1", {})
+        assert _denied(result), command
+    ok = await hook({"hook_event_name": "PreToolUse", "tool_name": "Bash", "tool_input": {"command": "git status && ls"}}, "t1", {})
+    assert ok == {}
+
+
+async def test_confinement_refuses_a_path_through_a_symlink_even_when_it_stays_inside(tmp_path: Path):
+    """A symlink inside can be re-pointed between the hook's check and the CLI's
+    open; the Worker is given the canonical path instead."""
+    root = tmp_path / "worktree-a"
+    (root / "real").mkdir(parents=True)
+    (root / "alias").symlink_to(root / "real", target_is_directory=True)
+    hook = build_confinement_hook(root)
+    result = await hook(_tool_call("Write", file_path=str(root / "alias" / "f.txt")), "t1", {})
+    assert _denied(result) and str(root.resolve() / "real" / "f.txt") in result["hookSpecificOutput"]["permissionDecisionReason"]
+    assert await hook(_tool_call("Write", file_path=str(root.resolve() / "real" / "f.txt")), "t1", {}) == {}
+
+
+def test_path_outside_root_fails_closed_on_a_path_it_cannot_resolve(tmp_path: Path):
+    """An unresolvable path (here a NUL byte, which Path.resolve rejects on every
+    Python version) is reported as outside, not waved through."""
+    from orchestrator.worker import path_outside_root
+
+    assert path_outside_root(str(tmp_path / "a\0b"), tmp_path.resolve()) is not None
+
+
+def test_a_goal_cannot_add_permission_rules_or_tools_of_unconfigured_servers(tmp_path: Path):
+    extras = WorkerExtras(
+        allowed_tools=["NotebookEdit", "Bash(git push:*)", "Edit(//Users/me/**)", "mcp__evil__run", "mcp__orchestrator-state__*", "Task"]
+    )
+    options = build_worker_options(state_path=tmp_path / "s.json", project_dir=tmp_path, extras=extras)
+    assert "NotebookEdit" in options.allowed_tools and "mcp__orchestrator-state__*" in options.allowed_tools
+    for dropped in ("Bash(git push:*)", "Edit(//Users/me/**)", "mcp__evil__run", "Task"):
+        assert dropped not in options.allowed_tools
+
+
+def test_the_worker_has_no_git_or_gh_credentials_configured(tmp_path: Path):
+    from orchestrator.worker import worker_credential_env
+
+    env = worker_credential_env(tmp_path / "worker-env")
+    assert env["GIT_CONFIG_NOSYSTEM"] == "1" and env["GIT_TERMINAL_PROMPT"] == "0" and env["GIT_ASKPASS"] == "/usr/bin/false"
+    assert env["GIT_CONFIG_KEY_0"] == "credential.helper" and env["GIT_CONFIG_VALUE_0"] == ""
+    assert Path(env["GH_CONFIG_DIR"]).is_dir() and not any(Path(env["GH_CONFIG_DIR"]).iterdir())
+    assert "helper" not in Path(env["GIT_CONFIG_GLOBAL"]).read_text()
+    assert env["CLAUDE_CODE_SUBPROCESS_ENV_SCRUB"] == "1"
+
+
+def test_apply_env_contract_removes_forge_and_cloud_credentials_from_the_worker_environment(monkeypatch: pytest.MonkeyPatch):
+    for name in ("GH_TOKEN", "GITHUB_TOKEN", "SSH_AUTH_SOCK", "NPM_TOKEN", "AWS_SECRET_ACCESS_KEY"):
+        monkeypatch.setenv(name, "x")
+    removed = apply_env_contract()
+    for name in ("GH_TOKEN", "GITHUB_TOKEN", "SSH_AUTH_SOCK", "NPM_TOKEN", "AWS_SECRET_ACCESS_KEY"):
+        assert name in removed and name not in os.environ

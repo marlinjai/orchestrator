@@ -12,6 +12,7 @@ not used here.
 import functools
 import logging
 import os
+import re
 import shutil
 import subprocess
 import sys
@@ -23,6 +24,7 @@ from typing import AsyncIterator, Literal
 from claude_agent_sdk import ClaudeAgentOptions, ClaudeSDKClient, HookMatcher
 from claude_agent_sdk.types import HookContext, HookInput, HookJSONOutput, SandboxSettings
 
+from orchestrator.guardrails import bash_allowed
 from orchestrator.tools import build_state_mcp_server
 
 logger = logging.getLogger(__name__)
@@ -52,6 +54,76 @@ CROSS_PROVIDER_KEY_DENYLIST: tuple[str, ...] = (
     "MISTRAL_API_KEY",
     "COHERE_API_KEY",
 )
+
+
+# Credentials a Worker must never hold: they are removed from the orchestrator's
+# own environment before the SDK spawns the Worker (the orchestrator itself uses
+# none of them), so nothing in the Worker's shell can authenticate to a remote.
+WORKER_CREDENTIAL_ENV_DENYLIST: tuple[str, ...] = (
+    "GH_TOKEN",
+    "GITHUB_TOKEN",
+    "GH_ENTERPRISE_TOKEN",
+    "GITHUB_ENTERPRISE_TOKEN",
+    "GITLAB_TOKEN",
+    "GIT_ASKPASS",
+    "SSH_ASKPASS",
+    "SSH_AUTH_SOCK",
+    "SSH_AGENT_PID",
+    "NPM_TOKEN",
+    "NODE_AUTH_TOKEN",
+    "HF_TOKEN",
+    "INFISICAL_TOKEN",
+    "AWS_ACCESS_KEY_ID",
+    "AWS_SECRET_ACCESS_KEY",
+    "AWS_SESSION_TOKEN",
+    "GOOGLE_APPLICATION_CREDENTIALS",
+)
+
+
+def worker_credential_env(private_dir: Path) -> dict[str, str]:
+    """Environment overrides under which a Worker's git and gh hold no usable
+    credentials, for the Claude Worker's CLI (so its Bash inherits them) and the
+    Mercury adapter's `run_command`.
+
+    gh and git's osxkeychain helper keep their token in the macOS Keychain, which
+    scrubbing environment variables does not touch, so the Worker is pointed at
+    EMPTY configuration instead: `GH_CONFIG_DIR` an empty directory, git's global
+    config a file with only the user's name and email (commits need them) and no
+    credential helper, `GIT_CONFIG_NOSYSTEM` (the Xcode system gitconfig sets
+    `credential.helper osxkeychain`), a `credential.helper` reset through
+    `GIT_CONFIG_COUNT`, no terminal prompt and a failing askpass.
+
+    This does NOT close the Keychain: a process that talks to the keychain daemon
+    itself (`security find-*`, git's osxkeychain helper run directly) is not
+    stopped by any of it. The Mercury sandbox denies the daemon's mach lookup; the
+    Claude CLI's sandbox has no such setting, so for the Claude Worker the only
+    real boundary is a separate macOS user or a keychain-less host.
+    """
+    private_dir.mkdir(parents=True, exist_ok=True)
+    gh_config = private_dir / "gh-config"
+    gh_config.mkdir(exist_ok=True)
+    gitconfig = private_dir / "gitconfig"
+    lines = []
+    for key in ("name", "email"):
+        out = subprocess.run(["git", "config", "--global", "--get", f"user.{key}"], capture_output=True, text=True)
+        if out.returncode == 0 and out.stdout.strip():
+            lines.append(f"\t{key} = {out.stdout.strip()}")
+    gitconfig.write_text("[user]\n" + "\n".join(lines) + "\n" if lines else "")
+    return {
+        "GH_CONFIG_DIR": str(gh_config),
+        "GIT_CONFIG_GLOBAL": str(gitconfig),
+        "GIT_CONFIG_NOSYSTEM": "1",
+        "GIT_CONFIG_COUNT": "1",
+        "GIT_CONFIG_KEY_0": "credential.helper",
+        "GIT_CONFIG_VALUE_0": "",
+        "GIT_TERMINAL_PROMPT": "0",
+        "GIT_ASKPASS": "/usr/bin/false",
+        "SSH_ASKPASS": "/usr/bin/false",
+        "GCM_INTERACTIVE": "never",
+        # Claude Code strips its own credentials from the environment of the
+        # processes it starts for the Worker (Bash, hooks, MCP stdio servers).
+        "CLAUDE_CODE_SUBPROCESS_ENV_SCRUB": "1",
+    }
 
 
 # Servers and tools that are ALWAYS present in a Worker and can never be removed
@@ -191,7 +263,7 @@ def apply_env_contract(auth_mode: AuthMode = "subscription") -> list[str]:
     returns values.
     """
     removed: list[str] = []
-    for var in CROSS_PROVIDER_KEY_DENYLIST:
+    for var in (*CROSS_PROVIDER_KEY_DENYLIST, *WORKER_CREDENTIAL_ENV_DENYLIST):
         if os.environ.pop(var, None) is not None:
             removed.append(var)
 
@@ -322,7 +394,8 @@ def path_outside_root(raw: str | None, project_root: Path) -> Path | None:
     Resolve ``raw`` (absolute, or relative to ``project_root``) and return the
     resolved path when it escapes ``project_root``, else None. ``project_root``
     must already be resolved (realpath). Symlinks are followed, so a link
-    pointing out of the worktree is caught too.
+    pointing out of the worktree is caught too. A path that cannot be resolved is
+    reported as outside (fail closed).
     """
     if not raw:
         return None
@@ -331,10 +404,11 @@ def path_outside_root(raw: str | None, project_root: Path) -> Path | None:
         candidate = project_root / candidate
     try:
         resolved = candidate.resolve()
-    except OSError:
-        # Unresolvable path (e.g. a broken component): let the tool itself
-        # fail naturally rather than guessing.
-        return None
+    except (OSError, ValueError, RuntimeError):
+        # A path that cannot be resolved (a symlink loop, a NUL byte, an
+        # unreadable component) cannot be shown to be inside: it is refused.
+        # A confinement check fails closed; the tool would fail on it anyway.
+        return candidate
     if resolved == project_root or project_root in resolved.parents:
         return None
     return resolved
@@ -364,6 +438,10 @@ def build_confinement_hook(project_dir: Path):
     """
     project_root = project_dir.resolve()
 
+    def bash_refusal(command: str) -> str | None:
+        allowed, why = bash_allowed(command)
+        return None if allowed else f"Refused by the orchestrator's command denylist: {why}."
+
     def refusal(tool_name: str, tool_input: dict) -> str | None:
         """Why this call is refused, or None when it stays inside the worktree.
         May raise on a path it cannot resolve; the caller treats that as a refusal."""
@@ -390,6 +468,20 @@ def build_confinement_hook(project_dir: Path):
                     f"assigned project root {project_root}. Only edit files inside the "
                     "assigned worktree."
                 )
+            # Every component of the path the CLI will open must be what it
+            # looks like: a symlink inside the worktree could be re-pointed
+            # between this check and the CLI's write (a time-of-check to
+            # time-of-use race), so a path that goes through one is refused and
+            # the Worker is given the canonical path. Residual: a component
+            # swapped for a symlink in the instant between this check and the
+            # open, by another process or a parallel Bash call in the same turn,
+            # is not caught; the OS sandbox still confines what that write can
+            # reach, and git records what changed.
+            if str(resolved) != os.path.normpath(raw):
+                return (
+                    f"Refused: {tool_name} was given {raw!r}, a path through a symlink or `..`. "
+                    f"Use the canonical path {resolved}."
+                )
             # A file with several hard links is one inode under several names:
             # writing it here can change a file outside the worktree.
             if resolved.is_file() and resolved.stat().st_nlink > 1:
@@ -405,6 +497,23 @@ def build_confinement_hook(project_dir: Path):
         context: HookContext,
     ) -> HookJSONOutput:
         tool_name = input_data.get("tool_name", "")
+        if tool_name == "Bash":
+            # Defence in depth: the denylist the Mercury adapter's run_command
+            # also applies (`guardrails.bash_allowed`). A pattern list is not a
+            # boundary (a shell can say the same thing many ways); what makes
+            # remote writes impossible is that the Worker holds no credentials
+            # (`worker_credential_env`) and cannot write outside its worktree.
+            why = bash_refusal(str((input_data.get("tool_input") or {}).get("command", "")))
+            if why is None:
+                return {}
+            logger.error("worker Bash denied: %s", why)
+            return {
+                "hookSpecificOutput": {
+                    "hookEventName": "PreToolUse",
+                    "permissionDecision": "deny",
+                    "permissionDecisionReason": why,
+                }
+            }
         if tool_name not in PATH_GUARDED_TOOLS:
             return {}
         try:
@@ -487,31 +596,122 @@ def require_sandbox_platform(*, need_socat: bool = True, probe_args: tuple[str, 
         )
 
 
+@dataclass(frozen=True)
+class GitLayout:
+    """Where a work dir's git state lives. In a LINKED worktree (how every
+    `--worktree` / batch Worker runs) `git_dir` is its own admin dir under the
+    main checkout's `.git`, and `common_dir` is that main `.git`, SHARED with the
+    main checkout and every other worktree: its refs, HEAD, index, packed-refs,
+    info and objects are not the Worker's to write. In a plain repo both are the
+    work dir's own `.git`."""
+
+    work: Path
+    git_dir: Path
+    common_dir: Path
+    branch: str | None  # the branch the work dir has checked out (None: detached)
+
+    @property
+    def linked(self) -> bool:
+        return self.git_dir != self.common_dir
+
+    @property
+    def own_ref(self) -> Path | None:
+        return self.common_dir / "refs" / "heads" / self.branch if self.branch else None
+
+
 @functools.lru_cache(maxsize=64)
-def _git_dirs(work_dir: Path) -> tuple[Path, ...]:
-    """The git directories a commit in ``work_dir`` writes: its own (a linked
-    worktree's admin dir) and the shared common dir (objects, refs, logs).
-    Cached per work dir: they never move during a run, and this runs a git
-    process per flag."""
-    found: list[Path] = []
-    for flag in ("--git-dir", "--git-common-dir"):
+def _git_layout(work_dir: Path) -> GitLayout | None:
+    """The git layout of ``work_dir``, or None outside a repo. Cached: it never
+    moves during a run, and this runs a git process per field. Relative answers
+    are resolved against ``work_dir`` (works on any git version)."""
+
+    def rev(*args: str) -> str:
         try:
-            out = subprocess.run(
-                ["git", "-C", str(work_dir), "rev-parse", flag],
-                capture_output=True,
-                text=True,
-                timeout=10,
-            )
+            out = subprocess.run(["git", "-C", str(work_dir), *args], capture_output=True, text=True, timeout=10)
         except (OSError, subprocess.SubprocessError):
-            continue
-        raw = out.stdout.strip() if out.returncode == 0 else ""
+            return ""
+        return out.stdout.strip() if out.returncode == 0 else ""
+
+    def resolved(raw: str) -> Path | None:
         if not raw:
-            continue
+            return None
         path = Path(raw)
-        path = (path if path.is_absolute() else work_dir / path).resolve()  # relative to work_dir, any git version
-        if path not in found:
-            found.append(path)
-    return tuple(found)
+        return (path if path.is_absolute() else work_dir / path).resolve()
+
+    git_dir = resolved(rev("rev-parse", "--git-dir"))
+    common_dir = resolved(rev("rev-parse", "--git-common-dir"))
+    if git_dir is None or common_dir is None:
+        return None
+    return GitLayout(work_dir, git_dir, common_dir, rev("symbolic-ref", "-q", "--short", "HEAD") or None)
+
+
+def _git_refs(layout: GitLayout) -> list[str]:
+    """Every ref of the repository (loose and packed)."""
+    try:
+        out = subprocess.run(
+            ["git", "-C", str(layout.work), "for-each-ref", "--format=%(refname)"],
+            capture_output=True,
+            text=True,
+            timeout=10,
+        )
+    except (OSError, subprocess.SubprocessError):
+        return []
+    return out.stdout.split() if out.returncode == 0 else []
+
+
+def git_deny_write_paths(layout: GitLayout) -> list[Path]:
+    """What a Worker in a LINKED worktree must not write inside the shared git
+    dir, as paths to deny (for the Claude CLI's sandbox, which takes deny lists,
+    not allow-lists, and in which a deny always wins over an allow). Everything
+    except the Worker's own branch ref, its reflog, its own admin dir and the
+    object store: every other ref, HEAD, index, packed-refs, info, hooks, config,
+    the other worktrees' admin dirs. `<work>/.git` (a file in a linked worktree)
+    cannot be rewritten to point elsewhere or turned into a directory with its own
+    config, which would run code the next time the orchestrator invokes git there."""
+    common, own = layout.common_dir, layout.own_ref
+    deny = [layout.work / ".git"]
+    deny += [common / n for n in os.listdir(common) if n not in ("objects", "worktrees", "logs", "refs")]
+    deny += [common / n for n in ("packed-refs", "info", "hooks", "config", "HEAD", "index")]
+    for ref in _git_refs(layout):
+        if common / ref != own:
+            deny += [common / ref, common / "logs" / ref]
+    refs_dir = common / "refs"
+    if refs_dir.is_dir():
+        deny += [refs_dir / n for n in os.listdir(refs_dir) if n != "heads"]
+    deny += [refs_dir / n for n in ("tags", "remotes", "replace", "notes", "stash")]
+    deny.append(common / "logs" / "HEAD")
+    wt = common / "worktrees"
+    if wt.is_dir():
+        deny += [d for d in wt.iterdir() if d != layout.git_dir]
+    deny += [layout.git_dir / n for n in ("commondir", "gitdir", "config.worktree")]
+    return list(dict.fromkeys(deny))
+
+
+# Credential files and directories a Worker never needs and must not read: ssh
+# keys, gh's and git's stored logins, cloud and registry tokens. The Keychain is
+# NOT covered by file rules (its daemon reads the files, not the Worker): on
+# macOS the Mercury sandbox denies the keychain daemon's mach lookup; the Claude
+# CLI's own sandbox offers no such rule (see worker_credential_env).
+CREDENTIAL_READ_DENY: tuple[str, ...] = (
+    "~/.ssh",
+    "~/.gnupg",
+    "~/.config/gh",
+    "~/.config/git",
+    "~/.git-credentials",
+    "~/.netrc",
+    "~/.aws",
+    "~/.kube",
+    "~/.docker",
+    "~/.npmrc",
+    "~/.config/infisical",
+    "~/.infisical",
+    "~/Library/Keychains",
+)
+
+
+def credential_read_denies() -> list[Path]:
+    home = Path.home()
+    return [home / p[2:] for p in CREDENTIAL_READ_DENY]
 
 
 def _sbpl_string(path: Path | str) -> str:
@@ -520,15 +720,21 @@ def _sbpl_string(path: Path | str) -> str:
 
 # macOS: LaunchServices and launchd start processes OUTSIDE the sandbox on a
 # caller's behalf (`open -a Terminal x.command`, `open -a <app>`), so a confined
-# command could hand its work to an unconfined one. Their mach lookups are denied
-# (proved: `open -g -j -a Calculator` starts the app under a profile without this
-# and fails with it; git, DNS and curl keep working).
+# command could hand its work to an unconfined one; the keychain daemon would
+# hand the Worker the user's stored logins (`security find-internet-password`,
+# git's osxkeychain helper, gh). Their mach lookups are denied (proved: `open -g
+# -j -a Calculator` starts the app under a profile without this and fails with
+# it; the keychain items are readable without it and not with it; git, DNS and
+# curl keep working).
 _MACOS_DENIED_MACH_SERVICES = (
     "com.apple.coreservices.launchservicesd",
     "com.apple.lsd.mapdb",
     "com.apple.lsd.modifydb",
     "com.apple.lsd.open",
     "com.apple.coreservices.quarantine-resolver",
+    "com.apple.SecurityServer",
+    "com.apple.secd",
+    "com.apple.securityd",
 )
 
 # The Linux argv's own flags, also used by the preflight probe so it fails where
@@ -540,65 +746,160 @@ _EMPTY_DIR: Path | None = None
 
 
 def _empty_dir() -> Path:
-    """An empty directory (made once) to bind read-only over a git `hooks` dir
-    that does not exist yet, so a command cannot create hooks there."""
+    """An empty directory (made once) to bind read-only over a path that does not
+    exist yet, so a command cannot create it there."""
     global _EMPTY_DIR
     if _EMPTY_DIR is None or not _EMPTY_DIR.exists():
         _EMPTY_DIR = Path(tempfile.mkdtemp(prefix="orchestrator-empty-"))
     return _EMPTY_DIR
 
 
+_SBPL_WRITE_OPS = "file-write* file-write-create file-write-data file-write-mode file-write-times file-write-flags file-write-unlink"
+
+
+def _sbpl_write_rules(layout: GitLayout | None, root: Path, tmp: Path) -> str:
+    """Seatbelt write rules: deny everything, then allow the work dir, temp dirs
+    and the git paths the Worker needs; the last matching rule wins."""
+    allow_paths = [root, tmp, Path("/private/tmp"), Path("/private/var/tmp")]
+    denied: list[str] = []
+    extra = ""
+    if layout is not None and not layout.linked:
+        # A plain repo: the git dir is inside the work dir. Keep it as an entry
+        # (no `mv .git .g` and rebuild), and its hooks and config read-only.
+        g = layout.git_dir
+        denied += [f"(literal {_sbpl_string(g)})", f"(subpath {_sbpl_string(g / 'hooks')})", f"(literal {_sbpl_string(g / 'config')})"]
+    elif layout is not None:
+        # A LINKED worktree: ONLY its own admin dir, its own branch ref (and lock)
+        # and reflog, and the object store (create-only: no overwriting or
+        # deleting an existing object) are writable in the shared git dir.
+        # The rest of it (other refs, HEAD, index, packed-refs, info, hooks,
+        # config, other worktrees) stays denied by the blanket deny above.
+        allow_paths.append(layout.git_dir)
+        denied += [f"(literal {_sbpl_string(layout.work / '.git')})"]
+        # `objects/info/alternates` would repoint the object store (a new file is
+        # a create, which the create-only objects rule allows): keep the dir out.
+        denied += [f"(subpath {_sbpl_string(layout.common_dir / 'objects' / 'info')})"]
+        denied += [f"(literal {_sbpl_string(layout.git_dir / n)})" for n in ("commondir", "gitdir", "config.worktree")]
+        own = layout.own_ref
+        if own is not None:
+            log = layout.common_dir / "logs" / "refs" / "heads" / (layout.branch or "")
+            allow_paths += [own, own.with_name(own.name + ".lock"), log, log.with_name(log.name + ".lock")]
+            extra += f"(allow file-write-create (subpath {_sbpl_string(log.parent)}))"
+        objects = layout.common_dir / "objects"
+        tmp_object = r"^" + re.escape(str(objects)) + r"/(.*/)?tmp_[^/]*$"
+        extra += (
+            f"(allow file-write-create (subpath {_sbpl_string(objects)}))"
+            f'(allow file-write-data file-write-mode file-write-times file-write-flags file-write-unlink (regex #"{tmp_object}"))'
+        )
+    allow = " ".join(f"(subpath {_sbpl_string(p)})" for p in allow_paths)
+    rules = (
+        "(deny file-write*)"
+        f"(allow file-write* {allow}"
+        ' (literal "/dev/null") (literal "/dev/zero") (literal "/dev/tty") (subpath "/dev/fd")'
+        ' (regex #"^/dev/ttys[0-9]+$"))'
+        + extra
+    )
+    if denied:
+        # The operations are named: Seatbelt lets an allow of a SPECIFIC operation
+        # (the create-only object store rules above) win over a deny of the
+        # `file-write*` wildcard, whatever the order (proved with the real
+        # profile: a new `objects/info/alternates` was writable).
+        rules += f"(deny {_SBPL_WRITE_OPS} {' '.join(denied)})"
+    return rules
+
+
 def sandboxed_command_argv(command: str, work_dir: Path) -> list[str]:
     """argv that runs ``command`` in bash under the same write confinement as the
     Claude Worker's Bash sandbox: filesystem writes only in ``work_dir``, the
-    git directories a commit in it writes, and temp dirs (`/tmp`, `/var/tmp` and
-    the user's temp dir). Used by the Mercury adapter's `run_command`, which has
-    no SDK sandbox to switch on.
+    git paths a commit in it writes, and temp dirs (`/tmp`, `/var/tmp` and the
+    user's temp dir). Used by the Mercury adapter's `run_command`, which has no
+    SDK sandbox to switch on.
 
-    macOS: Seatbelt through `sandbox-exec` with a deny-writes profile. Linux:
-    bubblewrap with the root read-only and those paths bound writable. Either
-    way the git directories themselves, their `hooks` and their `config` stay
-    protected (a commit must not be able to plant code the main checkout later
-    runs, and a plain repo's `.git` must not be renamed away and rebuilt).
-    Raises ConfinementUnavailableError when no sandbox can run here; the caller
-    must then refuse the command, never run it unconfined. Network is not
-    restricted (as for the Claude Worker).
+    In a linked worktree the shared `.git` is NOT writable except for the
+    Worker's own branch ref, its reflog, its own admin dir and the object store
+    (see `GitLayout`). On macOS (Seatbelt through `sandbox-exec`) the object
+    store is create-only: an existing object cannot be overwritten or deleted. On
+    Linux (bubblewrap, root read-only plus binds) the object store is writable as
+    a whole and the Worker's refs namespace directory is writable (so refs of
+    sibling branches in the same namespace are too); a branch with no namespace
+    (`feature`, not `orchestrator/x`) cannot be confined there and is refused.
+    Credential files are unreadable and, on macOS, the keychain daemon and
+    LaunchServices are unreachable. Raises ConfinementUnavailableError when no
+    sandbox can run here; the caller must then refuse the command, never run it
+    unconfined. Network is not restricted (as for the Claude Worker).
     """
     require_sandbox_platform(need_socat=False, probe_args=_BWRAP_FLAGS)
     root = work_dir.resolve()
-    gits = list(_git_dirs(root))
+    layout = _git_layout(root)
     tmp = Path(tempfile.gettempdir()).resolve()
-    writable = [root, tmp, *gits]
     if sys.platform == "darwin":
-        writable += [Path("/private/tmp"), Path("/private/var/tmp")]
-        allow = " ".join(f"(subpath {_sbpl_string(p)})" for p in writable)
-        # Denied AFTER the allows (the last matching rule wins): the git dirs as
-        # entries (so `mv .git .g` fails), their hooks and config.
-        denied = [f"(literal {_sbpl_string(g)})" for g in gits]
-        for g in gits:
-            denied += [f"(subpath {_sbpl_string(g / 'hooks')})", f"(literal {_sbpl_string(g / 'config')})"]
         mach = " ".join(f'(global-name "{name}")' for name in _MACOS_DENIED_MACH_SERVICES)
+        reads = " ".join(f"(subpath {_sbpl_string(p)})" for p in credential_read_denies())
         profile = (
-            "(version 1)(allow default)(deny file-write*)"
-            f"(allow file-write* {allow}"
-            ' (literal "/dev/null") (literal "/dev/zero") (literal "/dev/tty") (subpath "/dev/fd")'
-            ' (regex #"^/dev/ttys[0-9]+$"))'
-            + (f"(deny file-write* {' '.join(denied)})" if denied else "")
+            "(version 1)(allow default)"
+            + _sbpl_write_rules(layout, root, tmp)
             + f"(deny mach-lookup {mach})"
+            + f"(deny file-read* {reads})"
         )
         return [SANDBOX_EXEC, "-p", profile, "/bin/bash", "-c", command]
     argv = ["bwrap", "--ro-bind", "/", "/", *_BWRAP_FLAGS]
-    for path in [*writable, *(p for p in (Path("/tmp"), Path("/var/tmp")) if p.exists())]:
-        argv += ["--bind", str(path.resolve()), str(path.resolve())]
-    for g in gits:
-        hooks = g / "hooks"
-        argv += ["--ro-bind", str(hooks if hooks.exists() else _empty_dir()), str(hooks)]
-        if (g / "config").exists():
-            argv += ["--ro-bind", str(g / "config"), str(g / "config")]
+    binds = [root, tmp, *(p for p in (Path("/tmp"), Path("/var/tmp")) if p.exists())]
+    protected: list[Path] = []
+    if layout is not None and not layout.linked:
+        protected += [layout.git_dir / "hooks", layout.git_dir / "config"]
+    elif layout is not None:
+        binds += [layout.git_dir, layout.common_dir / "objects"]
+        protected += [layout.work / ".git", *(layout.git_dir / n for n in ("commondir", "gitdir", "config.worktree"))]
+        own = layout.own_ref
+        if own is not None:
+            if own.parent == layout.common_dir / "refs" / "heads":
+                raise ConfinementUnavailableError(
+                    f"branch {layout.branch!r} has no namespace (`orchestrator/<task>`), so on Linux its ref "
+                    "cannot be made writable without making every branch of the shared .git writable; "
+                    "use a namespaced branch for the worktree"
+                )
+            logs = layout.common_dir / "logs" / "refs" / "heads" / (layout.branch or "")
+            binds += [own.parent]
+            logs.parent.mkdir(parents=True, exist_ok=True)
+            binds += [logs.parent]
+    for path in dict.fromkeys(p.resolve() for p in binds):
+        argv += ["--bind", str(path), str(path)]
+    for path in protected:
+        if path.is_dir() or not path.exists():
+            argv += ["--ro-bind", str(path if path.exists() else _empty_dir()), str(path)]
+        else:
+            argv += ["--ro-bind", str(path), str(path)]
+    for path in credential_read_denies():
+        if path.exists():
+            argv += ["--ro-bind", str(_empty_dir()), str(path)] if path.is_dir() else ["--ro-bind", "/dev/null", str(path)]
     return [*argv, "--chdir", str(root), "/bin/bash", "-c", command]
 
 
-def build_bash_sandbox() -> SandboxSettings:
+def _claude_sandbox_filesystem(project_dir: Path) -> dict:
+    """The Claude CLI sandbox's filesystem rules (deny lists: a deny wins over an
+    allow, so the shared git dir is denied path by path rather than allowed path
+    by path): the shared `.git` of a linked worktree except the Worker's own
+    branch and admin dir and the object store, the `.git` entry of a plain repo,
+    existing pack files and the object store's `info` (alternates would repoint
+    the object store), and the credential files."""
+    layout = _git_layout(project_dir.resolve())
+    deny: list[Path] = []
+    if layout is not None and layout.linked:
+        deny += git_deny_write_paths(layout)
+        objects = layout.common_dir / "objects"
+        deny.append(objects / "info")
+        pack = objects / "pack"
+        if pack.is_dir():
+            deny += list(pack.iterdir())
+    elif layout is not None:
+        deny.append(layout.git_dir)
+    return {
+        "denyWrite": [str(p) for p in dict.fromkeys(deny)],
+        "denyRead": [str(p) for p in credential_read_denies()],
+    }
+
+
+def build_bash_sandbox(project_dir: Path | None = None) -> SandboxSettings:
     """The Claude Code sandbox settings that confine a Worker's Bash.
 
     With the sandbox on, the CLI runs every Bash command under the OS sandbox
@@ -628,6 +929,7 @@ def build_bash_sandbox() -> SandboxSettings:
         "enabled": True,
         "autoAllowBashIfSandboxed": True,
         "allowUnsandboxedCommands": False,
+        **({"filesystem": _claude_sandbox_filesystem(project_dir)} if project_dir is not None else {}),  # type: ignore[typeddict-unknown-key]
         # If the sandbox cannot start (no bubblewrap namespaces, a missing
         # dependency), fail the session instead of running Bash unconfined.
         # The key is read by the CLI but is not in the SDK's TypedDict yet.
@@ -636,11 +938,26 @@ def build_bash_sandbox() -> SandboxSettings:
     }
 
 
+# Built-in tools a goal may pre-approve for its Worker. Anything else, in
+# particular a permission RULE such as `Bash(git push:*)` or `Edit(//**)`, or an
+# MCP tool of a server that is not configured, is not what a goal file may add.
+KNOWN_BUILTIN_TOOLS: frozenset[str] = frozenset(
+    {"Read", "Edit", "MultiEdit", "Write", "NotebookEdit", "Bash", "Grep", "Glob", "WebSearch", "WebFetch", "TodoWrite"}
+)
+_MCP_TOOL = re.compile(r"mcp__(?P<server>[A-Za-z0-9_-]+)__(?:\*|[A-Za-z0-9_.-]+)")
+
+
+def _vetted_extra_tool(tool: str, mcp_servers: dict) -> bool:
+    if tool in KNOWN_BUILTIN_TOOLS:
+        return True
+    match = _MCP_TOOL.fullmatch(tool)
+    return match is not None and match.group("server") in mcp_servers
+
+
 def build_worker_options(
     *,
     state_path: Path,
     project_dir: Path,
-    denied_bash: list[str],
     extras: WorkerExtras | None = None,
     auth_mode: AuthMode = "subscription",
     allowed_mcp_servers: list[str] | None = None,
@@ -702,7 +1019,10 @@ def build_worker_options(
         # Union extra tools (registry-implied + goal-declared), preserving order
         # and dropping duplicates so the defaults always remain first.
         seen = set(allowed_tools)
-        for tool in [*extra_server_tools, *extras.allowed_tools]:
+        vetted = [t for t in extras.allowed_tools if _vetted_extra_tool(t, mcp_servers)]
+        for tool in set(extras.allowed_tools) - set(vetted):
+            logger.warning("goal requested tool %r, which is not a known tool or a configured MCP tool; dropping", tool)
+        for tool in [*extra_server_tools, *vetted]:
             if tool not in seen:
                 allowed_tools.append(tool)
                 seen.add(tool)
@@ -726,8 +1046,9 @@ def build_worker_options(
         # Confinement to the task worktree, two layers (see each builder): a
         # PreToolUse hook for Write/Edit/MultiEdit/NotebookEdit, and the OS
         # sandbox for Bash. Neither depends on `allowed_tools`.
+        env=worker_credential_env(state_path.parent / "worker-env"),
         hooks={"PreToolUse": [HookMatcher(matcher=None, hooks=[build_confinement_hook(project_dir)])]},
-        sandbox=build_bash_sandbox(),
+        sandbox=build_bash_sandbox(project_dir),
     )
 
 

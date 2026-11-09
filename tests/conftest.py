@@ -48,7 +48,7 @@ def _no_bash_sandbox_in_tests(monkeypatch):
     scripts/prove_confinement.py."""
     from orchestrator import worker
 
-    monkeypatch.setattr(worker, "build_bash_sandbox", lambda: {"enabled": False})
+    monkeypatch.setattr(worker, "build_bash_sandbox", lambda *_a, **_k: {"enabled": False})
     # The same for the Mercury adapter's run_command: tests run plain bash so
     # they do not need sandbox-exec or bubblewrap. The real argv builder and the
     # refusal are unit-tested in test_worker.py / test_openai_compat_worker.py.
