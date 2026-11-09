@@ -209,6 +209,7 @@ let your work speak through the state file and the git log.
 
 Hard rules you must follow:
 - Never run destructive shell commands (the orchestrator's denylist will block them anyway).
+- You work inside a sandbox: you can write only in your worktree, its temp dirs and your own branch (commit, amend and rebase work). Creating or deleting branches, tags and stashes, `git fetch`/`gc`/`config`, writing outside the worktree, and any credentialed or remote action are refused by design.
 - Never send messages, comments, or PRs to external systems.
 - Never spend money, deploy to prod, or modify infrastructure.
 - If you genuinely cannot proceed without a human decision, write your question
@@ -619,18 +620,19 @@ class GitLayout:
         return self.common_dir / "refs" / "heads" / self.branch if self.branch else None
 
 
-@functools.lru_cache(maxsize=64)
-def _git_layout(work_dir: Path) -> GitLayout | None:
-    """The git layout of ``work_dir``, or None outside a repo. Cached: it never
-    moves during a run, and this runs a git process per field. Relative answers
-    are resolved against ``work_dir`` (works on any git version)."""
+def _rev(work_dir: Path, *args: str) -> str:
+    try:
+        out = subprocess.run(["git", "-C", str(work_dir), *args], capture_output=True, text=True, timeout=10)
+    except (OSError, subprocess.SubprocessError):
+        return ""
+    return out.stdout.strip() if out.returncode == 0 else ""
 
-    def rev(*args: str) -> str:
-        try:
-            out = subprocess.run(["git", "-C", str(work_dir), *args], capture_output=True, text=True, timeout=10)
-        except (OSError, subprocess.SubprocessError):
-            return ""
-        return out.stdout.strip() if out.returncode == 0 else ""
+
+@functools.lru_cache(maxsize=64)
+def _git_dirs(work_dir: Path) -> tuple[Path, Path] | None:
+    """The git dir and the common git dir of ``work_dir`` (None outside a repo).
+    Cached: they never move during a run. Relative answers are resolved against
+    ``work_dir`` (works on any git version)."""
 
     def resolved(raw: str) -> Path | None:
         if not raw:
@@ -638,11 +640,19 @@ def _git_layout(work_dir: Path) -> GitLayout | None:
         path = Path(raw)
         return (path if path.is_absolute() else work_dir / path).resolve()
 
-    git_dir = resolved(rev("rev-parse", "--git-dir"))
-    common_dir = resolved(rev("rev-parse", "--git-common-dir"))
-    if git_dir is None or common_dir is None:
+    git_dir = resolved(_rev(work_dir, "rev-parse", "--git-dir"))
+    common_dir = resolved(_rev(work_dir, "rev-parse", "--git-common-dir"))
+    return (git_dir, common_dir) if git_dir is not None and common_dir is not None else None
+
+
+def _git_layout(work_dir: Path) -> GitLayout | None:
+    """The git layout of ``work_dir``, or None outside a repo. The branch is read
+    fresh every time (a Worker may switch branches, a resume may find another one);
+    the directories are cached."""
+    dirs = _git_dirs(work_dir)
+    if dirs is None:
         return None
-    return GitLayout(work_dir, git_dir, common_dir, rev("symbolic-ref", "-q", "--short", "HEAD") or None)
+    return GitLayout(work_dir, dirs[0], dirs[1], _rev(work_dir, "symbolic-ref", "-q", "--short", "HEAD") or None)
 
 
 def _git_refs(layout: GitLayout) -> list[str]:
@@ -697,6 +707,7 @@ CREDENTIAL_READ_DENY: tuple[str, ...] = (
     "~/.gnupg",
     "~/.config/gh",
     "~/.config/git",
+    "~/.gitconfig",
     "~/.git-credentials",
     "~/.netrc",
     "~/.aws",
@@ -715,6 +726,8 @@ def credential_read_denies() -> list[Path]:
 
 
 def _sbpl_string(path: Path | str) -> str:
+    if any(c in str(path) for c in ('"', "\n")):
+        raise ConfinementUnavailableError(f"a path with a quote or newline cannot be put in a sandbox profile: {path!r}")
     return '"' + str(path).replace("\\", "\\\\").replace('"', '\\"') + '"'
 
 
@@ -779,6 +792,10 @@ def _sbpl_write_rules(layout: GitLayout | None, root: Path, tmp: Path) -> str:
         # `objects/info/alternates` would repoint the object store (a new file is
         # a create, which the create-only objects rule allows): keep the dir out.
         denied += [f"(subpath {_sbpl_string(layout.common_dir / 'objects' / 'info')})"]
+        # `objects/pack` too: a forged pack shadows existing objects (git reads
+        # packs before loose objects); a commit writes loose objects only, so
+        # `git gc` / `repack` / `fetch` are refused here.
+        denied += [f"(subpath {_sbpl_string(layout.common_dir / 'objects' / 'pack')})"]
         denied += [f"(literal {_sbpl_string(layout.git_dir / n)})" for n in ("commondir", "gitdir", "config.worktree")]
         own = layout.own_ref
         if own is not None:
@@ -831,15 +848,25 @@ def sandboxed_command_argv(command: str, work_dir: Path) -> list[str]:
     require_sandbox_platform(need_socat=False, probe_args=_BWRAP_FLAGS)
     root = work_dir.resolve()
     layout = _git_layout(root)
+    if layout is not None and layout.linked and layout.own_ref is not None:
+        # The ref and reflog directories of the Worker's own branch must exist
+        # (a branch that lives only in packed-refs has none): created here, on
+        # the host, so the sandbox never needs a create right on them.
+        layout.own_ref.parent.mkdir(parents=True, exist_ok=True)
+        (layout.common_dir / "logs" / "refs" / "heads" / (layout.branch or "")).parent.mkdir(parents=True, exist_ok=True)
     tmp = Path(tempfile.gettempdir()).resolve()
     if sys.platform == "darwin":
         mach = " ".join(f'(global-name "{name}")' for name in _MACOS_DENIED_MACH_SERVICES)
         reads = " ".join(f"(subpath {_sbpl_string(p)})" for p in credential_read_denies())
+        # the launchd-managed ssh-agent socket (SSH_AUTH_SOCK is scrubbed, the socket is not gone)
+        agent = '(deny network-outbound (remote unix-socket (regex #"^/private/tmp/com\\.apple\\.launchd\\.[^/]+/Listeners$")))'
+
         profile = (
             "(version 1)(allow default)"
             + _sbpl_write_rules(layout, root, tmp)
             + f"(deny mach-lookup {mach})"
             + f"(deny file-read* {reads})"
+            + agent
         )
         return [SANDBOX_EXEC, "-p", profile, "/bin/bash", "-c", command]
     argv = ["bwrap", "--ro-bind", "/", "/", *_BWRAP_FLAGS]
@@ -850,6 +877,7 @@ def sandboxed_command_argv(command: str, work_dir: Path) -> list[str]:
     elif layout is not None:
         binds += [layout.git_dir, layout.common_dir / "objects"]
         protected += [layout.work / ".git", *(layout.git_dir / n for n in ("commondir", "gitdir", "config.worktree"))]
+        protected += [layout.common_dir / "objects" / "info", layout.common_dir / "objects" / "pack"]
         own = layout.own_ref
         if own is not None:
             if own.parent == layout.common_dir / "refs" / "heads":
@@ -859,9 +887,7 @@ def sandboxed_command_argv(command: str, work_dir: Path) -> list[str]:
                     "use a namespaced branch for the worktree"
                 )
             logs = layout.common_dir / "logs" / "refs" / "heads" / (layout.branch or "")
-            binds += [own.parent]
-            logs.parent.mkdir(parents=True, exist_ok=True)
-            binds += [logs.parent]
+            binds += [own.parent, logs.parent]
     for path in dict.fromkeys(p.resolve() for p in binds):
         argv += ["--bind", str(path), str(path)]
     for path in protected:
@@ -887,10 +913,10 @@ def _claude_sandbox_filesystem(project_dir: Path) -> dict:
     if layout is not None and layout.linked:
         deny += git_deny_write_paths(layout)
         objects = layout.common_dir / "objects"
-        deny.append(objects / "info")
-        pack = objects / "pack"
-        if pack.is_dir():
-            deny += list(pack.iterdir())
+        # `info` (alternates would repoint the object store) and `pack` (a forged
+        # pack shadows existing objects: git reads packs before loose objects);
+        # a commit writes loose objects only.
+        deny += [objects / "info", objects / "pack"]
     elif layout is not None:
         deny.append(layout.git_dir)
     return {
@@ -1033,7 +1059,7 @@ def build_worker_options(
 
     return ClaudeAgentOptions(
         system_prompt=WORKER_SYSTEM_PROMPT,
-        cwd=str(project_dir),
+        cwd=str(project_dir.resolve()),  # canonical: the hook refuses a path through a symlink
         # Empty list = SDK isolation mode: skip user/project/local settings,
         # which is where hooks (and other dev-machine config) live. Without
         # this, the user's SessionStart/Stop/UserPromptSubmit hooks fire in

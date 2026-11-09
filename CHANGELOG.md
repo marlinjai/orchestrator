@@ -37,18 +37,40 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
   ref, `HEAD`, `index`, `packed-refs`, `info`, hooks, config and other worktrees
   are not, and `<work>/.git` cannot be rewritten. On macOS the Mercury profile
   makes the object store create-only (an existing object cannot be overwritten or
-  deleted); the Claude CLI's sandbox takes deny lists only, so on the Claude path
-  an existing loose object can still be replaced (stated limit). On Linux the
-  refs namespace directory and the object store are writable as a whole, and a
-  worktree branch without a namespace (`feature` instead of `orchestrator/x`) is
-  refused.
-- **Credentials.** The Worker holds no usable git or gh credentials: forge,
-  cloud and registry tokens are removed from its environment, gh and git are
-  pointed at empty configuration (no credential helper, no askpass, no prompt),
-  credential files (`~/.ssh`, `~/.config/gh`, `~/.aws`, ...) are unreadable, and
-  `security`, `gh auth`, git credential commands are on the Bash denylist (which
-  the Claude Worker's hook now applies; the unused `denied_bash` parameter is
-  gone). A read of a private repository with no credentials fails.
+  deleted); on both macOS paths `objects/pack` and `objects/info` are not
+  writable (a forged pack would shadow existing objects, `alternates` would
+  repoint the store). On Linux the refs namespace directory and the object store
+  are writable as a whole (bubblewrap binds directories), with `objects/pack` and
+  `objects/info` read-only, and a worktree branch without a namespace (`feature`
+  instead of `orchestrator/x`) is refused. Stated limits: the Claude CLI's
+  sandbox takes deny lists only, so on the Claude path the deny list covers the
+  refs and worktrees that exist when the Worker starts (refs and worktrees of a
+  parallel Worker created later, and new branch names, are not covered) and an
+  existing loose object can still be replaced; on every path a Worker can create
+  NEW loose objects with any content (inert unless something references them,
+  but a name it can predict is shadowed); the Worker's own admin dir, including
+  its `HEAD`, is writable, so the orchestrator must not run git write operations
+  in a Worker's worktree afterwards without checking `HEAD`. Git flows that no
+  longer work inside the sandbox (the Worker is told): `git stash`, `tag`, new
+  branches, `fetch`, `gc`/`pack-refs`/`repack`, `submodule`, `config --local`,
+  `worktree add/prune`; commit, amend, rebase and detached HEAD still work.
+- **Credentials.** Under its default routes the Worker holds no usable git or gh
+  credentials: forge, cloud and registry tokens are removed from its environment,
+  gh and git are pointed at empty configuration (no credential helper, no
+  askpass, no prompt), credential files (`~/.ssh`, `~/.config/gh`, `~/.aws`,
+  `~/.gitconfig`, ...) are unreadable, and `security`, `gh auth`, git credential
+  commands are on the Bash denylist. This is not a boundary against an
+  adversarial Worker on the Claude path (the denylist is a pattern list; the
+  keychain daemon and the launchd-managed ssh-agent socket stay reachable
+  there; the Mercury profile denies both). A read of a private repository with
+  no credentials fails.
+- **The orchestrator's Bash denylist now applies to the Claude Worker** (it was
+  promised in the system prompt and never enforced; the unused `denied_bash`
+  parameter is gone): `rm -rf`, `git reset --hard`, force push, `npm`/`pnpm
+  publish`, `curl` to `api.*`, `gh pr` write actions, `terraform apply` and
+  destructive SQL are refused for the Claude Worker as they already were for the
+  Mercury adapter. `rm -rf node_modules` is among them. The Claude Worker's cwd
+  is now the canonical (symlink-free) path of its worktree.
   **The macOS keychain is NOT isolated on the Claude Worker path:** the Claude
   CLI's sandbox cannot deny the keychain daemon, so keychain metadata is
   readable from the Worker's Bash and an access request reaches the user as a

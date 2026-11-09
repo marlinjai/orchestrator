@@ -644,10 +644,15 @@ def test_command_sandbox_protects_the_git_dir_of_a_plain_repo_on_macos(tmp_path:
     and config stay read-only, while a commit still works."""
     import subprocess
 
+    from orchestrator.worker import worker_credential_env
+
     work = _git_repo(tmp_path / "work")
+    # the Worker's own git environment: its global config is the empty one, so git does
+    # not read the (read-denied) ~/.gitconfig
+    env = {**os.environ, **worker_credential_env(tmp_path / "worker-env")}
 
     def run(cmd: str):
-        return subprocess.run(sandboxed_command_argv(cmd, work), cwd=work, capture_output=True, text=True)
+        return subprocess.run(sandboxed_command_argv(cmd, work), cwd=work, env=env, capture_output=True, text=True)
 
     assert run("mv .git .g").returncode != 0 and (work / ".git").is_dir()
     assert run("echo planted > .git/hooks/pre-commit").returncode != 0
@@ -814,3 +819,59 @@ def test_apply_env_contract_removes_forge_and_cloud_credentials_from_the_worker_
     removed = apply_env_contract()
     for name in ("GH_TOKEN", "GITHUB_TOKEN", "SSH_AUTH_SOCK", "NPM_TOKEN", "AWS_SECRET_ACCESS_KEY"):
         assert name in removed and name not in os.environ
+
+
+def test_macos_profile_denies_forged_packs_the_ssh_agent_socket_and_the_global_gitconfig(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
+    monkeypatch.setattr("orchestrator.worker.sys.platform", "darwin")
+    monkeypatch.setattr("orchestrator.worker.os.path.exists", lambda _p: True)
+    base, work = _linked_worktree(tmp_path)
+    profile = sandboxed_command_argv("true", work)[2]
+    common = (base / ".git").resolve()
+    assert f'(subpath "{common / "objects" / "pack"}")' in profile.split("file-write-unlink ")[-1]
+    assert "com\\.apple\\.launchd" in profile and "(deny network-outbound (remote unix-socket" in profile
+    assert f'(subpath "{Path.home() / ".gitconfig"}")' in profile.split("(deny file-read* ")[-1]
+
+
+def test_linux_argv_protects_the_alternates_dir_and_creates_the_own_ref_dirs_on_the_host(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
+    import shutil
+
+    monkeypatch.setattr("orchestrator.worker.sys.platform", "linux")
+    monkeypatch.setattr("orchestrator.worker.require_sandbox_platform", lambda **_k: None)
+    base, work = _linked_worktree(tmp_path)
+    common = (base / ".git").resolve()
+    shutil.rmtree(common / "refs" / "heads" / "orchestrator")  # a branch that lives only in packed-refs
+    argv = sandboxed_command_argv("true", work)
+    ro = [argv[i + 2] for i, a in enumerate(argv) if a == "--ro-bind"]
+    assert str(common / "objects" / "info") in ro and str(common / "objects" / "pack") in ro
+    assert (common / "refs" / "heads" / "orchestrator").is_dir()
+
+
+def test_the_worktree_branch_is_read_fresh_not_cached(tmp_path: Path):
+    import subprocess
+
+    from orchestrator.worker import _git_layout
+
+    _base, work = _linked_worktree(tmp_path)
+    assert _git_layout(work.resolve()).branch == "orchestrator/t"
+    subprocess.run(["git", "-C", str(work), "switch", "-q", "-c", "orchestrator/other"], check=True)
+    assert _git_layout(work.resolve()).branch == "orchestrator/other"
+
+
+def test_a_profile_path_with_a_quote_is_refused_not_mangled(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
+    monkeypatch.setattr("orchestrator.worker.sys.platform", "darwin")
+    monkeypatch.setattr("orchestrator.worker.os.path.exists", lambda _p: True)
+    work = tmp_path / 'wo"rk'
+    work.mkdir()
+    with pytest.raises(ConfinementUnavailableError, match="quote"):
+        sandboxed_command_argv("true", work)
+
+
+def test_the_worker_starts_in_the_canonical_directory(tmp_path: Path):
+    """The hook refuses a path through a symlink, so a Worker whose cwd is a
+    symlinked path would be refused on its first file-tool call."""
+    real = tmp_path / "real"
+    real.mkdir()
+    link = tmp_path / "link"
+    link.symlink_to(real, target_is_directory=True)
+    options = build_worker_options(state_path=tmp_path / "s.json", project_dir=link)
+    assert options.cwd == str(real.resolve())
