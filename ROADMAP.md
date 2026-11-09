@@ -126,6 +126,7 @@ Living tracker for orchestrator work. Read top to bottom: shipped at the top, in
 - Wired into `orchestrator.py` escalate branch; `autonomy_stats` in `state.json`; `orchestrator marlin-proxy review` CLI; `personas/marlin.md` grounded in mined transcript patterns.
 - Defaults to `mode=off`. Rollout: off -> shadow (collect agreement data) -> live on safe categories -> Phase 4 self-improvement.
 - Plan: `docs/plans/2026-05-27-marlin-proxy.md` (in-progress).
+- [ ] Parked by Marlin (2026-11-09, the orchestrator is not in use): before the next autonomous run, build and prove the separate Worker identity (dedicated `orch-worker` Colima VM, egress filter, per-task container, host Claude proxy with the Console key, git bundle handback, then the 8 proof groups); until then Workers do not run, and the shared memory note `project_orchestrator_worker_unconfined.md` stays. Key ready: Infisical Dotfiles, prod, `/orchestrator-worker`, expires 2027-02-09 (rotate if building after that). See `docs/plans/2026-11-09-separate-worker-identity.md`. (2026-11-09)
 - [ ] Continue the Marlin Proxy rollout past Phase 0 (off -> shadow -> live on safe categories -> self-improvement); see `docs/plans/2026-05-27-marlin-proxy.md`. (2026-09-10)
 
 ### M9 sprint mode (orchestrator side of the Agentic OS milestone M9)
