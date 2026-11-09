@@ -7,7 +7,7 @@ summary: >
   Today a Worker runs as Marlin's macOS user, and on the Claude path no in-process sandbox keeps it from his keychain.
   This plan runs every Worker in a throwaway container inside a dedicated Colima VM that mounts nothing of Marlin's
   home, cannot reach the Mac's localhost, the tailnet or private networks, and never holds a credential: Claude
-  requests go through a host-side proxy that adds the token. Results come back as a git bundle checked on the host,
+  requests go through a host-side proxy that adds a revocable Console API key from a capped workspace. Results come back as a git bundle checked on the host,
   and no Worker-written code ever runs on the Mac. Revised after an independent review that verified Colima's default
   profile mounts Marlin's whole home writable into its VM.
 ---
@@ -55,20 +55,31 @@ does not depend on Marlin clicking Deny needs a different identity with no keych
    (writable) and nothing else of the home folder; Docker with `userns-remap` so container root is unprivileged in the
    VM; nothing else runs in this VM. The `default` profile is never used for Workers. The orchestrator refuses to start
    a Worker unless it can verify, from inside the VM, that `/Users/marlinjai` (other than the clones path) is absent.
-2. **Egress filter in the VM** (`DOCKER-USER` chain or nftables): drop traffic to 192.168.5.0/24 (host.lima.internal),
-   100.64.0.0/10 (tailnet), RFC 1918 ranges, link-local and the VM's own services; allow public internet for package
-   installs; allow the Claude proxy (item 4) as the only path to Anthropic.
+2. **Egress filter in the VM** (`DOCKER-USER` chain or nftables, IPv4 and IPv6, or IPv6 disabled): drop
+   192.168.5.0/24 except the single Claude proxy port on 192.168.5.2 (item 4), 100.64.0.0/10 (tailnet), RFC 1918,
+   link-local and the VM's own services. Containers get **no direct internet**: direct 443 and port 53 are dropped;
+   outbound HTTPS goes only through a forward proxy in the VM that allows the Claude proxy and the package registries
+   by hostname (npm, PyPI, crates as needed). Rules are re-applied and re-tested on every VM start; the runner refuses
+   to start a Worker if the check fails. Lima's automatic port forwards are disabled (`portForwards` ignore all).
 3. **Container per task run:** `--rm`, read-only root filesystem, `--cap-drop ALL`, `--security-opt
    no-new-privileges`, `--pids-limit`, memory and CPU limits, a size-capped tmpfs for `/tmp` and caches, a non-root
-   user, image run by digest with `--pull=never`. Mounted: only the task's standalone clone at `/work`. No Docker
-   socket, no SSH agent, no host paths.
-4. **The Worker never holds a credential.** Claude requests go to a small proxy outside the container (a sidecar in the
-   same VM, or on the host listening only on the VM-facing interface). The Worker sees `ANTHROPIC_BASE_URL=<proxy>`
-   and a dummy `ANTHROPIC_AUTH_TOKEN`; the proxy replaces the auth, allows only the model-request endpoints, and holds
-   the real token, read from Infisical at start through the piped pattern, never printed and never in a container's
-   environment. To verify before building: that the Agent SDK honours `ANTHROPIC_BASE_URL`, that a dummy auth token
-   outranks the subscription token as documented for Claude Code, and that Anthropic's Agent SDK terms allow this use
-   of a subscription token for Marlin's own agents.
+   user, image run by digest with `--pull=never`. Mounted: only that task's own directory
+   (`worker-clones/<task>`, owned by the remapped user id) at `/work`, never the whole clones folder, so one task cannot
+   see another's clone; the runner refuses `--userns=host`. No Docker socket, no SSH agent, no host paths.
+4. **The Worker never holds a credential; the proxy bounds what it can do.** A small proxy on the Mac listens on
+   `127.0.0.1:<port>`; the VM reaches it as `192.168.5.2:<port>`, the only host port the filter allows. It holds an
+   **Anthropic Console API key** from a dedicated Console workspace with a spend limit (documented auth for Agent SDK
+   agents, revocable and rotatable at once), read from Infisical at start through the piped pattern, never printed and
+   never inside the VM. The Worker sees `ANTHROPIC_BASE_URL=http://192.168.5.2:<port>` and `ANTHROPIC_API_KEY=<run
+   secret>`, a random value minted per run that the proxy maps to one task and invalidates when the run ends. The proxy:
+   allows only `POST /v1/messages` (and `/v1/messages/count_tokens` if the SDK uses it); refuses every other path and
+   method, absolute-URI and `CONNECT` requests and any Worker-set Host; forwards only to a hard-coded
+   `https://api.anthropic.com`; strips incoming auth and adds the real key; enforces an allowed model list, a
+   `max_tokens` ceiling, a body-size cap and only the `anthropic-beta` values the SDK needs; counts tokens from each
+   response's `usage` against a per-run budget, caps request rate and concurrency, and stops the run on a breach. The
+   workspace spend limit is the final backstop. `update_state` is served the same way, on its own allowed port with
+   per-task authentication. Residual risk, stated: a container escape to VM root can rewrite the filter and reach the
+   Mac's other localhost services (including the automation Chrome on 9222 and 9224); the VM is the real boundary.
 5. **No other credentials:** no `GH_TOKEN`, no git credentials, no Infisical identity, no secrets-proxy tool inside the
    container; the in-process layers of pull request 44 stay on as defence in depth. Goals that need real secrets are
    not run in this mode.
@@ -84,6 +95,9 @@ does not depend on Marlin clicking Deny needs a different identity with no keych
    which secrets they receive.
 8. **State:** stays on the host; the Worker reports through `update_state`, served on the host side for the bound task
    only.
+9. **The VM is not trusted between runs:** image digests are checked on the host; the VM is recreated regularly; only
+   the orchestrator uses `colima ssh` and the `orch-worker` Docker socket; the clones folder is excluded from Spotlight
+   and Time Machine.
 
 ## Effects on worktree and tools
 
@@ -102,33 +116,40 @@ no probe touches the macOS keychain.
 2. From a Worker container: writes outside `/work` and `/tmp` fail; the Docker socket, `~/.ssh`, `~/.config` are
    absent; 192.168.5.2 ports 9222, 9224 and other host ports, 100.64/10 (hermes, secrets proxy) and sibling
    containers are unreachable; public HTTPS works.
-3. The Claude token is absent from the container environment and from `docker inspect` (checked by name and by a keyed
-   fingerprint comparison, never by printing); model requests work through the proxy; other Anthropic endpoints are
-   refused by the proxy.
+3. The Console API key is absent from the VM, the container environment and `docker inspect` (checked by name and
+   by a keyed fingerprint comparison, never by printing); model requests work through the proxy with the run secret.
 4. No GitHub credentials: an authenticated `git ls-remote` against a private repository fails (exit status only).
 5. Handback: canaries for a planted hook, `core.fsmonitor`, `.git/config`, `objects/info/alternates` and a symlink to
    a host path stay inert; after the fetch, `git fsck` passes and only `refs/remotes/worker/<task>` changed.
-6. Controls: the same probes against today's in-host Worker and against the `default` profile show the escapes.
+6. Proxy: refused paths, methods, absolute-URI and `CONNECT`; every cap trips; a run secret is refused after its run
+   ends; requests never reach a host other than the hard-coded upstream.
+7. Egress: a non-listed HTTPS host, direct 443 and port 53, IPv6 and the host gateway's other ports are refused; the
+   registries and the Claude proxy work; the rules are in place after a VM restart; no Lima port forward appears on the
+   Mac's localhost; one task's container cannot see another task's clone.
+8. Controls: the same probes against today's in-host Worker and against the `default` profile show the escapes.
 
 ## Rollback
 
 Opt-in flag (`--isolation container`) first, default only after the proofs pass; the in-host mode stays available only
 with an explicit flag and a warning, and Workers stay stopped in the meantime. Removing the container mode is deleting
-the flag path and the `orch-worker` profile; no data migration. Token revocation must be tested (where and how a
-`setup-token` token is revoked) before the token is relied on; until then the proxy can simply stop using it.
+the flag path and the `orch-worker` profile; no data migration. Revocation drill, tested before Workers run: revoke the key in the
+Console; the proxy receives 401 and the run stops; rotate by creating a new key and updating Infisical.
 
 ## What needs Marlin
 
-- Approve this plan.
-- Authorize the Worker's Claude token once: `claude setup-token` needs his consent in a browser on his Claude account
-  (genuine human authorization). He never sees or pastes the value: the orchestrator runs the command so that the
-  printed token is captured into a variable and written straight to Infisical through the API via standard input,
-  verified by a keyed fingerprint. Because the documentation offers no headless mode, the capture is tested first in a
-  way that cannot print (output to a pipe only, the variable checked by length class).
+- Approve this plan, including the cost: Workers then bill per token on the Console API key instead of using his
+  subscription (the orchestrator chose the subscription on purpose to avoid API spend), bounded by the workspace spend
+  limit he sets.
+- Create the dedicated Console workspace with a spend limit and one API key (Console actions on his account; the
+  Admin API cannot create keys), and put the key into Infisical himself in the Infisical web interface under a name the
+  plan gives; it never goes through a chat or a terminal the orchestrator reads.
+- Considered and not chosen: a `claude setup-token` subscription token (one-year life, model requests only,
+  revocation not documented, and Consumer Terms 3.7 limit automated access to API keys unless otherwise explicitly
+  permitted; the Agent SDK documentation names the API key as its auth).
 
 ## Done when
 
-- [ ] Plan decided; the three open checks in item 4 verified.
+- [ ] Plan decided; the synthetic lab confirms the SDK honours `ANTHROPIC_BASE_URL` with the run secret.
 - [ ] `orch-worker` profile, egress filter, container runner, Claude proxy, bundle handback implemented with tests.
-- [ ] Proof list passes in a real run, with controls; token revocation path tested.
+- [ ] Proof list passes in a real run, with controls; the revocation drill passes.
 - [ ] Documentation and the security plan updated; the "do not run the orchestrator" memory note lifted only then.
