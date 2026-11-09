@@ -535,15 +535,25 @@ def test_bash_sandbox_on_linux_fails_when_user_namespaces_are_forbidden(monkeypa
         build_bash_sandbox()
 
 
+def hook_for(root: Path):
+    return build_confinement_hook(root)
+
+
 async def test_confinement_fails_closed_on_a_path_it_cannot_resolve(tmp_path: Path):
     """A failing hook is non-blocking in the CLI, so an exception inside the check
     must become a refusal, not an allow."""
     hook = build_confinement_hook(tmp_path)
     nul = await hook(_tool_call("Write", file_path=str(tmp_path / "a\0b")), "t1", {})
     assert _denied(nul) and nul["continue_"] is False
-    loop = tmp_path / "loop"
+    # A symlink loop: Python 3.11 raises RuntimeError from resolve() (refused),
+    # 3.13 resolves it leniently to a path that is still inside the root (the
+    # tool itself then fails with ELOOP). Either way it cannot reach outside.
+    root = tmp_path / "worktree-a"
+    root.mkdir()
+    loop = root / "loop"
     loop.symlink_to(loop)
-    assert _denied(await hook(_tool_call("Write", file_path=str(loop / "x")), "t1", {}))
+    looped = await hook_for(root)(_tool_call("Write", file_path=str(loop / "x")), "t1", {})
+    assert _denied(looped) or looped == {}
 
 
 async def test_confinement_refuses_a_file_with_other_hard_links(tmp_path: Path):
