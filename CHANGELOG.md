@@ -54,6 +54,17 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
   longer work inside the sandbox (the Worker is told): `git stash`, `tag`, new
   branches, `fetch`, `gc`/`pack-refs`/`repack`, `submodule`, `config --local`,
   `worktree add/prune`; commit, amend, rebase and detached HEAD still work.
+- **UNRESOLVED on the Claude Worker path: a Worker's Bash can overwrite an
+  existing loose object of the shared git object store.** The Claude CLI's
+  sandbox takes deny lists only and cannot make the store create-only. Git does
+  not verify an object's hash when it reads it normally, so a blob replaced under
+  its existing name can later be checked out in the main checkout (or by any other
+  worktree) with the attacker's content: a poisoning of the main checkout that no
+  review of the Worker's own branch would show. Closed on the Mercury path on
+  macOS (create-only) and for forged packs on both macOS paths; open on the Claude
+  path (proved by `scripts/prove_confinement.py`, reported there as a known
+  limit). Until a Worker runs under a separate OS identity (plan #45), Claude
+  Workers must not be run against a repository whose main checkout matters.
 - **Credentials.** Under its default routes the Worker holds no usable git or gh
   credentials: forge, cloud and registry tokens are removed from its environment,
   gh and git are pointed at empty configuration (no credential helper, no
