@@ -11,12 +11,15 @@ What the Claude SDK gives the Claude adapter for free is built here explicitly:
   ``run_command`` and ``update_state`` (the same schema and handler as the
   Claude Worker's MCP tool), all confined to the attempt's work dir.
 - **Confinement**: every file tool resolves its path through
-  ``worker.path_outside_root``, the one check the Claude adapter's
-  ``can_use_tool`` guard also uses. ``run_command`` runs with ``cwd`` at the work
+  ``worker.path_outside_root``, the one check the Claude adapter's PreToolUse
+  confinement hook also uses. ``run_command`` runs with ``cwd`` at the work
   dir, the orchestrator's bash denylist, a timeout, capped output and an env
-  scrubbed of provider and proxy credentials. Like the Claude guard it cannot
-  stop a shell command from writing outside the work dir; the git reconcile and
-  the held-out verifier are the backstops.
+  scrubbed of provider and proxy credentials, and runs under the same OS write
+  sandbox as the Claude Worker's Bash (``worker.sandboxed_command_argv``:
+  Seatbelt on macOS, bubblewrap on Linux; writes only in the work dir, its git
+  directories and temp dirs). Where no sandbox can run, the command is
+  refused, never run unconfined. The git reconcile and the held-out verifier
+  remain the backstops.
 - **Telemetry**: the provider forward streams, so each model call's
   time-to-first-token, generation time, tool time and the provider-reported
   server latency are measured directly (``CallLatency``), which is what the E4
@@ -64,7 +67,10 @@ from orchestrator.tools import (
 )
 from orchestrator.worker import (
     WORKER_SYSTEM_PROMPT,
+    ConfinementUnavailableError,
     path_outside_root,
+    sandboxed_command_argv,
+    worker_credential_env,
 )
 
 logger = logging.getLogger(__name__)
@@ -969,14 +975,25 @@ class OpenAICompatWorkerSession:
         if not allowed:
             return f"refused by the orchestrator's command denylist: {reason}"
         timeout = min(int(args.get("timeout_s") or self._command_timeout_s), self._command_timeout_s)
+        # The command runs under the OS write sandbox (the same policy as the
+        # Claude Worker's Bash). Where none can run, it is REFUSED, never run
+        # unconfined: a shell can write anywhere the user can.
+        try:
+            argv = sandboxed_command_argv(command, self._root)
+        except ConfinementUnavailableError as e:
+            logger.error("run_command refused, no OS sandbox available: %s", e)
+            return f"refused: run_command needs the OS write sandbox and it is unavailable here ({e})"
         env = {k: v for k, v in os.environ.items() if k in _COMMAND_ENV_ALLOWLIST}
+        # No usable git or gh credentials in the command's world: empty gh and git
+        # configuration (the Keychain-backed helpers are not configured).
+        env.update(worker_credential_env(self.audit_path.parent / "worker-env", scrub_subprocess_env=False))
         # Output goes to disk, not a pipe: a model-chosen command (`yes`, `cat` on
         # a huge file) can otherwise buffer gigabytes in this process before the
         # timeout fires, since capture_output holds the whole thing in memory.
         with tempfile.TemporaryFile() as out:
             try:
                 proc = subprocess.run(
-                    ["/bin/bash", "-c", command],
+                    argv,
                     cwd=self._root,
                     env=env,
                     stdout=out,

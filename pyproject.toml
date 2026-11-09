@@ -17,7 +17,7 @@ classifiers = [
     "Topic :: Software Development",
 ]
 dependencies = [
-    "claude-agent-sdk>=0.1.0",
+    "claude-agent-sdk>=0.2.121",  # first release patched for the critical advisory; also the first the Worker confinement (hooks, sandbox) was proved on
     "pydantic>=2.6",
     "typer>=0.12",
     "rich>=13.7",

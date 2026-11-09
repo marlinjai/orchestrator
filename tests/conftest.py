@@ -33,3 +33,27 @@ def _isolate_machine_env(monkeypatch):
     # Tests that need a config point this at their own tmp dir.
     monkeypatch.setenv("ORCHESTRATOR_CONFIG_HOME", "/nonexistent/orchestrator-tests/config")
     monkeypatch.delenv("ORCHESTRATOR_EXECUTORS_FILE", raising=False)
+
+
+@pytest.fixture(autouse=True)
+def _no_bash_sandbox_in_tests(monkeypatch):
+    """Many tests start the real Claude CLI process through the SDK (without
+    sending a model request). With the Bash sandbox required and a runner that
+    lacks bubblewrap and socat (a bare Linux CI image), that process refuses to
+    start (`failIfUnavailable`), which is exactly what it should do in
+    production and exactly what a hermetic unit test must not depend on. So
+    `build_worker_options` gets a disabled sandbox here. The real settings and
+    the platform checks are unit-tested through the real `build_bash_sandbox`
+    in test_worker.py, and the sandbox itself is proved against the real SDK by
+    scripts/prove_confinement.py."""
+    from orchestrator import worker
+
+    monkeypatch.setattr(worker, "build_bash_sandbox", lambda *_a, **_k: {"enabled": False})
+    # The same for the Mercury adapter's run_command: tests run plain bash so
+    # they do not need sandbox-exec or bubblewrap. The real argv builder and the
+    # refusal are unit-tested in test_worker.py / test_openai_compat_worker.py.
+    from orchestrator.adapters import openai_compat_worker
+
+    monkeypatch.setattr(
+        openai_compat_worker, "sandboxed_command_argv", lambda command, work_dir: ["/bin/bash", "-c", command]
+    )

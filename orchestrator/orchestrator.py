@@ -797,7 +797,6 @@ async def run_orchestrator(cfg: OrchestratorConfig) -> None:
         options = build_worker_options(
             state_path=state_path,
             project_dir=work_dir,
-            denied_bash=[],
             extras=worker_extras,
             auth_mode=auth_mode,
             allowed_mcp_servers=policy.allowed_mcp_servers,

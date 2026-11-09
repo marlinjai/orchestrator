@@ -39,6 +39,18 @@ DENIED_BASH_PATTERNS: list[tuple[re.Pattern, str]] = [
         "gh issue write actions are denied",
     ),
     (
+        re.compile(r"\bsecurity\s+(find-|dump-|export\b|list-keychains|unlock-|delete-)"),
+        "reading the macOS keychain is denied",
+    ),
+    (
+        re.compile(r"credential-osxkeychain|\bgit\s+credential\b"),
+        "git credential helpers are denied",
+    ),
+    (
+        re.compile(r"\bgh\s+(auth|api|secret)\b"),
+        "gh auth, api and secret commands are denied",
+    ),
+    (
         re.compile(r"\bterraform\s+(apply|destroy)\b"),
         "terraform apply/destroy is denied",
     ),

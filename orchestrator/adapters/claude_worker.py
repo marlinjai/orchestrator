@@ -3,8 +3,8 @@
 Wraps the existing, proven machinery (``build_worker_options`` hook isolation,
 MCP ceiling, env contract, ``run_worker_turn`` streaming) in the provider-neutral
 ``WorkerAdapter``/``WorkerSession`` shape. The options arrive fully built, so
-every Worker safety rail (hook isolation, the worktree path guard, the MCP
-ceiling) applies exactly as it did before the port existed.
+every Worker safety rail (hook isolation, the worktree confinement hook and
+Bash sandbox, the MCP ceiling) applies exactly as it did before the port existed.
 
 Two stream facts shape the accounting here, both verified against real Claude
 Code transcripts:
