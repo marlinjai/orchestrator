@@ -34,6 +34,7 @@ from orchestrator.guardrails import (
     usage_cap_hit,
     wall_clock_cap_hit,
 )
+from orchestrator.lockcheck import lock_drift_warning
 from orchestrator.handover import (
     HANDOVER_FILE,
     remove_untracked_handover,
@@ -762,6 +763,10 @@ async def run_orchestrator(cfg: OrchestratorConfig) -> None:
         # ROADMAP. Never logs values.
         scrubbed = apply_env_contract(auth_mode)
         scrub_label = f" | env scrubbed: {', '.join(scrubbed)}" if scrubbed else ""
+        drift = lock_drift_warning()
+        if drift:
+            logger.warning(drift)
+            local_console.print(f"[yellow]{drift}[/yellow]")
         local_console.print(
             f"[dim]auth mode: {auth_mode} | cost cap: {cap_label}{scrub_label}[/dim]"
         )
