@@ -366,6 +366,7 @@ def test_worker_options_wire_the_confinement(tmp_path: Path, monkeypatch: pytest
     # conftest swaps in a disabled sandbox so tests that start the CLI run
     # anywhere; this test wants the real settings.
     monkeypatch.setattr("orchestrator.worker.sys.platform", "darwin")
+    monkeypatch.setattr("orchestrator.worker.os.path.exists", lambda _p: True)
     monkeypatch.setattr("orchestrator.worker.build_bash_sandbox", build_bash_sandbox)
     options = build_worker_options(
         state_path=tmp_path / "s.json",
@@ -875,3 +876,15 @@ def test_the_worker_starts_in_the_canonical_directory(tmp_path: Path):
     link.symlink_to(real, target_is_directory=True)
     options = build_worker_options(state_path=tmp_path / "s.json", project_dir=link)
     assert options.cwd == str(real.resolve())
+
+
+def test_the_subprocess_env_scrub_is_set_only_where_the_sandbox_is_on(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
+    """The CLI exits at start without bubblewrap when the scrub is requested, so a
+    Worker built without a sandbox (the hermetic test setup) must not request it."""
+    off = build_worker_options(state_path=tmp_path / "s.json", project_dir=tmp_path)
+    assert off.sandbox == {"enabled": False} and "CLAUDE_CODE_SUBPROCESS_ENV_SCRUB" not in off.env
+    monkeypatch.setattr("orchestrator.worker.sys.platform", "darwin")
+    monkeypatch.setattr("orchestrator.worker.os.path.exists", lambda _p: True)
+    monkeypatch.setattr("orchestrator.worker.build_bash_sandbox", build_bash_sandbox)
+    on = build_worker_options(state_path=tmp_path / "s.json", project_dir=tmp_path)
+    assert on.env["CLAUDE_CODE_SUBPROCESS_ENV_SCRUB"] == "1"

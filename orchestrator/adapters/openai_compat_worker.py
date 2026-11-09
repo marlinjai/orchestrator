@@ -986,7 +986,7 @@ class OpenAICompatWorkerSession:
         env = {k: v for k, v in os.environ.items() if k in _COMMAND_ENV_ALLOWLIST}
         # No usable git or gh credentials in the command's world: empty gh and git
         # configuration (the Keychain-backed helpers are not configured).
-        env.update(worker_credential_env(self.audit_path.parent / "worker-env"))
+        env.update(worker_credential_env(self.audit_path.parent / "worker-env", scrub_subprocess_env=False))
         # Output goes to disk, not a pipe: a model-chosen command (`yes`, `cat` on
         # a huge file) can otherwise buffer gigabytes in this process before the
         # timeout fires, since capture_output holds the whole thing in memory.

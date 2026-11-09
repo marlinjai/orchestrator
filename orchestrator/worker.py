@@ -80,7 +80,7 @@ WORKER_CREDENTIAL_ENV_DENYLIST: tuple[str, ...] = (
 )
 
 
-def worker_credential_env(private_dir: Path) -> dict[str, str]:
+def worker_credential_env(private_dir: Path, *, scrub_subprocess_env: bool = True) -> dict[str, str]:
     """Environment overrides under which a Worker's git and gh hold no usable
     credentials, for the Claude Worker's CLI (so its Bash inherits them) and the
     Mercury adapter's `run_command`.
@@ -109,7 +109,7 @@ def worker_credential_env(private_dir: Path) -> dict[str, str]:
         if out.returncode == 0 and out.stdout.strip():
             lines.append(f"\t{key} = {out.stdout.strip()}")
     gitconfig.write_text("[user]\n" + "\n".join(lines) + "\n" if lines else "")
-    return {
+    env = {
         "GH_CONFIG_DIR": str(gh_config),
         "GIT_CONFIG_GLOBAL": str(gitconfig),
         "GIT_CONFIG_NOSYSTEM": "1",
@@ -120,10 +120,14 @@ def worker_credential_env(private_dir: Path) -> dict[str, str]:
         "GIT_ASKPASS": "/usr/bin/false",
         "SSH_ASKPASS": "/usr/bin/false",
         "GCM_INTERACTIVE": "never",
-        # Claude Code strips its own credentials from the environment of the
-        # processes it starts for the Worker (Bash, hooks, MCP stdio servers).
-        "CLAUDE_CODE_SUBPROCESS_ENV_SCRUB": "1",
     }
+    if scrub_subprocess_env:
+        # Claude Code strips its own credentials from the environment of the
+        # processes it starts for the Worker (Bash, hooks, MCP stdio servers). It
+        # relies on the OS sandbox for this (on Linux the CLI exits at start
+        # without bubblewrap), so it is set only where the sandbox is on.
+        env["CLAUDE_CODE_SUBPROCESS_ENV_SCRUB"] = "1"
+    return env
 
 
 # Servers and tools that are ALWAYS present in a Worker and can never be removed
@@ -1057,6 +1061,7 @@ def build_worker_options(
     # this to run.log; logging here covers direct/library callers).
     logger.info("worker mcp servers (effective): %s", sorted(mcp_servers))
 
+    sandbox = build_bash_sandbox(project_dir)
     return ClaudeAgentOptions(
         system_prompt=WORKER_SYSTEM_PROMPT,
         cwd=str(project_dir.resolve()),  # canonical: the hook refuses a path through a symlink
@@ -1072,9 +1077,9 @@ def build_worker_options(
         # Confinement to the task worktree, two layers (see each builder): a
         # PreToolUse hook for Write/Edit/MultiEdit/NotebookEdit, and the OS
         # sandbox for Bash. Neither depends on `allowed_tools`.
-        env=worker_credential_env(state_path.parent / "worker-env"),
+        env=worker_credential_env(state_path.parent / "worker-env", scrub_subprocess_env=bool(sandbox.get("enabled"))),
         hooks={"PreToolUse": [HookMatcher(matcher=None, hooks=[build_confinement_hook(project_dir)])]},
-        sandbox=build_bash_sandbox(project_dir),
+        sandbox=sandbox,
     )
 
 
