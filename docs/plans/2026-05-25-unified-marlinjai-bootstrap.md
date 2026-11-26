@@ -21,6 +21,11 @@ phase_status:
     - SSH key upload scope: gh auth refresh -h github.com -s admin:public_key
 ---
 
+> [!info] Decision 2026-11-26: Lola Stories is archived
+> No further work for the `lola-contributor` profile, its Lola-only modules, the `Lola-Stories/bootstrap`
+> wrapper or open question 1 below. Shipped phases stay recorded as they are. Phases 4 and 5 stay open as
+> work on `marlinjai/bootstrap`; no module was removed.
+
 # Unified marlinjai/bootstrap
 
 ## Why this plan exists
